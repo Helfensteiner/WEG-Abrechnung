@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# Virtuelles Environment
+venv/
+.venv/
+env/
+.env/
+
+# Datenbank (enthält echte Personendaten!)
+*.db
+*.sqlite
+*.sqlite3
+hausverwaltung.db
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# PyInstaller (Build-Ausgabe)
+build/
+dist/
+*.spec
+
+# Betriebssystem
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Temporäre Dateien
+*.tmp
+*.bak
+~$*
+
+# Sensitive Daten
+*.xml.imported
+kontoauszug_backup/
+
+# Claude Code
+.claude/

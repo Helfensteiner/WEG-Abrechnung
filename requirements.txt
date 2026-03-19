@@ -1,0 +1,20 @@
+# Hausverwaltung – Python-Abhängigkeiten
+# Alle genutzten Pakete sind Python-Standardbibliothek (keine Installation nötig):
+#   tkinter, sqlite3, json, os, csv, re, datetime, pathlib
+#
+# Für zukünftige Features (bei Bedarf installieren):
+#
+# PDF-Export:
+# reportlab>=4.0
+#
+# CAMT.052 XML (bereits in stdlib: xml.etree.ElementTree)
+# (kein Paket nötig)
+#
+# Windows-EXE erstellen:
+# pyinstaller>=6.0
+#
+# E-Mail-Versand:
+# (smtplib ist in stdlib enthalten)
+#
+# Pytest für Tests:
+# pytest>=8.0
