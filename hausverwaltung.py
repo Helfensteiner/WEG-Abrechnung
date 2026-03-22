@@ -43,7 +43,7 @@ from pathlib import Path
 #            Keywords, Füllwörter-Filterung, dreistufige Matching-Strategie)
 # ───────────────────────────────────────────────────────────────────────────────
 
-APP_VERSION = "0.7.2"
+APP_VERSION = "0.8.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 
@@ -376,6 +376,10 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
         "ALTER TABLE benutzer ADD COLUMN passwort_skip INTEGER DEFAULT 0",
         "ALTER TABLE kontoauszug ADD COLUMN ist_neu INTEGER DEFAULT 1",
         "ALTER TABLE rollen ADD COLUMN passwort_skip INTEGER DEFAULT 0",
+        "ALTER TABLE mieter ADD COLUMN personen INTEGER DEFAULT 1",
+        "ALTER TABLE mieter ADD COLUMN spuelmaschinen INTEGER DEFAULT 0",
+        "ALTER TABLE mieter ADD COLUMN waschmaschinen INTEGER DEFAULT 1",
+        "ALTER TABLE mieter ADD COLUMN trockner_wasserkuehlung INTEGER DEFAULT 0",
     ]:
         try:
             c.execute(sql)
@@ -448,6 +452,12 @@ def _insert_demo(c):
 
 # ── Hilfsfunktionen ──────────────────────────────────────────────────────────
 
+def parse_float(val) -> float:
+    """Konvertiert Zahl-Strings mit deutschem Komma ('334,69') oder Punkt ('334.69') zu float."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    return float(str(val).replace(",", "."))
+
 def fmt_euro(val):
     try:
         return f"{float(val):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -461,6 +471,20 @@ def fmt_date(val):
         return datetime.strptime(str(val)[:10], "%Y-%m-%d").strftime("%d.%m.%Y")
     except:
         return str(val)
+
+def parse_datum(s: str) -> str:
+    """Normalisiert Datumseingabe auf ISO JJJJ-MM-TT.
+    Akzeptiert: JJJJ-MM-TT, TT.MM.JJJJ, TT/MM/JJJJ
+    """
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
+        return s
+    m = re.match(r'^(\d{1,2})[./](\d{1,2})[./](\d{4})$', s)
+    if m:
+        return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+    return s
 
 # ── Basis-Widget-Helfer ───────────────────────────────────────────────────────
 
@@ -698,6 +722,9 @@ class BaseDialog(tk.Toplevel):
         # Save size on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Enter-Taste speichert
+        self.bind("<Return>", lambda e: self._on_save())
+
     def _on_body_configure(self, event=None):
         self._canvas.configure(scrollregion=self._canvas.bbox("all"))
 
@@ -906,9 +933,10 @@ class MieterPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("INSERT INTO mieter (vorname,name,strasse,plz,ort,land,telefon,email,iban,wohnung_id,einzug,kaltmiete,nebenkosten_vorauszahlung,kaution,notizen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (v["vorname"], v["name"], v["strasse"], v.get("plz",""), v["ort"], v["land"], v["telefon"], v["email"], v["iban"],
-                 v["wohnung_id"], v["einzug"], v["kaltmiete"] or 0, v["nk"] or 0, v["kaution"] or 0, v["notizen"]))
+            conn.execute("INSERT INTO mieter (vorname,name,strasse,plz,ort,land,telefon,email,iban,wohnung_id,einzug,kaltmiete,nebenkosten_vorauszahlung,kaution,notizen,personen,spuelmaschinen,waschmaschinen,trockner_wasserkuehlung) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (v.get("vorname",""), v.get("name",""), v.get("strasse",""), v.get("plz",""), v.get("ort",""), v.get("land","Deutschland"), v.get("telefon",""), v.get("email",""), v.get("iban",""),
+                 v.get("wohnung_id"), v.get("einzug",""), float(v.get("kaltmiete") or 0), float(v.get("nk") or 0), float(v.get("kaution") or 0), v.get("notizen",""),
+                 int(v.get("personen") or 1), int(v.get("spuelmaschinen") or 0), int(v.get("waschmaschinen") or 1), int(v.get("trockner_wasserkuehlung") or 0)))
             conn.commit(); conn.close()
             self._load()
 
@@ -926,9 +954,10 @@ class MieterPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("UPDATE mieter SET vorname=?,name=?,strasse=?,plz=?,ort=?,land=?,telefon=?,email=?,iban=?,wohnung_id=?,einzug=?,kaltmiete=?,nebenkosten_vorauszahlung=?,kaution=?,notizen=? WHERE id=?",
-                (v["vorname"], v["name"], v["strasse"], v.get("plz",""), v["ort"], v["land"], v["telefon"], v["email"], v["iban"],
-                 v["wohnung_id"], v["einzug"], v["kaltmiete"] or 0, v["nk"] or 0, v["kaution"] or 0, v["notizen"], mid))
+            conn.execute("UPDATE mieter SET vorname=?,name=?,strasse=?,plz=?,ort=?,land=?,telefon=?,email=?,iban=?,wohnung_id=?,einzug=?,kaltmiete=?,nebenkosten_vorauszahlung=?,kaution=?,notizen=?,personen=?,spuelmaschinen=?,waschmaschinen=?,trockner_wasserkuehlung=? WHERE id=?",
+                (v.get("vorname",""), v.get("name",""), v.get("strasse",""), v.get("plz",""), v.get("ort",""), v.get("land","Deutschland"), v.get("telefon",""), v.get("email",""), v.get("iban",""),
+                 v.get("wohnung_id"), v.get("einzug",""), float(v.get("kaltmiete") or 0), float(v.get("nk") or 0), float(v.get("kaution") or 0), v.get("notizen",""),
+                 int(v.get("personen") or 1), int(v.get("spuelmaschinen") or 0), int(v.get("waschmaschinen") or 1), int(v.get("trockner_wasserkuehlung") or 0), mid))
             conn.commit(); conn.close()
             self._load()
 
@@ -1110,6 +1139,21 @@ class MieterDialog(BaseDialog):
 
         self._add_field("Notizen", "notizen", r.get("notizen",""), widget_type="text")
 
+        # Wasserkosten-Stammdaten
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10,4))
+        tk.Label(self._body, text="Wasserkosten-Stammdaten", bg=BG_CARD, fg=TEXT,
+                 font=FONT_H3).pack(anchor="w", padx=20)
+        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
+        l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
+        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
+        self._add_field("Personen", "personen", r.get("personen", 1), row=l)
+        self._add_field("Spülmaschinen", "spuelmaschinen", r.get("spuelmaschinen", 0), row=ri)
+        two2 = tk.Frame(self._body, bg=BG_CARD); two2.pack(fill="x", padx=20); two2.columnconfigure((0,1), weight=1)
+        l2 = tk.Frame(two2, bg=BG_CARD); l2.grid(row=0, column=0, padx=(0,6), sticky="ew")
+        ri2 = tk.Frame(two2, bg=BG_CARD); ri2.grid(row=0, column=1, padx=(6,0), sticky="ew")
+        self._add_field("Waschmaschinen", "waschmaschinen", r.get("waschmaschinen", 1), row=l2)
+        self._add_field("Trockner (Wasserkühlung)", "trockner_wasserkuehlung", r.get("trockner_wasserkuehlung", 0), row=ri2)
+
     def _on_save(self):
         v = self._get_values()
         if not v.get("name"):
@@ -1121,6 +1165,10 @@ class MieterDialog(BaseDialog):
         for w in self._wohnung_list:
             if w["bezeichnung"] == woh_str:
                 v["wohnung_id"] = w["id"]; break
+
+        # Normalisiere Datum
+        if v.get("einzug"):
+            v["einzug"] = parse_datum(v["einzug"])
 
         self.result = v; self.destroy()
 
@@ -1153,7 +1201,7 @@ class EigentuemerPage(tk.Frame):
         for r in conn.execute("SELECT * FROM eigentuemer ORDER BY name"):
             full_name = f"{r['vorname'] or ''} {r['name']}".strip()
             mea = conn.execute("SELECT SUM(mea_tausendstel) FROM wohnungen WHERE eigentuemer_id=?", (r['id'],)).fetchone()[0]
-            mea_str = f"{mea:.1f}" if mea else "–"
+            mea_str = f"{parse_float(mea):.1f}" if mea else "–"
             self.tree.insert("", "end", iid=r["id"], values=(
                 full_name, r["ort"] or "–",
                 r["telefon"] or "–",
@@ -1168,8 +1216,10 @@ class EigentuemerPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
+            # Berechne anteil_prozent aus Wohnungen (MEA ‰ / 10 = %)
+            anteil = float(v.get("anteil") or 33.33)  # Fallback falls noch vorhanden
             conn.execute("INSERT INTO eigentuemer (vorname,name,strasse,plz,ort,land,telefon,email,iban,anteil_prozent,einheit,notizen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (v["vorname"], v["name"], v["strasse"], v.get("plz",""), v["ort"], v["land"], v["telefon"], v["email"], v["iban"], v["anteil"] or 33.33, v["einheit"], v["notizen"]))
+                (v.get("vorname",""), v.get("name",""), v.get("strasse",""), v.get("plz",""), v.get("ort",""), v.get("land","Deutschland"), v.get("telefon",""), v.get("email",""), v.get("iban",""), anteil, v.get("einheit",""), v.get("notizen","")))
             conn.commit(); conn.close(); self._load()
 
     def _edit(self, event=None):
@@ -1185,8 +1235,14 @@ class EigentuemerPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
+            # Berechne anteil_prozent aus Wohnungen (MEA ‰ / 10 = %)
+            mea_sum = conn.execute(
+                "SELECT SUM(mea_tausendstel) FROM wohnungen WHERE eigentuemer_id=?",
+                (int(sel[0]),)
+            ).fetchone()[0]
+            anteil = (mea_sum / 10.0) if mea_sum else float(v.get("anteil") or 33.33)
             conn.execute("UPDATE eigentuemer SET vorname=?,name=?,strasse=?,plz=?,ort=?,land=?,telefon=?,email=?,iban=?,anteil_prozent=?,einheit=?,notizen=? WHERE id=?",
-                (v["vorname"], v["name"], v["strasse"], v.get("plz",""), v["ort"], v["land"], v["telefon"], v["email"], v["iban"], v["anteil"] or 33.33, v["einheit"], v["notizen"], int(sel[0])))
+                (v.get("vorname",""), v.get("name",""), v.get("strasse",""), v.get("plz",""), v.get("ort",""), v.get("land","Deutschland"), v.get("telefon",""), v.get("email",""), v.get("iban",""), anteil, v.get("einheit",""), v.get("notizen",""), int(sel[0])))
             conn.commit(); conn.close(); self._load()
 
     def _delete(self):
@@ -1231,6 +1287,8 @@ class EigentuemerDialog(BaseDialog):
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
         self._add_field("E-Mail", "email", r.get("email",""), row=l)
         self._add_field("IBAN", "iban", r.get("iban",""), row=ri)
+        # Row 6: Einheit (Anteil wird aus Wohnungen berechnet)
+        self._add_field("Einheit", "einheit", r.get("einheit",""))
         self._add_field("Notizen", "notizen", r.get("notizen",""), widget_type="text")
 
         # ── Zugeordnete Wohnungen anzeigen (nur bei Bearbeiten) ──────
@@ -1246,13 +1304,12 @@ class EigentuemerDialog(BaseDialog):
                 "FROM wohnungen WHERE eigentuemer_id=? ORDER BY bezeichnung",
                 (r["id"],)
             ).fetchall()
-            conn.close()
             if wohnungen:
                 for w in wohnungen:
                     wrow = tk.Frame(woh_frame, bg=BG_INPUT)
                     wrow.pack(fill="x", pady=2, ipady=4)
-                    mea = f"{w['mea_tausendstel']:.1f} ‰" if w["mea_tausendstel"] else "–"
-                    flaeche = f"{w['nutzflaeche_qm']:.1f} m²" if w["nutzflaeche_qm"] else ""
+                    mea = f"{parse_float(w['mea_tausendstel']):.1f} ‰" if w["mea_tausendstel"] else "–"
+                    flaeche = f"{parse_float(w['nutzflaeche_qm']):.1f} m²" if w["nutzflaeche_qm"] else ""
                     info = f"  {w['bezeichnung']}  ·  {w['typ'] or '–'}  ·  {w['lage'] or '–'}  ·  {mea}"
                     if flaeche:
                         info += f"  ·  {flaeche}"
@@ -1261,6 +1318,34 @@ class EigentuemerDialog(BaseDialog):
             else:
                 tk.Label(woh_frame, text="  Keine Wohnungen zugeordnet",
                          bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+
+            # MEA-Gesamtsumme anzeigen (Issue #6)
+            mea_sum = conn.execute(
+                "SELECT SUM(mea_tausendstel) FROM wohnungen WHERE eigentuemer_id=?",
+                (r["id"],)
+            ).fetchone()[0]
+            mea_sum = mea_sum or 0.0
+            mea_info_frame = tk.Frame(woh_frame, bg=ACCENT2)
+            mea_info_frame.pack(fill="x", pady=(6, 0), ipady=4)
+            mea_text = f"MEA gesamt: {mea_sum:.1f} ‰"
+            tk.Label(mea_info_frame, text=mea_text, bg=ACCENT2, fg=TEXT_WHITE,
+                     font=FONT_H3).pack(anchor="w", padx=8)
+
+            # NK-Vorauszahlung Gesamtsumme anzeigen (Issue #7)
+            nk_sum = conn.execute(
+                "SELECT COALESCE(SUM(m.nebenkosten_vorauszahlung),0) "
+                "FROM wohnungen w LEFT JOIN mieter m ON w.id=m.wohnung_id "
+                "WHERE w.eigentuemer_id=? AND (m.auszug IS NULL OR m.auszug='')",
+                (r["id"],)
+            ).fetchone()[0]
+            nk_sum = nk_sum or 0.0
+            nk_info_frame = tk.Frame(woh_frame, bg=ACCENT)
+            nk_info_frame.pack(fill="x", pady=(2, 0), ipady=4)
+            nk_text = f"NK-Vorausz. gesamt: {nk_sum:.2f} €"
+            tk.Label(nk_info_frame, text=nk_text, bg=ACCENT, fg=TEXT_WHITE,
+                     font=FONT_H3).pack(anchor="w", padx=8)
+
+            conn.close()
 
     def _on_save(self):
         v = self._get_values()
@@ -1300,10 +1385,10 @@ class WohnungenPage(tk.Frame):
         for r in rows:
             ename = f"{r['evname'] or ''} {r['ename'] or ''}".strip() if r['ename'] else "–"
             mname = f"{r['mvname'] or ''} {r['mname'] or ''}".strip() if r['mname'] else "–"
-            mea = f"{r['mea_tausendstel']:.1f}" if r["mea_tausendstel"] else "–"
+            mea = f"{parse_float(r['mea_tausendstel']):.1f}" if r["mea_tausendstel"] else "–"
             self.tree.insert("", "end", iid=r["id"], values=(
                 r["bezeichnung"], r["typ"] or "–", r["lage"] or "–",
-                f"{r['nutzflaeche_qm']:.1f}" if r["nutzflaeche_qm"] else "–",
+                f"{parse_float(r['nutzflaeche_qm']):.1f}" if r["nutzflaeche_qm"] else "–",
                 r["zimmer"] or "–", mea,
                 ename, mname))
         conn.close()
@@ -2319,6 +2404,9 @@ class ZahlungDialog(BaseDialog):
         v = self._get_values()
         if not v.get("datum") or not v.get("betrag"):
             messagebox.showwarning("Pflichtfelder", "Datum und Betrag sind erforderlich.", parent=self); return
+        # Normalisiere Datum
+        if v.get("datum"):
+            v["datum"] = parse_datum(v["datum"])
         self.result = v; self.destroy()
 
 # ── Wartung-Seite ─────────────────────────────────────────────────────────────
@@ -2449,6 +2537,10 @@ class WartungDialog(BaseDialog):
         v = self._get_values()
         if not v.get("titel"):
             messagebox.showwarning("Pflichtfeld", "Titel ist erforderlich.", parent=self); return
+        # Normalisiere Datums-Felder
+        for field in ["erstellt_am", "erledigt_am"]:
+            if v.get(field):
+                v[field] = parse_datum(v[field])
         self.result = v; self.destroy()
 
 # ── Nachrichten-Seite ─────────────────────────────────────────────────────────
@@ -2836,6 +2928,10 @@ class NebenkostenDialog(BaseDialog):
         v = self._get_values()
         if not v.get("kategorie"):
             messagebox.showwarning("Pflichtfeld", "Kategorie ist erforderlich.", parent=self); return
+        # Normalisiere Datums-Felder (falls vorhanden)
+        for field in ["ablesedatum"]:
+            if v.get(field):
+                v[field] = parse_datum(v[field])
         self.result = v; self.destroy()
 
 # ── Kontoauszug-Seite ─────────────────────────────────────────────────────────
@@ -3769,15 +3865,21 @@ class WasserkostenPage(tk.Frame):
             return
         win = tk.Toplevel(self)
         win.title("Wohnung Punktedaten")
-        win.geometry("400x400")
+        win.geometry("420x480")
         win.configure(bg=BG_CARD)
         win.grab_set()
-        win.resizable(False, False)
+        win.resizable(True, True)
         hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
         tk.Label(hdr, text="Bearbeiten" if row else "Neue Wohnung",
                  bg=BG_SIDEBAR, fg=TEXT_WHITE, font=FONT_H3).pack(side="left", padx=14, pady=10)
+
+        # Button-Zeile zuerst packen (side="bottom") -- verhindert Verdraengen durch body
+        br = tk.Frame(win, bg=BG_CARD)
+        br.pack(fill="x", side="bottom", padx=20, pady=(0, 14))
+        make_btn(br, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6, 0))
+
         body = tk.Frame(win, bg=BG_CARD)
         body.pack(fill="both", expand=True, padx=20, pady=12)
 
@@ -3789,13 +3891,13 @@ class WasserkostenPage(tk.Frame):
             return v
 
         r = row or {}
-        wohn_v  = lf("Wohnung / Mieter *",          r.get("wohnung_bezeichnung", ""))
-        eig_v   = lf("Eigentuemer",                  r.get("eigentuemer", ""))
-        pers_v  = lf("Personen",                     r.get("personen", 1))
-        spuel_v = lf("Spuelmaschinen (je 1 Pkt)",    r.get("spuelmaschinen", 0))
-        wasch_v = lf("Waschmaschinen (je 1 Pkt)",    r.get("waschmaschinen", 1))
+        wohn_v  = lf("Wohnung / Mieter *",             r.get("wohnung_bezeichnung", ""))
+        eig_v   = lf("Eigentuemer",                     r.get("eigentuemer", ""))
+        pers_v  = lf("Personen",                        r.get("personen", 1))
+        spuel_v = lf("Spuelmaschinen (je 1 Pkt)",       r.get("spuelmaschinen", 0))
+        wasch_v = lf("Waschmaschinen (je 1 Pkt)",       r.get("waschmaschinen", 1))
         trock_v = lf("Trockner Wasserkuehlung (1 Pkt)", r.get("trockner_wasserkuehlung", 0))
-        mon_v   = lf("Monate im Abrechnungsjahr",    r.get("monate", 12))
+        mon_v   = lf("Monate im Abrechnungsjahr",       r.get("monate", 12))
 
         def _save():
             wohn = wohn_v.get().strip()
@@ -3824,9 +3926,6 @@ class WasserkostenPage(tk.Frame):
             win.destroy()
             self._load_punkte()
 
-        br = tk.Frame(win, bg=BG_CARD)
-        br.pack(fill="x", padx=20, pady=(0, 12))
-        make_btn(br, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6, 0))
         make_btn(br, "Speichern", _save, color=SUCCESS).pack(side="right")
 
     def _import_wohnungen(self):
@@ -3836,8 +3935,12 @@ class WasserkostenPage(tk.Frame):
             return
         conn = get_db()
         wohnungen = conn.execute(
-            "SELECT w.bezeichnung, COALESCE(e.name, '') AS eig "
-            "FROM wohnungen w LEFT JOIN eigentuemer e ON w.eigentuemer_id = e.id "
+            "SELECT w.bezeichnung, COALESCE(e.name,'') AS eig, "
+            "COALESCE(m.personen,1) AS personen, COALESCE(m.spuelmaschinen,0) AS spuel, "
+            "COALESCE(m.waschmaschinen,1) AS wasch, COALESCE(m.trockner_wasserkuehlung,0) AS trockner "
+            "FROM wohnungen w "
+            "LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id "
+            "LEFT JOIN mieter m ON w.id=m.wohnung_id AND (m.auszug IS NULL OR m.auszug='') "
             "ORDER BY w.bezeichnung").fetchall()
         if not wohnungen:
             messagebox.showinfo("Keine Wohnungen",
@@ -3853,8 +3956,8 @@ class WasserkostenPage(tk.Frame):
                 conn.execute(
                     "INSERT INTO wasserkosten_wohnungsdaten "
                     "(jahr, wohnung_bezeichnung, eigentuemer, personen, spuelmaschinen, "
-                    "waschmaschinen, trockner_wasserkuehlung, monate) VALUES (?,?,?,1,0,1,0,12)",
-                    (jahr, w["bezeichnung"], w["eig"]))
+                    "waschmaschinen, trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,?,?,12)",
+                    (jahr, w["bezeichnung"], w["eig"], w["personen"], w["spuel"], w["wasch"], w["trockner"]))
                 added += 1
         conn.commit()
         conn.close()

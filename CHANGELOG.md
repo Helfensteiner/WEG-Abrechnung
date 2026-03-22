@@ -7,6 +7,34 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.8.0] — 2026-03-22
+
+### Hinzugefügt
+- **Mieter – Wasserkosten-Stammdaten** (Issue #9): Neue Felder im Mieter-Dialog: Personen, Spülmaschinen, Waschmaschinen, Trockner (Wasserkühlung) — werden beim Klick auf „Aus Stammdaten" in der Wasserkosten-Punktetabelle automatisch übernommen
+- **Datum-Normalisierung** (Issue #8): Alle Datumsfelder akzeptieren jetzt drei Formate: `JJJJ-MM-TT`, `TT.MM.JJJJ` und `TT/MM/JJJJ` — Anzeige immer als ISO `JJJJ-MM-TT`. Gilt für Einzug, Buchungsdatum, Wartungsdaten, Nebenkosten.
+- **Enter = Speichern** (Issue #8): In allen Dialogen (BaseDialog) löst die Enter-Taste das Speichern aus
+
+### Geändert
+- **Eigentümer – MEA-Anteile** (Issue #6): „Anteil %" umbenannt in „MEA-Anteile gesamt" — Wert wird automatisch als Summe aus den zugeordneten Wohnungen (`mea_tausendstel`) berechnet, kein manueller Eingriff mehr nötig
+- **Eigentümer – NK-Vorauszahlung** (Issue #7): Im Eigentümer-Dialog wird die Gesamtsumme der NK-Vorauszahlungen aller aktiven Mieter in den zugeordneten Wohnungen angezeigt
+
+---
+
+## [0.7.4] — 2026-03-22
+
+### Bugfixes
+- **Wasserkosten – Speichern-Button nicht sichtbar** (Issue #5): Im Dialog „Wohnung Punktedaten" war der Speichern-Button durch das expandierende Body-Frame verdrängt worden. Fix: Button-Zeile wird jetzt zuerst mit `side="bottom"` gepackt — immer sichtbar. Fensterhöhe auf 480px erhöht, Größenveränderung aktiviert.
+
+---
+
+## [0.7.3] — 2026-03-22
+
+### Bugfixes
+- **Eigentümer – KeyError 'anteil'**: Felder „Anteil %" und „Einheit" fehlten komplett im Eigentümer-Dialog — Speichern schlug mit KeyError fehl. Beide Felder sind jetzt als eigene Zeile im Dialog vorhanden.
+- **Robustheit INSERT/UPDATE**: Alle Datenzugriffe in den SQL-Statements für Eigentümer und Mieter auf `v.get(...)` mit Fallback-Werten umgestellt — verhindert KeyErrors bei fehlenden Feldern.
+
+---
+
 ## [0.7.2] — 2026-03-22
 
 ### Bugfixes
