@@ -7,6 +7,17 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.7.2] — 2026-03-22
+
+### Bugfixes
+- **Kontoauszug – „database is locked" beim Ordner-Import** (Issue #3): `lerne_buchung()` wird jetzt erst nach `conn.commit()` aufgerufen — verhindert SQLite-Lock bei Ordner-Imports mit vielen Dateien
+- **Kontoauszug – Import-Ergebnismeldung** (Issue #3): Ergebnis-Dialog ist jetzt 700 px breit und scrollbar — alle Dateinamen und Fehler vollständig lesbar
+- **Eigentümer – PLZ fehlt** (Issue #4): PLZ-Feld ist jetzt im Eigentümer-Dialog zwischen Straße und Ort vorhanden
+- **Mieter – PLZ fehlt** (Issue #4): PLZ-Feld ist jetzt im Mieter-Dialog zwischen Straße und Ort vorhanden
+- **DB-Migration**: Neue Spalte `plz TEXT` in `eigentuemer` und `mieter` (automatische Migration beim Start)
+
+---
+
 ## [0.7.0] — 2026-03-22
 
 ### Hinzugefügt

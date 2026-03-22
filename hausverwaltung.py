@@ -43,7 +43,7 @@ from pathlib import Path
 #            Keywords, Füllwörter-Filterung, dreistufige Matching-Strategie)
 # ───────────────────────────────────────────────────────────────────────────────
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.2"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 
@@ -353,10 +353,12 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
         "ALTER TABLE kontoauszug ADD COLUMN falsch_zugeordnet INTEGER DEFAULT 0",
         "ALTER TABLE kontoauszug ADD COLUMN konto_typ TEXT DEFAULT 'Unbekannt'",
         "ALTER TABLE eigentuemer ADD COLUMN strasse TEXT",
+        "ALTER TABLE eigentuemer ADD COLUMN plz TEXT",
         "ALTER TABLE eigentuemer ADD COLUMN ort TEXT",
         "ALTER TABLE eigentuemer ADD COLUMN land TEXT DEFAULT 'Deutschland'",
         "ALTER TABLE eigentuemer ADD COLUMN iban TEXT",
         "ALTER TABLE mieter ADD COLUMN strasse TEXT",
+        "ALTER TABLE mieter ADD COLUMN plz TEXT",
         "ALTER TABLE mieter ADD COLUMN ort TEXT",
         "ALTER TABLE mieter ADD COLUMN land TEXT DEFAULT 'Deutschland'",
         "ALTER TABLE mieter ADD COLUMN iban TEXT",
@@ -904,8 +906,8 @@ class MieterPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("INSERT INTO mieter (vorname,name,strasse,ort,land,telefon,email,iban,wohnung_id,einzug,kaltmiete,nebenkosten_vorauszahlung,kaution,notizen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (v["vorname"], v["name"], v["strasse"], v["ort"], v["land"], v["telefon"], v["email"], v["iban"],
+            conn.execute("INSERT INTO mieter (vorname,name,strasse,plz,ort,land,telefon,email,iban,wohnung_id,einzug,kaltmiete,nebenkosten_vorauszahlung,kaution,notizen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (v["vorname"], v["name"], v["strasse"], v.get("plz",""), v["ort"], v["land"], v["telefon"], v["email"], v["iban"],
                  v["wohnung_id"], v["einzug"], v["kaltmiete"] or 0, v["nk"] or 0, v["kaution"] or 0, v["notizen"]))
             conn.commit(); conn.close()
             self._load()
@@ -924,8 +926,8 @@ class MieterPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("UPDATE mieter SET vorname=?,name=?,strasse=?,ort=?,land=?,telefon=?,email=?,iban=?,wohnung_id=?,einzug=?,kaltmiete=?,nebenkosten_vorauszahlung=?,kaution=?,notizen=? WHERE id=?",
-                (v["vorname"], v["name"], v["strasse"], v["ort"], v["land"], v["telefon"], v["email"], v["iban"],
+            conn.execute("UPDATE mieter SET vorname=?,name=?,strasse=?,plz=?,ort=?,land=?,telefon=?,email=?,iban=?,wohnung_id=?,einzug=?,kaltmiete=?,nebenkosten_vorauszahlung=?,kaution=?,notizen=? WHERE id=?",
+                (v["vorname"], v["name"], v["strasse"], v.get("plz",""), v["ort"], v["land"], v["telefon"], v["email"], v["iban"],
                  v["wohnung_id"], v["einzug"], v["kaltmiete"] or 0, v["nk"] or 0, v["kaution"] or 0, v["notizen"], mid))
             conn.commit(); conn.close()
             self._load()
@@ -1060,19 +1062,22 @@ class MieterDialog(BaseDialog):
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
         self._add_field("Vorname", "vorname", r.get("vorname",""), row=l)
         self._add_field("Name *", "name", r.get("name",""), row=ri)
-        # Row 2: Straße + Ort
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
+        # Row 2: Straße (volle Breite)
+        self._add_field("Straße", "strasse", r.get("strasse",""))
+        # Row 3: PLZ + Ort (PLZ schmal, Ort breit)
+        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20)
+        two.columnconfigure(0, weight=1); two.columnconfigure(1, weight=3)
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
-        self._add_field("Straße", "strasse", r.get("strasse",""), row=l)
+        self._add_field("PLZ", "plz", r.get("plz",""), row=l)
         self._add_field("Ort", "ort", r.get("ort",""), row=ri)
-        # Row 3: Land + Telefon
+        # Row 4: Land + Telefon
         two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
         self._add_field("Land", "land", r.get("land","Deutschland"), row=l)
         self._add_field("Telefon", "telefon", r.get("telefon",""), row=ri)
-        # Row 4: E-Mail + IBAN
+        # Row 5: E-Mail + IBAN
         two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
@@ -1163,8 +1168,8 @@ class EigentuemerPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("INSERT INTO eigentuemer (vorname,name,strasse,ort,land,telefon,email,iban,anteil_prozent,einheit,notizen) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (v["vorname"], v["name"], v["strasse"], v["ort"], v["land"], v["telefon"], v["email"], v["iban"], v["anteil"] or 33.33, v["einheit"], v["notizen"]))
+            conn.execute("INSERT INTO eigentuemer (vorname,name,strasse,plz,ort,land,telefon,email,iban,anteil_prozent,einheit,notizen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (v["vorname"], v["name"], v["strasse"], v.get("plz",""), v["ort"], v["land"], v["telefon"], v["email"], v["iban"], v["anteil"] or 33.33, v["einheit"], v["notizen"]))
             conn.commit(); conn.close(); self._load()
 
     def _edit(self, event=None):
@@ -1180,8 +1185,8 @@ class EigentuemerPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("UPDATE eigentuemer SET vorname=?,name=?,strasse=?,ort=?,land=?,telefon=?,email=?,iban=?,anteil_prozent=?,einheit=?,notizen=? WHERE id=?",
-                (v["vorname"], v["name"], v["strasse"], v["ort"], v["land"], v["telefon"], v["email"], v["iban"], v["anteil"] or 33.33, v["einheit"], v["notizen"], int(sel[0])))
+            conn.execute("UPDATE eigentuemer SET vorname=?,name=?,strasse=?,plz=?,ort=?,land=?,telefon=?,email=?,iban=?,anteil_prozent=?,einheit=?,notizen=? WHERE id=?",
+                (v["vorname"], v["name"], v["strasse"], v.get("plz",""), v["ort"], v["land"], v["telefon"], v["email"], v["iban"], v["anteil"] or 33.33, v["einheit"], v["notizen"], int(sel[0])))
             conn.commit(); conn.close(); self._load()
 
     def _delete(self):
@@ -1205,19 +1210,22 @@ class EigentuemerDialog(BaseDialog):
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
         self._add_field("Vorname", "vorname", r.get("vorname",""), row=l)
         self._add_field("Name *", "name", r.get("name",""), row=ri)
-        # Row 2: Straße + Ort
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
+        # Row 2: Straße (volle Breite)
+        self._add_field("Straße", "strasse", r.get("strasse",""))
+        # Row 3: PLZ + Ort (PLZ schmal, Ort breit)
+        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20)
+        two.columnconfigure(0, weight=1); two.columnconfigure(1, weight=3)
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
-        self._add_field("Straße", "strasse", r.get("strasse",""), row=l)
+        self._add_field("PLZ", "plz", r.get("plz",""), row=l)
         self._add_field("Ort", "ort", r.get("ort",""), row=ri)
-        # Row 3: Land + Telefon
+        # Row 4: Land + Telefon
         two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
         self._add_field("Land", "land", r.get("land","Deutschland"), row=l)
         self._add_field("Telefon", "telefon", r.get("telefon",""), row=ri)
-        # Row 4: E-Mail + IBAN
+        # Row 5: E-Mail + IBAN
         two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
@@ -1912,6 +1920,7 @@ class BuchhaltungPage(tk.Frame):
 
         count = 0
         skipped = 0
+        lern_queue = []  # (raw, kat, typ, kt) – nach conn.close() ausfuehren
         for row_raw in rows:
             row = dict(row_raw)
             raw = row["buchungstext"] or ""
@@ -1934,11 +1943,14 @@ class BuchhaltungPage(tk.Frame):
                 "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
                 "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
                 (kat, zahlung_id, row["id"]))
-            lerne_buchung(raw, kat, typ, kt)
+            lern_queue.append((raw, kat, typ, kt))
             count += 1
 
         conn.commit()
         conn.close()
+        # lerne_buchung erst nach conn.close() -- verhindert "database is locked"
+        for _raw, _kat, _typ, _kt in lern_queue:
+            lerne_buchung(_raw, _kat, _typ, _kt)
 
         if count:
             msg = f"{count} Buchung(en) aus {quelle} übernommen."
@@ -3212,6 +3224,7 @@ class KontoauszugPage(tk.Frame):
                 auto_count = 0
                 dup_count = 0
                 imp_count = 0
+                datei_lern_queue = []  # (buchungstext, kat, typ, kt)
                 for datum, buchungstext, betrag in buchungen:
                     # Dublettenprüfung: gleiche Buchung bereits vorhanden?
                     existing = conn.execute(
@@ -3251,9 +3264,12 @@ class KontoauszugPage(tk.Frame):
                         conn.execute(
                             "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, zahlung_id=? WHERE id=?",
                             (zahlung_id, ka_id))
-                        lerne_buchung(buchungstext, kat, typ, kt)
+                        datei_lern_queue.append((buchungstext, kat, typ, kt))
                         auto_count += 1
                 conn.commit()
+                # lerne_buchung nach commit – verhindert "database is locked"
+                for _bt, _kat, _typ, _kt in datei_lern_queue:
+                    lerne_buchung(_bt, _kat, _typ, _kt)
                 gesamt_buchungen += imp_count
                 gesamt_auto += auto_count
                 gesamt_duplikate += dup_count
@@ -3264,7 +3280,7 @@ class KontoauszugPage(tk.Frame):
                 fehler_dateien.append(f"{os.path.basename(path)}: {exc}")
         conn.close()
 
-        # Ergebnis-Meldung
+        # Ergebnis-Meldung (breites scrollbares Fenster statt messagebox)
         saldo_str = fmt_euro(letzte_saldo) if letzte_saldo is not None else "–"
         msg = f"{gesamt_buchungen} Buchung(en) aus {len(paths)} Datei(en) importiert"
         if gesamt_duplikate:
@@ -3272,12 +3288,30 @@ class KontoauszugPage(tk.Frame):
         if gesamt_auto:
             msg += f"\nDavon automatisch gebucht: {gesamt_auto}"
         if fehler_dateien:
-            msg += f"\n\n⚠ Fehler in {len(fehler_dateien)} Datei(en):\n" + "\n".join(fehler_dateien[:5])
-        messagebox.showinfo("CAMT.052 Import", msg)
+            msg += f"\n\n⚠ Fehler in {len(fehler_dateien)} Datei(en):\n" + "\n".join(fehler_dateien)
+        self._zeige_import_ergebnis("CAMT.052 Import", msg)
         if letzte_iban:
             self._info_var.set(
                 f"Zuletzt importiert: {letzte_bank} · ···{letzte_iban[-8:]} · Saldo {saldo_str}")
         self._load()
+
+    def _zeige_import_ergebnis(self, titel, text):
+        """Zeigt das Import-Ergebnis in einem breiten, scrollbaren Fenster."""
+        import tkinter.scrolledtext as scrolledtext
+        win = tk.Toplevel(self)
+        win.title(titel)
+        win.geometry("700x350")
+        win.configure(bg=BG_CARD)
+        win.transient(self)
+        win.grab_set()
+        st = scrolledtext.ScrolledText(win, wrap="word", font=FONT_BODY,
+                                       bg=BG_INPUT, fg=TEXT, relief="flat",
+                                       padx=12, pady=10)
+        st.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        st.insert("end", text)
+        st.config(state="disabled")
+        make_btn(win, "OK", win.destroy, color=ACCENT2).pack(pady=(0, 14))
+        win.wait_window()
 
     def _parse_camt(self, path):
         """Parst eine CAMT.052.001.08 XML-Datei der Sparkasse Bodensee.
