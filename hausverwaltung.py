@@ -43,7 +43,7 @@ from pathlib import Path
 #            Keywords, Füllwörter-Filterung, dreistufige Matching-Strategie)
 # ───────────────────────────────────────────────────────────────────────────────
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 
@@ -306,6 +306,39 @@ CREATE TABLE IF NOT EXISTS rechte (
     schreiben INTEGER DEFAULT 1,
     loeschen INTEGER DEFAULT 0,
     FOREIGN KEY (rolle_id) REFERENCES rollen(id)
+);
+""")
+    # Wasserkosten-Tabellen
+    c.executescript("""
+CREATE TABLE IF NOT EXISTS wasserkosten_positionen (
+    id            INTEGER PRIMARY KEY,
+    jahr          INTEGER NOT NULL,
+    typ           TEXT    NOT NULL,
+    verbrauch_m3  REAL    DEFAULT 0,
+    kosten_eur    REAL    DEFAULT 0,
+    ablesedatum   DATE,
+    erstellt_am   DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS wasserkosten_wohnungsdaten (
+    id                      INTEGER PRIMARY KEY,
+    jahr                    INTEGER NOT NULL,
+    wohnung_bezeichnung     TEXT    NOT NULL,
+    eigentuemer             TEXT,
+    von_datum               DATE,
+    bis_datum               DATE,
+    personen                INTEGER DEFAULT 0,
+    spuelmaschinen          INTEGER DEFAULT 0,
+    waschmaschinen          INTEGER DEFAULT 0,
+    trockner_wasserkuehlung INTEGER DEFAULT 0,
+    monate                  REAL    DEFAULT 12,
+    bemerkung               TEXT,
+    erstellt_am             DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
+    id               INTEGER PRIMARY KEY,
+    jahr             INTEGER NOT NULL,
+    eigentuemer      TEXT    NOT NULL,
+    wasserkosten_eur REAL    DEFAULT 0
 );
 """)
     conn.commit()
@@ -1838,29 +1871,54 @@ class BuchhaltungPage(tk.Frame):
             self._saldo_label.config(text="")
 
     def _batch_uebernehmen(self):
-        """Alle grün markierten Vorschläge (mit Kategorie-Vorschlag) automatisch übernehmen."""
+        """Grün markierte Vorschläge automatisch übernehmen.
+
+        Verhalten (Issue #2):
+        - Einträge selektiert  → nur die markierten (mit Kategorie) übernehmen
+        - Nichts selektiert    → alle grünen Einträge (aktueller Konto-Filter)
+        Keine Rückfrage pro Buchung.
+        """
         if not hat_recht("Buchhaltung", "schreiben"):
             messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
             return
-        conn = get_db()
-        # Alle nicht übernommenen Einträge MIT Kategorie-Vorschlag
-        q = ("SELECT * FROM kontoauszug "
-             "WHERE (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
-             "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) ")
-        params = []
+
+        selected_ids = [int(iid) for iid in self.tree_v.selection()]
+        use_selection = bool(selected_ids)
         selected_iban = self._vs_iban_map.get(self._vs_konto_var.get())
-        if selected_iban:
-            q += "AND iban=? "
-            params.append(selected_iban)
-        q += "ORDER BY datum"
-        rows = conn.execute(q, params).fetchall()
+
+        conn = get_db()
+        if use_selection:
+            # Nur selektierte Einträge verarbeiten
+            placeholders = ",".join("?" * len(selected_ids))
+            q = (f"SELECT * FROM kontoauszug "
+                 f"WHERE id IN ({placeholders}) "
+                 f"AND (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
+                 f"AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) "
+                 f"ORDER BY datum")
+            rows = conn.execute(q, selected_ids).fetchall()
+            quelle = f"{len(selected_ids)} ausgewählte Einträge"
+        else:
+            # Alle nicht übernommenen Einträge (mit Konto-Filter)
+            q = ("SELECT * FROM kontoauszug "
+                 "WHERE (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
+                 "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) ")
+            params = []
+            if selected_iban:
+                q += "AND iban=? "
+                params.append(selected_iban)
+            q += "ORDER BY datum"
+            rows = conn.execute(q, params).fetchall()
+            quelle = "alle grünen Einträge"
+
         count = 0
+        skipped = 0
         for row_raw in rows:
             row = dict(row_raw)
             raw = row["buchungstext"] or ""
             kat = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
             if not kat:
-                continue  # Kein Vorschlag → überspringen
+                skipped += 1
+                continue
             betrag = row["betrag"] or 0
             typ = "Einnahme" if betrag >= 0 else "Ausgabe"
             gegenkonto = raw.split("||")[0] if "||" in raw else ""
@@ -1878,12 +1936,20 @@ class BuchhaltungPage(tk.Frame):
                 (kat, zahlung_id, row["id"]))
             lerne_buchung(raw, kat, typ, kt)
             count += 1
+
         conn.commit()
         conn.close()
+
         if count:
-            messagebox.showinfo("Batch-Übernahme", f"{count} Vorschläge automatisch übernommen.")
+            msg = f"{count} Buchung(en) aus {quelle} übernommen."
+            if skipped:
+                msg += f"\n{skipped} Eintrag/Einträge ohne Kategorie übersprungen."
+            messagebox.showinfo("Batch-Übernahme", msg)
         else:
-            messagebox.showinfo("Batch-Übernahme", "Keine Vorschläge mit Kategorie-Zuordnung vorhanden.")
+            msg = "Keine Einträge mit Kategorie-Zuordnung gefunden."
+            if skipped:
+                msg += f"\n{skipped} Eintrag/Einträge haben keine Kategorie."
+            messagebox.showinfo("Batch-Übernahme", msg)
         self._load_vorschlaege()
         self._saldo_label.config(text="")
 
@@ -3393,6 +3459,660 @@ class KontoauszugPage(tk.Frame):
 
 
 
+class WasserkostenPage(tk.Frame):
+    """Wasserkosten-Aufteilung nach Punkteschlüssel.
+
+    Tab 1 – Jahreskosten  : Stadtwerke-Rechnung (Frischwasser, Abwasser,
+                            Niederschlagswasser, Gutschrift)
+    Tab 2 – Punktetabelle : Personen/Spülmaschine/Waschmaschine/Trockner je Wohnung
+    Tab 3 – Auswertung    : Kosten je Punkt, WE-Aufteilung, Eigentümer-Summen,
+                            Plausibilitätscheck, Vorjahresvergleich
+    """
+
+    TYPEN = ["Frischwasser", "Abwasser", "Niederschlagswasser"]
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG_CARD)
+        self._jahr_var = tk.StringVar(value=str(date.today().year))
+        self._kosten_vars = {}
+        self._gutschrift_var = {}
+        self._gesamt_label = None
+        self._ausw_inner = None
+        self._ausw_result = None
+        self._build()
+
+    # ── Aufbau ────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        # Kopfzeile
+        top = tk.Frame(self, bg=BG_CARD)
+        top.pack(fill="x", padx=20, pady=(16, 0))
+        tk.Label(top, text="Wasserkosten-Aufteilung", bg=BG_CARD,
+                 fg=TEXT, font=FONT_H2).pack(side="left")
+        tk.Label(top, text="  Abrechnungsjahr:", bg=BG_CARD,
+                 fg=TEXT_LIGHT, font=FONT_BODY).pack(side="left", padx=(20, 4))
+        jahre = [str(y) for y in range(date.today().year + 1, date.today().year - 6, -1)]
+        cb = ttk.Combobox(top, textvariable=self._jahr_var, values=jahre,
+                          state="readonly", width=6, font=FONT_BODY)
+        cb.pack(side="left")
+        cb.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+        make_btn(top, "Aktualisieren", self._refresh,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=8)
+
+        # Tab-Leiste
+        self._tab_btns = {}
+        tab_bar = tk.Frame(self, bg=BG_CARD)
+        tab_bar.pack(fill="x", padx=20, pady=(10, 0))
+        for tid, label in [("kosten",     "Jahreskosten"),
+                            ("punkte",    "Punktetabelle"),
+                            ("auswertung","Auswertung")]:
+            btn = tk.Button(tab_bar, text=label, font=FONT_NAV, relief="flat", bd=0,
+                            padx=14, pady=7, cursor="hand2",
+                            command=lambda t=tid: self._switch_tab(t))
+            btn.pack(side="left", padx=2)
+            self._tab_btns[tid] = btn
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(4, 0))
+
+        self._content = tk.Frame(self, bg=BG_CARD)
+        self._content.pack(fill="both", expand=True)
+
+        self._build_kosten_tab()
+        self._build_punkte_tab()
+        self._build_auswertung_tab()
+        self._switch_tab("kosten")
+
+    # ── Tab 1: Jahreskosten ───────────────────────────────────────────────────
+
+    def _build_kosten_tab(self):
+        self._view_kosten = tk.Frame(self._content, bg=BG_CARD)
+        canvas = tk.Canvas(self._view_kosten, bg=BG_CARD, highlightthickness=0)
+        sb = ttk.Scrollbar(self._view_kosten, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=BG_CARD)
+        wid = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(wid, width=e.width))
+
+        body = inner
+        tk.Label(body, text="1.  Wasserkosten laut Stadtwerke-Jahresabrechnung",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H3).pack(anchor="w", padx=20, pady=(16, 4))
+        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", padx=20)
+
+        # Tabellenkopf
+        hdr = tk.Frame(body, bg=BG_INPUT)
+        hdr.pack(fill="x", padx=20, pady=(6, 0))
+        for txt, w in [("Position", 26), ("Verbrauch (m3)", 16),
+                       ("Kosten (EUR)", 16), ("Ablesedatum", 16)]:
+            tk.Label(hdr, text=txt, bg=BG_INPUT, fg=TEXT_LIGHT,
+                     font=FONT_SMALL, width=w, anchor="w").pack(side="left", padx=6, pady=4)
+
+        # Eingabezeilen
+        for typ in self.TYPEN:
+            self._kosten_vars[typ] = self._kosten_row(body, typ)
+        self._gutschrift_var = self._kosten_row(body, "Gutschrift / Erstattung",
+                                                 is_gutschrift=True)
+
+        # Gesamt
+        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(8, 0))
+        gr = tk.Frame(body, bg=BG_CARD)
+        gr.pack(fill="x", padx=20, pady=4)
+        tk.Label(gr, text="Wasserkosten gesamt (netto):",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H3, width=28, anchor="w").pack(side="left")
+        self._gesamt_label = tk.Label(gr, text="–", bg=BG_CARD, fg=ACCENT2, font=FONT_H3)
+        self._gesamt_label.pack(side="left", padx=8)
+
+        btn_row = tk.Frame(body, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=12)
+        make_btn(btn_row, "Speichern", self._save_kosten, color=SUCCESS).pack(side="left")
+        make_btn(btn_row, "Gesamt berechnen", self._update_gesamt,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=8)
+
+    def _kosten_row(self, parent, typ, is_gutschrift=False):
+        """Eingabezeile für einen Kostentyp."""
+        row = tk.Frame(parent, bg=BG_CARD)
+        row.pack(fill="x", padx=20, pady=2)
+        fg = WARNING if is_gutschrift else TEXT
+        tk.Label(row, text=typ, bg=BG_CARD, fg=fg, font=FONT_BODY,
+                 width=26, anchor="w").pack(side="left")
+        d = {}
+        for key in (["kosten", "datum"] if is_gutschrift else ["verbrauch", "kosten", "datum"]):
+            v = tk.StringVar()
+            e = make_entry(row, textvariable=v, width=14)
+            e.pack(side="left", padx=4, ipady=4)
+            if key == "datum":
+                e.insert(0, "JJJJ-MM-TT")
+                e.bind("<FocusIn>",  lambda ev, en=e: (en.get() == "JJJJ-MM-TT" and en.delete(0, "end")))
+                e.bind("<FocusOut>", lambda ev, en=e, vv=v: (not en.get() and en.insert(0, "JJJJ-MM-TT")))
+            d[key] = v
+        if is_gutschrift:
+            tk.Label(row, text="(negativer Betrag oder 0)", bg=BG_CARD,
+                     fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left", padx=4)
+        return d
+
+    def _load_kosten(self):
+        """Lädt gespeicherte Kostenwerte."""
+        jahr = self._jahr_int()
+        if not jahr:
+            return
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT typ, verbrauch_m3, kosten_eur, ablesedatum "
+            "FROM wasserkosten_positionen WHERE jahr=?", (jahr,)).fetchall()
+        conn.close()
+        by_typ = {r["typ"]: dict(r) for r in rows}
+        for typ, vd in self._kosten_vars.items():
+            d = by_typ.get(typ, {})
+            if "verbrauch" in vd:
+                vd["verbrauch"].set(str(d.get("verbrauch_m3", "") or ""))
+            vd["kosten"].set(str(d.get("kosten_eur", "") or ""))
+            dat = str(d.get("ablesedatum", "") or "")
+            vd["datum"].set(dat if dat else "")
+        d = by_typ.get("Gutschrift / Erstattung", {})
+        self._gutschrift_var["kosten"].set(str(d.get("kosten_eur", "") or ""))
+        self._update_gesamt()
+
+    def _save_kosten(self):
+        """Speichert Jahreskosten-Eingaben."""
+        jahr = self._jahr_int()
+        if not jahr:
+            messagebox.showwarning("Fehler", "Kein gültiges Jahr.", parent=self)
+            return
+        conn = get_db()
+        conn.execute("DELETE FROM wasserkosten_positionen WHERE jahr=?", (jahr,))
+        for typ, vd in self._kosten_vars.items():
+            v_m3  = self._flt(vd.get("verbrauch", tk.StringVar()).get())
+            v_eur = self._flt(vd["kosten"].get())
+            v_dat = vd["datum"].get().strip()
+            v_dat = v_dat if (v_dat and v_dat != "JJJJ-MM-TT") else None
+            conn.execute(
+                "INSERT INTO wasserkosten_positionen "
+                "(jahr, typ, verbrauch_m3, kosten_eur, ablesedatum) VALUES (?,?,?,?,?)",
+                (jahr, typ, v_m3, v_eur, v_dat))
+        gut = self._flt(self._gutschrift_var["kosten"].get())
+        if gut:
+            conn.execute(
+                "INSERT INTO wasserkosten_positionen (jahr, typ, verbrauch_m3, kosten_eur) "
+                "VALUES (?,?,0,?)", (jahr, "Gutschrift / Erstattung", gut))
+        conn.commit()
+        conn.close()
+        self._update_gesamt()
+        messagebox.showinfo("Gespeichert", f"Jahreskosten {jahr} gespeichert.", parent=self)
+
+    def _update_gesamt(self):
+        """Zeigt Wasserkosten netto."""
+        total = sum(self._flt(vd["kosten"].get()) for vd in self._kosten_vars.values())
+        total -= abs(self._flt(self._gutschrift_var.get("kosten", tk.StringVar()).get()))
+        if self._gesamt_label:
+            self._gesamt_label.config(text=fmt_euro(total),
+                                      fg=SUCCESS if total >= 0 else DANGER)
+
+    # ── Tab 2: Punktetabelle ──────────────────────────────────────────────────
+
+    def _build_punkte_tab(self):
+        self._view_punkte = tk.Frame(self._content, bg=BG_CARD)
+        info = tk.Label(self._view_punkte,
+            text="Punkte = Personen + Spuelmaschine (1 Pkt) + Waschmaschine (1 Pkt) "
+                 "+ Trockner mit Wasserku. (1 Pkt)  |  Gewertete Punkte = Punkte x Monate / 12",
+            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL)
+        info.pack(anchor="w", padx=20, pady=(8, 2))
+
+        cols = ("Wohnung / Mieter", "Eigentuemer", "Pers.",
+                "Spuelm.", "Waschm.", "Trockner", "Monate", "Punkte", "Gew. Pkt.")
+        f, self.tree_p = make_table(self._view_punkte, cols, height=12)
+        f.pack(fill="both", expand=True, padx=20, pady=4)
+        for c, w in zip(cols, [160, 160, 50, 60, 60, 70, 60, 60, 80]):
+            self.tree_p.heading(c, text=c)
+            self.tree_p.column(c, width=w, anchor="center")
+        self.tree_p.column("Wohnung / Mieter", anchor="w")
+        self.tree_p.column("Eigentuemer", anchor="w")
+        self.tree_p.bind("<Double-1>", self._edit_wohnung)
+
+        btn_row = tk.Frame(self._view_punkte, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0, 8))
+        make_btn(btn_row, "Aus Stammdaten", self._import_wohnungen,
+                 color=ACCENT2).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "Neu", self._new_wohnung,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "Bearbeiten", self._edit_wohnung,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "Loeschen", self._delete_wohnung,
+                 color=DANGER).pack(side="left")
+
+    def _load_punkte(self):
+        for i in self.tree_p.get_children():
+            self.tree_p.delete(i)
+        jahr = self._jahr_int()
+        if not jahr:
+            return
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT * FROM wasserkosten_wohnungsdaten WHERE jahr=? ORDER BY wohnung_bezeichnung",
+            (jahr,)).fetchall()
+        conn.close()
+        for r in rows:
+            rd = dict(r)
+            basis = (rd["personen"] + rd["spuelmaschinen"] +
+                     rd["waschmaschinen"] + rd["trockner_wasserkuehlung"])
+            gew = round(basis * (rd["monate"] or 12) / 12, 2)
+            self.tree_p.insert("", "end", iid=rd["id"], values=(
+                rd["wohnung_bezeichnung"], rd["eigentuemer"] or "",
+                rd["personen"], rd["spuelmaschinen"], rd["waschmaschinen"],
+                rd["trockner_wasserkuehlung"], rd["monate"], basis, gew))
+
+    def _new_wohnung(self):
+        self._wohnung_dialog(None)
+
+    def _edit_wohnung(self, event=None):
+        sel = self.tree_p.selection()
+        if not sel:
+            return
+        conn = get_db()
+        row = conn.execute(
+            "SELECT * FROM wasserkosten_wohnungsdaten WHERE id=?", (int(sel[0]),)
+        ).fetchone()
+        conn.close()
+        if row:
+            self._wohnung_dialog(dict(row))
+
+    def _delete_wohnung(self):
+        sel = self.tree_p.selection()
+        if not sel:
+            return
+        if messagebox.askyesno("Entfernen", "Diesen Eintrag entfernen?", parent=self):
+            conn = get_db()
+            conn.execute("DELETE FROM wasserkosten_wohnungsdaten WHERE id=?", (int(sel[0]),))
+            conn.commit()
+            conn.close()
+            self._load_punkte()
+
+    def _wohnung_dialog(self, row):
+        """Dialog zum Anlegen/Bearbeiten einer Wohnungs-Punktezeile."""
+        jahr = self._jahr_int()
+        if not jahr:
+            messagebox.showwarning("Fehler", "Kein gueltiges Jahr.", parent=self)
+            return
+        win = tk.Toplevel(self)
+        win.title("Wohnung Punktedaten")
+        win.geometry("400x400")
+        win.configure(bg=BG_CARD)
+        win.grab_set()
+        win.resizable(False, False)
+        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="Bearbeiten" if row else "Neue Wohnung",
+                 bg=BG_SIDEBAR, fg=TEXT_WHITE, font=FONT_H3).pack(side="left", padx=14, pady=10)
+        body = tk.Frame(win, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=20, pady=12)
+
+        def lf(lbl, dflt=""):
+            tk.Label(body, text=lbl, bg=BG_CARD, fg=TEXT_LIGHT,
+                     font=FONT_SMALL).pack(anchor="w", pady=(6, 1))
+            v = tk.StringVar(value=str(dflt))
+            make_entry(body, textvariable=v).pack(fill="x", ipady=5)
+            return v
+
+        r = row or {}
+        wohn_v  = lf("Wohnung / Mieter *",          r.get("wohnung_bezeichnung", ""))
+        eig_v   = lf("Eigentuemer",                  r.get("eigentuemer", ""))
+        pers_v  = lf("Personen",                     r.get("personen", 1))
+        spuel_v = lf("Spuelmaschinen (je 1 Pkt)",    r.get("spuelmaschinen", 0))
+        wasch_v = lf("Waschmaschinen (je 1 Pkt)",    r.get("waschmaschinen", 1))
+        trock_v = lf("Trockner Wasserkuehlung (1 Pkt)", r.get("trockner_wasserkuehlung", 0))
+        mon_v   = lf("Monate im Abrechnungsjahr",    r.get("monate", 12))
+
+        def _save():
+            wohn = wohn_v.get().strip()
+            if not wohn:
+                messagebox.showwarning("Pflichtfeld", "Wohnung ist erforderlich.", parent=win)
+                return
+            conn = get_db()
+            vals = (jahr, wohn, eig_v.get().strip(),
+                    self._int(pers_v.get()), self._int(spuel_v.get()),
+                    self._int(wasch_v.get()), self._int(trock_v.get()),
+                    max(0.0, min(12.0, self._flt(mon_v.get()) or 12.0)))
+            if row:
+                conn.execute(
+                    "UPDATE wasserkosten_wohnungsdaten SET "
+                    "wohnung_bezeichnung=?, eigentuemer=?, personen=?, spuelmaschinen=?, "
+                    "waschmaschinen=?, trockner_wasserkuehlung=?, monate=? WHERE id=?",
+                    (wohn, vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], row["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO wasserkosten_wohnungsdaten "
+                    "(jahr, wohnung_bezeichnung, eigentuemer, personen, spuelmaschinen, "
+                    "waschmaschinen, trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,?,?,?)",
+                    vals)
+            conn.commit()
+            conn.close()
+            win.destroy()
+            self._load_punkte()
+
+        br = tk.Frame(win, bg=BG_CARD)
+        br.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(br, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6, 0))
+        make_btn(br, "Speichern", _save, color=SUCCESS).pack(side="right")
+
+    def _import_wohnungen(self):
+        """Uebernimmt Wohnungen aus Stammdaten."""
+        jahr = self._jahr_int()
+        if not jahr:
+            return
+        conn = get_db()
+        wohnungen = conn.execute(
+            "SELECT w.bezeichnung, COALESCE(e.name, '') AS eig "
+            "FROM wohnungen w LEFT JOIN eigentuemer e ON w.eigentuemer_id = e.id "
+            "ORDER BY w.bezeichnung").fetchall()
+        if not wohnungen:
+            messagebox.showinfo("Keine Wohnungen",
+                "Keine Wohnungen in den Stammdaten.\nBitte zuerst Wohnungen anlegen.",
+                parent=self)
+            conn.close()
+            return
+        added = 0
+        for w in wohnungen:
+            if not conn.execute(
+                "SELECT id FROM wasserkosten_wohnungsdaten WHERE jahr=? AND wohnung_bezeichnung=?",
+                    (jahr, w["bezeichnung"])).fetchone():
+                conn.execute(
+                    "INSERT INTO wasserkosten_wohnungsdaten "
+                    "(jahr, wohnung_bezeichnung, eigentuemer, personen, spuelmaschinen, "
+                    "waschmaschinen, trockner_wasserkuehlung, monate) VALUES (?,?,?,1,0,1,0,12)",
+                    (jahr, w["bezeichnung"], w["eig"]))
+                added += 1
+        conn.commit()
+        conn.close()
+        if added:
+            messagebox.showinfo("Uebernommen",
+                f"{added} Wohnung(en) uebernommen.\nBitte Werte anpassen.", parent=self)
+        else:
+            messagebox.showinfo("Vorhanden", "Alle Wohnungen bereits eingetragen.", parent=self)
+        self._load_punkte()
+
+    # ── Tab 3: Auswertung ─────────────────────────────────────────────────────
+
+    def _build_auswertung_tab(self):
+        self._view_auswertung = tk.Frame(self._content, bg=BG_CARD)
+        canvas = tk.Canvas(self._view_auswertung, bg=BG_CARD, highlightthickness=0)
+        sb = ttk.Scrollbar(self._view_auswertung, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self._ausw_inner = tk.Frame(canvas, bg=BG_CARD)
+        wid = canvas.create_window((0, 0), window=self._ausw_inner, anchor="nw")
+        self._ausw_inner.bind("<Configure>",
+                              lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(wid, width=e.width))
+
+        br = tk.Frame(self._ausw_inner, bg=BG_CARD)
+        br.pack(fill="x", padx=20, pady=(10, 4))
+        make_btn(br, "Auswertung berechnen", self._berechne_auswertung,
+                 color=SUCCESS).pack(side="left")
+        self._ausw_result = tk.Frame(self._ausw_inner, bg=BG_CARD)
+        self._ausw_result.pack(fill="both", expand=True, padx=20)
+
+    def _berechne_auswertung(self):
+        for w in self._ausw_result.winfo_children():
+            w.destroy()
+        jahr = self._jahr_int()
+        if not jahr:
+            tk.Label(self._ausw_result, text="Kein gueltiges Jahr.",
+                     bg=BG_CARD, fg=DANGER, font=FONT_BODY).pack(anchor="w")
+            return
+
+        conn = get_db()
+        pos_rows = conn.execute(
+            "SELECT typ, verbrauch_m3, kosten_eur FROM wasserkosten_positionen WHERE jahr=?",
+            (jahr,)).fetchall()
+        kosten_by_typ = {r["typ"]: dict(r) for r in pos_rows}
+        wohn_rows = conn.execute(
+            "SELECT * FROM wasserkosten_wohnungsdaten WHERE jahr=? ORDER BY wohnung_bezeichnung",
+            (jahr,)).fetchall()
+        wohnungen = [dict(r) for r in wohn_rows]
+        vj_rows = conn.execute(
+            "SELECT eigentuemer, wasserkosten_eur FROM wasserkosten_vorjahr WHERE jahr=?",
+            (jahr - 1,)).fetchall()
+        vorjahr = {r["eigentuemer"]: r["wasserkosten_eur"] for r in vj_rows}
+        conn.close()
+
+        if not wohnungen:
+            tk.Label(self._ausw_result,
+                     text="Keine Wohnungsdaten fuer dieses Jahr. Bitte Punktetabelle ausfullen.",
+                     bg=BG_CARD, fg=WARNING, font=FONT_BODY).pack(anchor="w", pady=8)
+            return
+
+        gesamt_brutto = sum(
+            kosten_by_typ.get(t, {}).get("kosten_eur", 0) or 0 for t in self.TYPEN)
+        gutschrift = abs(kosten_by_typ.get("Gutschrift / Erstattung", {}).get("kosten_eur", 0) or 0)
+        gesamt_netto = gesamt_brutto - gutschrift
+
+        for w in wohnungen:
+            basis = (w["personen"] + w["spuelmaschinen"] +
+                     w["waschmaschinen"] + w["trockner_wasserkuehlung"])
+            w["basis_punkte"] = basis
+            w["gew_punkte"]   = round(basis * (w["monate"] or 12) / 12, 4)
+
+        gesamt_gew = sum(w["gew_punkte"] for w in wohnungen)
+        kje_punkt  = (gesamt_netto / gesamt_gew) if gesamt_gew else 0
+
+        for w in wohnungen:
+            w["wasserkosten"] = round(w["gew_punkte"] * kje_punkt, 2)
+            w["anteil"]       = (w["gew_punkte"] / gesamt_gew * 100) if gesamt_gew else 0
+
+        # Eigentuemer aggregieren
+        eig_dict = {}
+        for w in wohnungen:
+            eig = w["eigentuemer"] or "Unbekannt"
+            if eig not in eig_dict:
+                eig_dict[eig] = {"wohnungen": [], "gew_punkte": 0.0, "wasserkosten": 0.0}
+            eig_dict[eig]["wohnungen"].append(w["wohnung_bezeichnung"])
+            eig_dict[eig]["gew_punkte"]   += w["gew_punkte"]
+            eig_dict[eig]["wasserkosten"] += w["wasserkosten"]
+
+        gesamt_check = sum(w["wasserkosten"] for w in wohnungen)
+        plausibel    = abs(gesamt_check - gesamt_netto) < 0.10
+
+        body = self._ausw_result
+
+        def section(txt):
+            tk.Label(body, text=txt, bg=BG_CARD, fg=TEXT, font=FONT_H3).pack(
+                anchor="w", pady=(14, 2))
+            tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(0, 4))
+
+        def info_row(lbl, val, color=TEXT):
+            r = tk.Frame(body, bg=BG_CARD)
+            r.pack(fill="x", pady=1)
+            tk.Label(r, text=lbl, bg=BG_CARD, fg=TEXT_LIGHT,
+                     font=FONT_BODY, width=36, anchor="w").pack(side="left")
+            tk.Label(r, text=val, bg=BG_CARD, fg=color,
+                     font=FONT_BODY, anchor="w").pack(side="left")
+
+        # Abschnitt 1: Ueberblick
+        section(f"1.  Wasserkosten {jahr} - Ueberblick")
+        for typ in self.TYPEN:
+            d = kosten_by_typ.get(typ, {})
+            info_row(typ, f"{d.get('verbrauch_m3', 0) or 0:.0f} m3  ->  {fmt_euro(d.get('kosten_eur', 0) or 0)}")
+        if gutschrift:
+            info_row("Gutschrift / Erstattung", f"- {fmt_euro(gutschrift)}", WARNING)
+        info_row("Wasserkosten netto (Aufteilungsbasis)", fmt_euro(gesamt_netto), ACCENT2)
+
+        # Abschnitt 2: Schluessel
+        section("2.  Berechnungsschluessel")
+        info_row("Gesamtpunkte (gewichtet)", f"{gesamt_gew:.2f} Punkte")
+        info_row("Kosten je Punkt", fmt_euro(kje_punkt), ACCENT2)
+
+        # Abschnitt 3: WE-Aufteilung
+        section("3.  Aufteilung je Wohneinheit")
+        hf = tk.Frame(body, bg=BG_INPUT)
+        hf.pack(fill="x", pady=(0, 2))
+        for txt, w in [("Wohneinheit", 20), ("Eigentuemer", 20), ("Gew.Pkt.", 10),
+                       ("Wasserkosten", 14), ("Anteil %", 10)]:
+            tk.Label(hf, text=txt, bg=BG_INPUT, fg=TEXT_LIGHT,
+                     font=FONT_SMALL, width=w, anchor="w").pack(side="left", padx=4, pady=3)
+        for w in wohnungen:
+            rf = tk.Frame(body, bg=BG_CARD)
+            rf.pack(fill="x")
+            for val, width, anc in [
+                (w["wohnung_bezeichnung"], 20, "w"),
+                (w["eigentuemer"] or "-", 20, "w"),
+                (f"{w['gew_punkte']:.2f}", 10, "e"),
+                (fmt_euro(w["wasserkosten"]), 14, "e"),
+                (f"{w['anteil']:.1f} %", 10, "e"),
+            ]:
+                tk.Label(rf, text=val, bg=BG_CARD, fg=TEXT,
+                         font=FONT_BODY, width=width, anchor=anc).pack(side="left", padx=4)
+        sf = tk.Frame(body, bg=BG_INPUT)
+        sf.pack(fill="x", pady=(2, 0))
+        for val, width, anc in [("GESAMT", 20, "w"), ("", 20, "w"),
+                                  (f"{gesamt_gew:.2f}", 10, "e"),
+                                  (fmt_euro(gesamt_check), 14, "e"), ("100.0 %", 10, "e")]:
+            tk.Label(sf, text=val, bg=BG_INPUT, fg=TEXT,
+                     font=("Segoe UI Semibold", 10), width=width, anchor=anc).pack(
+                side="left", padx=4, pady=3)
+
+        # Abschnitt 4: Eigentuemer
+        section("4.  Aufteilung je Eigentuemer")
+        he = tk.Frame(body, bg=BG_INPUT)
+        he.pack(fill="x", pady=(0, 2))
+        for txt, w in [("Eigentuemer", 22), ("Wohneinheiten", 18), ("Gew.Pkt.", 10),
+                       ("Wasserkosten", 14), ("Anteil %", 10)]:
+            tk.Label(he, text=txt, bg=BG_INPUT, fg=TEXT_LIGHT,
+                     font=FONT_SMALL, width=w, anchor="w").pack(side="left", padx=4, pady=3)
+        gesamt_eig = 0.0
+        for eig, ed in sorted(eig_dict.items()):
+            re2 = tk.Frame(body, bg=BG_CARD)
+            re2.pack(fill="x")
+            anteil = ed["gew_punkte"] / gesamt_gew * 100 if gesamt_gew else 0
+            for val, width, anc in [
+                (eig, 22, "w"),
+                ("+".join(ed["wohnungen"]), 18, "w"),
+                (f"{ed['gew_punkte']:.2f}", 10, "e"),
+                (fmt_euro(ed["wasserkosten"]), 14, "e"),
+                (f"{anteil:.1f} %", 10, "e"),
+            ]:
+                tk.Label(re2, text=val, bg=BG_CARD, fg=TEXT,
+                         font=FONT_BODY, width=width, anchor=anc).pack(side="left", padx=4)
+            gesamt_eig += ed["wasserkosten"]
+        se = tk.Frame(body, bg=BG_INPUT)
+        se.pack(fill="x", pady=(2, 0))
+        for val, width, anc in [("GESAMT", 22, "w"), ("", 18, "w"),
+                                  (f"{gesamt_gew:.2f}", 10, "e"),
+                                  (fmt_euro(gesamt_eig), 14, "e"), ("100.0 %", 10, "e")]:
+            tk.Label(se, text=val, bg=BG_INPUT, fg=TEXT,
+                     font=("Segoe UI Semibold", 10), width=width, anchor=anc).pack(
+                side="left", padx=4, pady=3)
+
+        # Abschnitt 5: Plausibilitaetscheck
+        section("5.  Plausibilitaetscheck")
+        info_row("Summe WE-Kosten", fmt_euro(gesamt_check))
+        info_row("Wasserkosten netto (Eingabe)", fmt_euro(gesamt_netto))
+        diff = gesamt_check - gesamt_netto
+        info_row("Differenz (Rundung)", fmt_euro(diff))
+        check_txt = "OK - Stimmt" if plausibel else "FEHLER - Differenz zu gross!"
+        check_col = SUCCESS if plausibel else DANGER
+        tk.Label(body, text=check_txt, bg=BG_CARD, fg=check_col,
+                 font=("Segoe UI Semibold", 11)).pack(anchor="w", pady=4)
+
+        # Abschnitt 6: Vorjahresvergleich
+        if vorjahr:
+            section(f"6.  Vergleich mit Vorjahr ({jahr - 1})")
+            hv = tk.Frame(body, bg=BG_INPUT)
+            hv.pack(fill="x", pady=(0, 2))
+            for txt, w in [("Eigentuemer", 22), (f"Wert {jahr - 1}", 14),
+                           (f"Aktuell {jahr}", 14), ("Differenz", 14)]:
+                tk.Label(hv, text=txt, bg=BG_INPUT, fg=TEXT_LIGHT,
+                         font=FONT_SMALL, width=w, anchor="w").pack(side="left", padx=4, pady=3)
+            for eig, ed in sorted(eig_dict.items()):
+                vj = vorjahr.get(eig)
+                if vj is None:
+                    continue
+                d_vj = ed["wasserkosten"] - vj
+                rv = tk.Frame(body, bg=BG_CARD)
+                rv.pack(fill="x")
+                for val, width, col in [
+                    (eig, 22, TEXT),
+                    (fmt_euro(vj), 14, TEXT_LIGHT),
+                    (fmt_euro(ed["wasserkosten"]), 14, TEXT),
+                    (fmt_euro(d_vj), 14, SUCCESS if d_vj <= 0 else DANGER),
+                ]:
+                    tk.Label(rv, text=val, bg=BG_CARD, fg=col,
+                             font=FONT_BODY, width=width,
+                             anchor="w" if width == 22 else "e").pack(side="left", padx=4)
+
+        # Als-Vorjahr-Speichern
+        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(16, 4))
+        vr = tk.Frame(body, bg=BG_CARD)
+        vr.pack(fill="x", pady=(0, 16))
+        tk.Label(vr, text=f"Werte {jahr} als Vorjahresvergleich fuer {jahr + 1} speichern:",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left", padx=(0, 8))
+        make_btn(vr, "Als Vorjahr speichern",
+                 lambda: self._save_als_vorjahr(eig_dict, jahr),
+                 color=BG_INPUT, fg=TEXT).pack(side="left")
+
+    def _save_als_vorjahr(self, eig_dict, jahr):
+        conn = get_db()
+        conn.execute("DELETE FROM wasserkosten_vorjahr WHERE jahr=?", (jahr,))
+        for eig, ed in eig_dict.items():
+            conn.execute(
+                "INSERT INTO wasserkosten_vorjahr (jahr, eigentuemer, wasserkosten_eur) VALUES (?,?,?)",
+                (jahr, eig, round(ed["wasserkosten"], 2)))
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Gespeichert",
+            f"Werte {jahr} als Vorjahr fuer {jahr + 1} gespeichert.", parent=self)
+
+    # ── Tab-Umschalten ────────────────────────────────────────────────────────
+
+    def _switch_tab(self, tab):
+        for tid, btn in self._tab_btns.items():
+            btn.config(bg=ACCENT2 if tid == tab else BG_CARD,
+                       fg=TEXT_WHITE if tid == tab else TEXT_LIGHT)
+        for v in [self._view_kosten, self._view_punkte, self._view_auswertung]:
+            v.pack_forget()
+        if tab == "kosten":
+            self._view_kosten.pack(fill="both", expand=True)
+            self._load_kosten()
+        elif tab == "punkte":
+            self._view_punkte.pack(fill="both", expand=True)
+            self._load_punkte()
+        elif tab == "auswertung":
+            self._view_auswertung.pack(fill="both", expand=True)
+
+    def _refresh(self):
+        self._load_kosten()
+        self._load_punkte()
+        if self._ausw_result:
+            for w in self._ausw_result.winfo_children():
+                w.destroy()
+
+    # ── Hilfsmethoden ─────────────────────────────────────────────────────────
+
+    def _jahr_int(self):
+        try:
+            return int(self._jahr_var.get())
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _flt(val):
+        try:
+            return float(str(val).replace(",", ".").strip() or 0)
+        except (ValueError, TypeError):
+            return 0.0
+
+    @staticmethod
+    def _int(val):
+        try:
+            return max(0, int(str(val).strip() or 0))
+        except (ValueError, TypeError):
+            return 0
+
+
+# ── EinstellungenPage ─────────────────────────────────────────────────────────
+
+
 class EinstellungenPage(tk.Frame):
     """Einstellungen-Seite: Speicherpfade und Konfiguration."""
 
@@ -4087,6 +4807,7 @@ class HausverwaltungApp(tk.Tk):
         ("💰", "Buchhaltung",    BuchhaltungPage),
         ("🔧", "Wartung",        WartungPage),
         ("📋", "Nebenkosten",    NebenkostenPage),
+        ("💧", "Wasserkosten",   WasserkostenPage),
         ("⚖",  "Aufteilungen",   AufteilungenPage),
         ("✉️",  "Nachrichten",    NachrichtenPage),
         ("📁", "Dokumente",      DokumentePage),

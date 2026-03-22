@@ -7,6 +7,23 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.7.0] — 2026-03-22
+
+### Hinzugefügt
+- **Wasserkosten-Seite**: Neue Seite „💧 Wasserkosten" zur Berechnung der Wasserkostenverteilung nach Punkteschlüssel
+  - Tab 1 „Jahreskosten": Erfassung von Frischwasser, Abwasser und Niederschlagswasser (je Verbrauch m³, Kosten €, Ablesedatum) sowie Gutschrift/Erstattung
+  - Tab 2 „Punktetabelle": Wohnungsdaten mit Personen, Spülmaschinen, Waschmaschinen, Trockner (Wasserkühlung), Monate; automatischer Import aus Stammdaten-Wohnungen
+  - Tab 3 „Auswertung": Berechnung Kosten je Punkt (Gesamtkosten netto / Gesamtpunkte gewichtet), Aufschlüsselung je Wohneinheit und je Eigentümer, Plausibilitätscheck (Toleranz < 0,10 €), Vorjahresvergleich
+  - Daten werden je Abrechnungsjahr in drei neuen DB-Tabellen gespeichert: `wasserkosten_positionen`, `wasserkosten_wohnungsdaten`, `wasserkosten_vorjahr`
+
+### Bugfixes
+- **Buchhaltung – „Alle grünen übernehmen"** (Issue #2): Batch-Übernahme funktioniert jetzt korrekt bei mehreren markierten Einträgen
+  - Einträge selektiert → nur die markierten grünen Einträge werden verarbeitet
+  - Nichts selektiert → alle grünen Einträge des aktiven Kontos werden verarbeitet
+  - Keine Rückfrage pro Buchung im Bulk-Modus
+
+---
+
 ## [0.6.0] — 2026-03-21
 
 ### Bugfixes
