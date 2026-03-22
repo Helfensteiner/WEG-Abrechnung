@@ -8,6 +8,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 import sqlite3
 import json
 import os
+import glob
 import csv
 import re
 import subprocess
@@ -17,7 +18,7 @@ from pathlib import Path
 
 # ── Versionierung ──────────────────────────────────────────────────────────────
 # Semantic Versioning: 0.MINOR.PATCH (Major=0 solange in Entwicklung)
-# Synchron mit GitHub-Tags: git tag v0.3.0
+# Synchron mit GitHub-Tags: git tag v0.4.0
 #
 # Versionshistorie:
 #   0.1.0 — Initiale App: Tkinter-GUI, SQLite, CRUD für alle Entitäten,
@@ -28,9 +29,21 @@ from pathlib import Path
 #   0.3.0 — Scrollbare/resizable Dialoge mit Größenpersistenz,
 #            Rollenverwaltung-UI, Eigentümer-Wohnungszuordnung im Dialog,
 #            Eigentümer als Bewohner (Eigennutzung), Versionierung
+#   0.4.0 — Multi-Datei/Ordner-Import (CAMT.052 + CSV), Dublettenprüfung,
+#            Buchungsstatus (Neu/Geprüft/Freigegeben), visuelle Hervorhebung
+#   0.4.1 — Bugfix Buchhaltung-Vorschläge (sqlite3.Row.get), Passwort-Management
+#            (generieren, ändern, Passwortabfrage abschaltbar pro Benutzer)
+#   0.5.0 — WEG-Kostenkategorien (27 Kategorien mit Metadaten), Einstellungen
+#            erweitert (Kontobezeichnungen, IBAN-Formatierung, Standard-Importpfad),
+#            Kontoauszug-Filter, Fett-Markierung neuer Buchungen, erweiterte Kacheln,
+#            Batch-Übernahme Vorschläge, PW-Skip pro Rolle
+#   0.6.0 — Bugfixes: DB-Lock Multi-Import, Übernehmen-Button, Einstellungen Kontenfelder;
+#            Importfortschritt, Kostenarten-CRUD (neu/bearbeiten/deaktivieren/löschen),
+#            „Kategorie offen", verbessertes Buchungsregeln-Matching (Auftraggeber,
+#            Keywords, Füllwörter-Filterung, dreistufige Matching-Strategie)
 # ───────────────────────────────────────────────────────────────────────────────
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.6.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 
@@ -324,6 +337,10 @@ CREATE TABLE IF NOT EXISTS rechte (
         "ALTER TABLE wohnungen ADD COLUMN heizungsart TEXT DEFAULT 'Zentralheizung'",
         "ALTER TABLE wohnungen ADD COLUMN mea_tausendstel REAL",
         "ALTER TABLE benutzer ADD COLUMN rolle_id INTEGER",
+        "ALTER TABLE zahlungen ADD COLUMN status TEXT DEFAULT 'Geprüft'",
+        "ALTER TABLE benutzer ADD COLUMN passwort_skip INTEGER DEFAULT 0",
+        "ALTER TABLE kontoauszug ADD COLUMN ist_neu INTEGER DEFAULT 1",
+        "ALTER TABLE rollen ADD COLUMN passwort_skip INTEGER DEFAULT 0",
     ]:
         try:
             c.execute(sql)
@@ -466,26 +483,85 @@ def make_table(parent, columns, height=12):
 
 # ── Buchhaltung-Intelligenz (Lernfähiges Buchungssystem) ──────────────────────
 
+# Füllwörter die bei der Buchungsregel-Erstellung und -Suche ignoriert werden
+FUELLWOERTER = {
+    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "einer",
+    "und", "oder", "von", "vom", "zum", "zur", "auf", "aus", "bei", "mit", "nach",
+    "über", "unter", "für", "gegen", "durch", "an", "in", "im", "am", "um",
+    "ist", "sind", "hat", "haben", "wird", "werden", "wurde", "wurden",
+    "gmbh", "ag", "kg", "ohg", "mbh", "ug", "e.v.", "co", "nr", "ggmbh",
+    "ref", "datum", "kto", "blz", "bic", "iban", "end-to-end",
+}
+
+def _bereinige_text(text: str) -> str:
+    """Entfernt Füllwörter und normalisiert Text für besseres Matching."""
+    words = text.lower().split()
+    return " ".join(w for w in words if w not in FUELLWOERTER and len(w) > 2)
+
 def vorschlag_kategorie(buchungstext: str) -> tuple:
-    """Gibt (kategorie, typ, konto_typ) als Vorschlag zurück, basierend auf gelernten Regeln."""
+    """Gibt (kategorie, typ, konto_typ) als Vorschlag zurück, basierend auf gelernten Regeln.
+
+    Matching-Strategie:
+    1. Exaktes Muster-Match im Buchungstext (höchste Priorität)
+    2. Auftraggeber/Empfänger-Match (vor dem ||)
+    3. Keyword-Match im Verwendungszweck (nach dem ||)
+    """
     if not buchungstext:
-        return "", "Einnahme", "Girokonto"
+        return "", "Einnahme", "Wohngeldkonto"
     conn = get_db()
     regeln = conn.execute(
         "SELECT * FROM buchungsregeln ORDER BY treffer DESC, ist_korrektur DESC"
     ).fetchall()
     conn.close()
     text_lower = buchungstext.lower()
+    # Auftraggeber/Empfänger und Verwendungszweck trennen
+    if "||" in buchungstext:
+        auftraggeber, vzweck = buchungstext.split("||", 1)
+        auftraggeber = auftraggeber.strip().lower()
+        vzweck = vzweck.strip().lower()
+    else:
+        auftraggeber = ""
+        vzweck = text_lower
+
+    # 1. Exaktes Muster-Match im gesamten Text (Priorität 1)
     for regel in regeln:
-        if regel["muster"].lower() in text_lower:
-            return regel["kategorie"] or "", regel["typ"] or "Einnahme", regel["konto_typ"] or "Girokonto"
-    return "", "Einnahme", "Girokonto"
+        muster = regel["muster"].lower()
+        if muster in text_lower:
+            return regel["kategorie"] or "", regel["typ"] or "Einnahme", regel["konto_typ"] or "Wohngeldkonto"
+
+    # 2. Auftraggeber-Match (Priorität 2)
+    if auftraggeber:
+        auftr_bereinigt = _bereinige_text(auftraggeber)
+        for regel in regeln:
+            muster = _bereinige_text(regel["muster"])
+            if muster and muster in auftr_bereinigt:
+                return regel["kategorie"] or "", regel["typ"] or "Einnahme", regel["konto_typ"] or "Wohngeldkonto"
+
+    # 3. Keyword-Match im Verwendungszweck (Priorität 3)
+    vzweck_bereinigt = _bereinige_text(vzweck)
+    for regel in regeln:
+        muster = _bereinige_text(regel["muster"])
+        if muster and muster in vzweck_bereinigt:
+            return regel["kategorie"] or "", regel["typ"] or "Einnahme", regel["konto_typ"] or "Wohngeldkonto"
+
+    return "", "Einnahme", "Wohngeldkonto"
 
 def lerne_buchung(buchungstext: str, kategorie: str, typ: str, konto_typ: str, ist_korrektur: bool = False):
-    """Speichert oder aktualisiert eine Buchungsregel."""
+    """Speichert oder aktualisiert eine Buchungsregel.
+
+    Muster-Extraktion:
+    - Bei buchungstext mit || → Auftraggeber/Empfänger (vor ||) als Muster
+    - Sonst: gesamten Text (max 40 Zeichen) als Muster
+    - Füllwörter werden nicht entfernt (das passiert beim Matching)
+    """
     if not buchungstext or not kategorie:
         return
-    muster = buchungstext.split("||")[0].strip()[:40] if "||" in buchungstext else buchungstext[:40]
+    if "||" in buchungstext:
+        auftraggeber = buchungstext.split("||")[0].strip()
+        # Auftraggeber als primäres Muster (max 60 Zeichen)
+        muster = auftraggeber[:60] if auftraggeber else buchungstext[:40]
+    else:
+        muster = buchungstext[:40]
     if not muster:
         return
     conn = get_db()
@@ -1330,8 +1406,65 @@ class BuchhaltungPage(tk.Frame):
     3. Regeln      – gelernte Buchungsregeln verwalten
     """
 
-    KATEGORIEN = ["Miete", "Hausgeld", "Rücklage", "Nebenkosten",
-                  "Wartung", "Verwaltung", "Versicherung", "Sonstiges"]
+    # Kostenkategorien gemäß WEG-Verwaltung (Notion: Kostenkategorie/Kostenart)
+    KATEGORIEN = [
+        # Laufende Betriebskosten
+        "Heizung", "Wasser/Abwasser", "Allgemeinstrom",
+        "Gebäudereinigung", "Hausmeister", "Winterdienst", "Gartenpflege",
+        "Müllabfuhr", "Straßenreinigung",
+        # Verwaltungskosten
+        "Verwaltervergütung", "Bankgebühren", "Porto/Telefon",
+        "Rechts-/Prozesskosten",
+        # Instandhaltung & Wartung
+        "Reparaturen", "Wartungsverträge", "Sanierung",
+        # Versicherungen
+        "Wohngebäudeversicherung", "Haftpflichtversicherung",
+        "Elementar-/Glasversicherung",
+        # Finanzplanung & Rücklagen
+        "Erhaltungsrücklage", "Sonderumlage",
+        # Einnahmen
+        "Hausgeld", "Miete", "Nebenkosten-Vorauszahlung",
+        # Sonstiges
+        "Sonstiges",
+        # Offen / Unkategorisiert
+        "Kategorie offen",
+    ]
+    # Kostenkategorie-Zuordnung mit Metadaten
+    KOSTENARTEN = {
+        # Laufende Betriebskosten (umlagefähig)
+        "Heizung":              {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "Verbrauch/Wohnfläche"},
+        "Wasser/Abwasser":      {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "Verbrauch/Wohnfläche"},
+        "Allgemeinstrom":       {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA"},
+        "Gebäudereinigung":     {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Fläche"},
+        "Hausmeister":          {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Fläche"},
+        "Winterdienst":         {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Fläche"},
+        "Gartenpflege":         {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Fläche"},
+        "Müllabfuhr":           {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Wohneinheiten"},
+        "Straßenreinigung":     {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Wohneinheiten"},
+        # Verwaltungskosten (nicht umlagefähig)
+        "Verwaltervergütung":   {"kategorie": "Verwaltungskosten",       "umlagefaehig": False, "schluessel": "Wohneinheiten/MEA"},
+        "Bankgebühren":         {"kategorie": "Verwaltungskosten",       "umlagefaehig": False, "schluessel": "MEA/Wohneinheiten"},
+        "Porto/Telefon":        {"kategorie": "Verwaltungskosten",       "umlagefaehig": False, "schluessel": "MEA/Wohneinheiten"},
+        "Rechts-/Prozesskosten":{"kategorie": "Verwaltungskosten",       "umlagefaehig": False, "schluessel": "MEA"},
+        # Instandhaltung & Wartung
+        "Reparaturen":          {"kategorie": "Instandhaltung & Wartung","umlagefaehig": False, "schluessel": "MEA"},
+        "Wartungsverträge":     {"kategorie": "Instandhaltung & Wartung","umlagefaehig": "Teilweise", "schluessel": "MEA/Wohneinheiten"},
+        "Sanierung":            {"kategorie": "Instandhaltung & Wartung","umlagefaehig": False, "schluessel": "MEA"},
+        # Versicherungen (umlagefähig)
+        "Wohngebäudeversicherung":  {"kategorie": "Versicherungen",      "umlagefaehig": True,  "schluessel": "MEA"},
+        "Haftpflichtversicherung":  {"kategorie": "Versicherungen",      "umlagefaehig": True,  "schluessel": "MEA"},
+        "Elementar-/Glasversicherung":{"kategorie": "Versicherungen",    "umlagefaehig": True,  "schluessel": "MEA"},
+        # Finanzplanung & Rücklagen
+        "Erhaltungsrücklage":   {"kategorie": "Finanzplanung & Rücklagen","umlagefaehig": False,"schluessel": "MEA"},
+        "Sonderumlage":         {"kategorie": "Finanzplanung & Rücklagen","umlagefaehig": False,"schluessel": "MEA"},
+        # Einnahmen
+        "Hausgeld":             {"kategorie": "Einnahmen",               "umlagefaehig": False, "schluessel": "–"},
+        "Miete":                {"kategorie": "Einnahmen",               "umlagefaehig": False, "schluessel": "–"},
+        "Nebenkosten-Vorauszahlung":{"kategorie": "Einnahmen",           "umlagefaehig": False, "schluessel": "–"},
+        # Sonstiges
+        "Sonstiges":            {"kategorie": "Sonstiges",               "umlagefaehig": False, "schluessel": "–"},
+        "Kategorie offen":      {"kategorie": "Offen",                   "umlagefaehig": False, "schluessel": "–"},
+    }
 
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)
@@ -1356,7 +1489,8 @@ class BuchhaltungPage(tk.Frame):
         tab_bar.pack(fill="x", padx=20, pady=(8, 0))
         for tid, label in [("buchungen",  "📒  Buchungen"),
                             ("vorschlaege","🔔  Kontoauszug Vorschläge"),
-                            ("regeln",    "⚙  Buchungsregeln")]:
+                            ("regeln",    "⚙  Buchungsregeln"),
+                            ("kostenarten","📋  Kostenarten")]:
             btn = tk.Button(tab_bar, text=label, font=FONT_NAV, relief="flat", bd=0,
                             padx=14, pady=7, cursor="hand2",
                             command=lambda t=tid: self._switch_tab(t))
@@ -1382,13 +1516,14 @@ class BuchhaltungPage(tk.Frame):
 
         # Buchungen-View
         self._view_buchungen = tk.Frame(self._content, bg=BG_CARD)
-        cols_b = ("Datum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Belegnr.")
+        cols_b = ("Datum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Belegnr.")
         fb, self.tree_b = make_table(self._view_buchungen, cols_b, height=13)
         fb.pack(fill="both", expand=True, padx=20, pady=6)
-        for c, w in zip(cols_b, [90, 240, 120, 100, 80, 90]):
+        for c, w in zip(cols_b, [90, 210, 110, 100, 80, 80, 80]):
             self.tree_b.heading(c, text=c); self.tree_b.column(c, width=w, anchor="w")
         self.tree_b.tag_configure("einnahme", foreground=SUCCESS)
         self.tree_b.tag_configure("ausgabe",  foreground=DANGER)
+        self.tree_b.tag_configure("neu", foreground=ACCENT2, font=("Segoe UI Semibold", 10))
         self.tree_b.bind("<Double-1>", self._edit_buchung)
         btn_b = tk.Frame(self._view_buchungen, bg=BG_CARD)
         btn_b.pack(fill="x", padx=20, pady=(0, 8))
@@ -1397,21 +1532,33 @@ class BuchhaltungPage(tk.Frame):
 
         # Vorschläge-View
         self._view_vorschlaege = tk.Frame(self._content, bg=BG_CARD)
-        info_vs = tk.Label(self._view_vorschlaege,
-            text="Neue Kontoauszug-Buchungen → Kategorie zuweisen und übernehmen",
-            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL)
-        info_vs.pack(anchor="w", padx=20, pady=(6, 2))
+        # Konto-Filter für Vorschläge
+        vs_filter = tk.Frame(self._view_vorschlaege, bg=BG_CARD)
+        vs_filter.pack(fill="x", padx=20, pady=(6, 2))
+        tk.Label(vs_filter, text="Neue Kontoauszug-Buchungen → Kategorie zuweisen und übernehmen",
+            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        tk.Label(vs_filter, text="  Konto:", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(side="left", padx=(12, 0))
+        self._vs_konto_var = tk.StringVar(value="Alle")
+        self._vs_konto_combo = ttk.Combobox(vs_filter, textvariable=self._vs_konto_var,
+                                             state="readonly", font=FONT_SMALL, width=30)
+        self._vs_konto_combo.pack(side="left", padx=(4, 0))
+        self._vs_konto_combo.bind("<<ComboboxSelected>>", lambda e: self._load_vorschlaege())
+
         cols_v = ("Datum", "Auftraggeber", "Verwendungszweck", "Betrag", "Konto", "Vorschlag Kat.")
         fv, self.tree_v = make_table(self._view_vorschlaege, cols_v, height=12)
         fv.pack(fill="both", expand=True, padx=20, pady=4)
         for c, w in zip(cols_v, [88, 180, 250, 100, 90, 120]):
             self.tree_v.heading(c, text=c); self.tree_v.column(c, width=w, anchor="w")
         self.tree_v.tag_configure("mit_vorschlag", foreground="#2E7D32")
+        # Mehrfachauswahl aktivieren
+        self.tree_v.configure(selectmode="extended")
         btn_v = tk.Frame(self._view_vorschlaege, bg=BG_CARD)
         btn_v.pack(fill="x", padx=20, pady=(0, 8))
-        make_btn(btn_v, "✔ Übernehmen",           self._uebernehmen,    color=SUCCESS).pack(side="left", padx=(0,6))
-        make_btn(btn_v, "✏ Kategorie korrigieren", self._korrigieren,    color=ACCENT2).pack(side="left", padx=(0,6))
-        make_btn(btn_v, "✗ Falsch zugeordnet",     self._falsch_markieren,color=DANGER).pack(side="left")
+        make_btn(btn_v, "✔ Übernehmen",              self._uebernehmen,      color=SUCCESS).pack(side="left", padx=(0,6))
+        make_btn(btn_v, "✔✔ Alle grünen übernehmen", self._batch_uebernehmen,color="#2E7D32").pack(side="left", padx=(0,6))
+        make_btn(btn_v, "✏ Kategorie korrigieren",    self._korrigieren,      color=ACCENT2).pack(side="left", padx=(0,6))
+        make_btn(btn_v, "✗ Falsch zugeordnet",        self._falsch_markieren, color=DANGER).pack(side="left")
 
         # Regeln-View
         self._view_regeln = tk.Frame(self._content, bg=BG_CARD)
@@ -1429,6 +1576,25 @@ class BuchhaltungPage(tk.Frame):
         make_btn(btn_r, "✏ Korrigieren", self._edit_regel, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
         make_btn(btn_r, "🗑 Löschen",    self._delete_regel, color=DANGER).pack(side="left")
 
+        # Kostenarten-View
+        self._view_kostenarten = tk.Frame(self._content, bg=BG_CARD)
+        info_k = tk.Label(self._view_kostenarten,
+            text="WEG-Kostenkategorien verwalten — deaktivierte Kategorien können nicht mehr zugewiesen werden",
+            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL)
+        info_k.pack(anchor="w", padx=20, pady=(6, 2))
+        cols_k = ("Kategorie", "Oberkategorie", "Umlagefähig", "Schlüssel", "Status", "Verwendungen")
+        fk, self.tree_k = make_table(self._view_kostenarten, cols_k, height=14)
+        fk.pack(fill="both", expand=True, padx=20, pady=4)
+        for c, w in zip(cols_k, [180, 180, 100, 140, 80, 100]):
+            self.tree_k.heading(c, text=c); self.tree_k.column(c, width=w, anchor="w")
+        self.tree_k.tag_configure("deaktiviert", foreground=TEXT_LIGHT)
+        btn_k = tk.Frame(self._view_kostenarten, bg=BG_CARD)
+        btn_k.pack(fill="x", padx=20, pady=(0, 8))
+        make_btn(btn_k, "＋ Neue Kategorie", self._new_kostenart, color=ACCENT2).pack(side="left", padx=(0,6))
+        make_btn(btn_k, "✏ Bearbeiten", self._edit_kostenart, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
+        make_btn(btn_k, "🔄 Aktivieren/Deaktivieren", self._toggle_kostenart, color=WARNING, fg=TEXT_WHITE).pack(side="left", padx=(0,6))
+        make_btn(btn_k, "🗑 Löschen", self._delete_kostenart, color=DANGER).pack(side="left")
+
         self._switch_tab("buchungen")
 
     # ── Tab-Umschalten ────────────────────────────────────────────────────────
@@ -1444,7 +1610,7 @@ class BuchhaltungPage(tk.Frame):
         # Filter-Zeile nur bei Buchungen
         self._filter_frame.pack_forget()
         # Views ein-/ausblenden
-        for v in [self._view_buchungen, self._view_vorschlaege, self._view_regeln]:
+        for v in [self._view_buchungen, self._view_vorschlaege, self._view_regeln, self._view_kostenarten]:
             v.pack_forget()
         if tab == "buchungen":
             self._filter_frame.pack(fill="x", padx=20, pady=(4, 0))
@@ -1456,6 +1622,9 @@ class BuchhaltungPage(tk.Frame):
         elif tab == "regeln":
             self._view_regeln.pack(fill="both", expand=True)
             self._load_regeln()
+        elif tab == "kostenarten":
+            self._view_kostenarten.pack(fill="both", expand=True)
+            self._load_kostenarten()
 
     # ── Tab 1: Buchungen ──────────────────────────────────────────────────────
 
@@ -1469,13 +1638,17 @@ class BuchhaltungPage(tk.Frame):
         q += " ORDER BY datum DESC, erstellt_am DESC"
         einnahmen = ausgaben = 0.0
         for r in conn.execute(q):
-            tag = "einnahme" if r["typ"] == "Einnahme" else "ausgabe"
-            self.tree_b.insert("", "end", iid=r["id"], values=(
-                fmt_date(r["datum"]), r["beschreibung"] or "–",
-                r["kategorie"] or "–", fmt_euro(r["betrag"]),
-                r["typ"], r["belegnr"] or "–"), tags=(tag,))
-            if r["typ"] == "Einnahme": einnahmen += r["betrag"] or 0
-            else:                      ausgaben  += abs(r["betrag"] or 0)
+            rd = dict(r)
+            status = rd.get("status") or "Geprüft"
+            tags_list = ["einnahme" if rd["typ"] == "Einnahme" else "ausgabe"]
+            if status == "Neu":
+                tags_list.append("neu")
+            self.tree_b.insert("", "end", iid=rd["id"], values=(
+                fmt_date(rd["datum"]), rd["beschreibung"] or "–",
+                rd["kategorie"] or "–", fmt_euro(rd["betrag"]),
+                rd["typ"], status, rd["belegnr"] or "–"), tags=tuple(tags_list))
+            if rd["typ"] == "Einnahme": einnahmen += rd["betrag"] or 0
+            else:                       ausgaben  += abs(rd["betrag"] or 0)
         conn.close()
         saldo = einnahmen - ausgaben
         color = SUCCESS if saldo >= 0 else DANGER
@@ -1496,9 +1669,10 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr) "
-                "VALUES (?,?,?,?,?,?)",
-                (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"]))
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
+                 v.get("status", "Geprüft")))
             conn.commit(); conn.close()
             if self._active_tab == "buchungen": self._load_buchungen()
 
@@ -1518,10 +1692,10 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
-                 v["beschreibung"], v["belegnr"], int(sel[0])))
+                 v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"), int(sel[0])))
             conn.commit(); conn.close()
             self._load_buchungen()
 
@@ -1558,18 +1732,44 @@ class BuchhaltungPage(tk.Frame):
     def _load_vorschlaege(self):
         for i in self.tree_v.get_children(): self.tree_v.delete(i)
         conn = get_db()
-        rows = conn.execute(
-            "SELECT * FROM kontoauszug "
-            "WHERE (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
+        # Konto-Filter aktualisieren
+        konten_raw = conn.execute(
+            "SELECT DISTINCT iban FROM kontoauszug "
+            "WHERE iban IS NOT NULL AND iban != '' "
+            "AND (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
             "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) "
-            "ORDER BY datum DESC, id DESC"
+            "ORDER BY iban"
         ).fetchall()
+        cfg = load_config()
+        konto_labels = ["Alle"]
+        self._vs_iban_map = {"Alle": None}
+        for kr in konten_raw:
+            iban = kr["iban"]
+            # Bezeichnung aus Einstellungen
+            label = KontoauszugPage._konto_bezeichnung(None, iban, cfg)
+            konto_labels.append(label)
+            self._vs_iban_map[label] = iban
+        self._vs_konto_combo["values"] = konto_labels
+        if self._vs_konto_var.get() not in konto_labels:
+            self._vs_konto_var.set("Alle")
+
+        selected_iban = self._vs_iban_map.get(self._vs_konto_var.get())
+        q = ("SELECT * FROM kontoauszug "
+             "WHERE (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
+             "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) ")
+        params = []
+        if selected_iban:
+            q += "AND iban=? "
+            params.append(selected_iban)
+        q += "ORDER BY datum DESC, id DESC"
+        rows = conn.execute(q, params).fetchall()
         conn.close()
-        for r in rows:
+        for row in rows:
+            r = dict(row)
             raw = r["buchungstext"] or ""
             gegenkonto = raw.split("||")[0] if "||" in raw else ""
             vzweck     = raw.split("||")[1] if "||" in raw else raw
-            vorschlag  = r["kategorie_vorschlag"] or vorschlag_kategorie(raw)[0]
+            vorschlag  = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
             tag = "mit_vorschlag" if vorschlag else ""
             iban_kurz = f"···{r['iban'][-8:]}" if r.get("iban") else r.get("konto_typ") or "–"
             self.tree_v.insert("", "end", iid=r["id"], values=(
@@ -1584,15 +1784,26 @@ class BuchhaltungPage(tk.Frame):
     def _uebernehmen(self):
         """Kontoauszug-Eintrag als Buchung in zahlungen übernehmen."""
         sel = self.tree_v.selection()
-        if not sel: return
+        if not sel:
+            messagebox.showinfo("Hinweis", "Bitte einen Eintrag auswählen.", parent=self)
+            return
+        if not hat_recht("Buchhaltung", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
+            return
         conn = get_db()
-        row = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(sel[0]),)).fetchone()
+        row_raw = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(sel[0]),)).fetchone()
         conn.close()
-        if not row: return
+        if not row_raw:
+            messagebox.showwarning("Fehler", "Eintrag nicht gefunden.", parent=self)
+            return
+        row = dict(row_raw)
         raw = row["buchungstext"] or ""
         gegenkonto = raw.split("||")[0] if "||" in raw else ""
         vzweck     = raw.split("||")[1] if "||" in raw else raw
         kat_v, typ_v, kto_v = vorschlag_kategorie(raw)
+        # Vorhandenen Kategorie-Vorschlag bevorzugen
+        kat_v = row.get("kategorie_vorschlag") or kat_v
+        kt = row.get("konto_typ") or kto_v or "Wohngeldkonto"
 
         # Vorbelegter ZahlungDialog
         pseudo = {
@@ -1602,6 +1813,7 @@ class BuchhaltungPage(tk.Frame):
             "kategorie":   kat_v,
             "beschreibung": f"{gegenkonto} – {vzweck}".strip(" –"),
             "belegnr":     "",
+            "status":      "Neu",
         }
         d = ZahlungDialog(self, pseudo)
         self.wait_window(d)
@@ -1611,28 +1823,81 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr) "
-                "VALUES (?,?,?,?,?,?)",
-                (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"]))
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,konto_typ,status) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
+                 kt, v.get("status", "Neu")))
+            zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             conn.execute(
-                "UPDATE kontoauszug SET als_buchung_uebernommen=1, kategorie_vorschlag=? WHERE id=?",
-                (v["kategorie"], int(sel[0])))
+                "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
+                "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
+                (v["kategorie"], zahlung_id, int(sel[0])))
             conn.commit(); conn.close()
-            lerne_buchung(raw, v["kategorie"], v["typ"],
-                          row.get("konto_typ") or "Girokonto", ist_korrektur=False)
+            lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False)
             self._load_vorschlaege()
             self._saldo_label.config(text="")
+
+    def _batch_uebernehmen(self):
+        """Alle grün markierten Vorschläge (mit Kategorie-Vorschlag) automatisch übernehmen."""
+        if not hat_recht("Buchhaltung", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
+            return
+        conn = get_db()
+        # Alle nicht übernommenen Einträge MIT Kategorie-Vorschlag
+        q = ("SELECT * FROM kontoauszug "
+             "WHERE (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
+             "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) ")
+        params = []
+        selected_iban = self._vs_iban_map.get(self._vs_konto_var.get())
+        if selected_iban:
+            q += "AND iban=? "
+            params.append(selected_iban)
+        q += "ORDER BY datum"
+        rows = conn.execute(q, params).fetchall()
+        count = 0
+        for row_raw in rows:
+            row = dict(row_raw)
+            raw = row["buchungstext"] or ""
+            kat = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
+            if not kat:
+                continue  # Kein Vorschlag → überspringen
+            betrag = row["betrag"] or 0
+            typ = "Einnahme" if betrag >= 0 else "Ausgabe"
+            gegenkonto = raw.split("||")[0] if "||" in raw else ""
+            vzweck = raw.split("||")[1] if "||" in raw else raw
+            beschr = f"{gegenkonto} – {vzweck}".strip(" –") if gegenkonto else vzweck
+            kt = row.get("konto_typ") or "Wohngeldkonto"
+            conn.execute(
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,konto_typ,status) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (row["datum"], betrag, typ, kat, beschr[:200], kt, "Neu"))
+            zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
+                "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
+                (kat, zahlung_id, row["id"]))
+            lerne_buchung(raw, kat, typ, kt)
+            count += 1
+        conn.commit()
+        conn.close()
+        if count:
+            messagebox.showinfo("Batch-Übernahme", f"{count} Vorschläge automatisch übernommen.")
+        else:
+            messagebox.showinfo("Batch-Übernahme", "Keine Vorschläge mit Kategorie-Zuordnung vorhanden.")
+        self._load_vorschlaege()
+        self._saldo_label.config(text="")
 
     def _korrigieren(self):
         """Kategorie-Vorschlag für diesen Eintrag manuell korrigieren (Lernen)."""
         sel = self.tree_v.selection()
         if not sel: return
         conn = get_db()
-        row = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(sel[0]),)).fetchone()
+        row_raw = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(sel[0]),)).fetchone()
         conn.close()
-        if not row: return
+        if not row_raw: return
+        row = dict(row_raw)
         raw = row["buchungstext"] or ""
-        kat_v = row["kategorie_vorschlag"] or vorschlag_kategorie(raw)[0]
+        kat_v = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
         # Auswahldialog für Kategorie
         win = tk.Toplevel(self)
         win.title("Kategorie korrigieren")
@@ -1648,7 +1913,7 @@ class BuchhaltungPage(tk.Frame):
         body.pack(fill="both", expand=True, padx=20, pady=12)
         tk.Label(body, text="Kategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
         kat_var = tk.StringVar(value=kat_v)
-        cb = ttk.Combobox(body, textvariable=kat_var, values=self.KATEGORIEN,
+        cb = ttk.Combobox(body, textvariable=kat_var, values=self.aktive_kategorien(),
                           state="readonly", font=FONT_BODY)
         cb.pack(fill="x", ipady=4)
         typ_var = tk.StringVar(value="Einnahme" if (row["betrag"] or 0) >= 0 else "Ausgabe")
@@ -1664,7 +1929,7 @@ class BuchhaltungPage(tk.Frame):
                           (kat_var.get(), int(sel[0])))
             conn2.commit(); conn2.close()
             lerne_buchung(raw, kat_var.get(), typ_var.get(),
-                          row.get("konto_typ") or "Girokonto", ist_korrektur=True)
+                          row.get("konto_typ") or "Wohngeldkonto", ist_korrektur=True)
             win.destroy()
         btn_row = tk.Frame(win, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0,12))
@@ -1720,7 +1985,7 @@ class BuchhaltungPage(tk.Frame):
         make_entry(body, textvariable=muster_var).pack(fill="x", ipady=6)
         tk.Label(body, text="Kategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
         kat_var = tk.StringVar(value=row["kategorie"] or "")
-        ttk.Combobox(body, textvariable=kat_var, values=self.KATEGORIEN,
+        ttk.Combobox(body, textvariable=kat_var, values=self.aktive_kategorien(),
                      state="readonly", font=FONT_BODY).pack(fill="x", ipady=4)
         tk.Label(body, text="Typ", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
         typ_var = tk.StringVar(value=row["typ"] or "Einnahme")
@@ -1746,6 +2011,207 @@ class BuchhaltungPage(tk.Frame):
             conn.execute("DELETE FROM buchungsregeln WHERE id=?", (int(sel[0]),))
             conn.commit(); conn.close(); self._load_regeln()
 
+    # ── Tab 4: Kostenarten ──────────────────────────────────────────────────
+
+    # Deaktivierte Kategorien (persistent im Config)
+    @staticmethod
+    def _deaktivierte_kategorien():
+        cfg = load_config()
+        return set(cfg.get("deaktivierte_kategorien", []))
+
+    @staticmethod
+    def _save_deaktivierte(deaktiviert: set):
+        cfg = load_config()
+        cfg["deaktivierte_kategorien"] = sorted(deaktiviert)
+        save_config(cfg)
+
+    @classmethod
+    def aktive_kategorien(cls):
+        """Gibt nur aktive Kategorien zurück (für Dropdowns)."""
+        deaktiviert = cls._deaktivierte_kategorien()
+        return [k for k in cls.KATEGORIEN if k not in deaktiviert]
+
+    def _load_kostenarten(self):
+        for i in self.tree_k.get_children(): self.tree_k.delete(i)
+        conn = get_db()
+        deaktiviert = self._deaktivierte_kategorien()
+        for idx, kat_name in enumerate(self.KATEGORIEN):
+            meta = self.KOSTENARTEN.get(kat_name, {})
+            # Anzahl Verwendungen in Buchungen zählen
+            count = conn.execute(
+                "SELECT COUNT(*) FROM zahlungen WHERE kategorie=?", (kat_name,)
+            ).fetchone()[0]
+            # Umlagefähig-Anzeige
+            uml = meta.get("umlagefaehig", False)
+            if uml is True:
+                uml_str = "✔ Ja"
+            elif uml == "Teilweise":
+                uml_str = "~ Teilweise"
+            else:
+                uml_str = "✗ Nein"
+            status = "Deaktiviert" if kat_name in deaktiviert else "Aktiv"
+            tag = "deaktiviert" if kat_name in deaktiviert else ""
+            self.tree_k.insert("", "end", iid=str(idx), values=(
+                kat_name,
+                meta.get("kategorie", "–"),
+                uml_str,
+                meta.get("schluessel", "–"),
+                status,
+                count), tags=(tag,) if tag else ())
+        conn.close()
+
+    def _new_kostenart(self):
+        """Neue benutzerdefinierte Kategorie hinzufügen."""
+        win = tk.Toplevel(self)
+        win.title("Neue Kostenkategorie")
+        win.geometry("400x300")
+        win.configure(bg=BG_CARD)
+        win.grab_set()
+        win.resizable(False, False)
+        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="Neue Kostenkategorie", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H3).pack(side="left", padx=14, pady=10)
+        body = tk.Frame(win, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=20, pady=12)
+        tk.Label(body, text="Name der Kategorie *", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+        name_var = tk.StringVar()
+        make_entry(body, textvariable=name_var).pack(fill="x", ipady=6)
+        tk.Label(body, text="Oberkategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
+        ober_var = tk.StringVar(value="Sonstiges")
+        ober_vals = sorted(set(m.get("kategorie", "Sonstiges") for m in self.KOSTENARTEN.values()))
+        ttk.Combobox(body, textvariable=ober_var, values=ober_vals, font=FONT_BODY).pack(fill="x", ipady=4)
+        tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
+        schluessel_var = tk.StringVar(value="MEA")
+        ttk.Combobox(body, textvariable=schluessel_var,
+                     values=["MEA", "Wohnfläche", "Verbrauch/Wohnfläche", "MEA/Fläche", "MEA/Wohneinheiten", "Wohneinheiten/MEA", "–"],
+                     font=FONT_BODY).pack(fill="x", ipady=4)
+        uml_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
+                       fg=TEXT, font=FONT_BODY, activebackground=BG_CARD).pack(anchor="w", pady=(8,0))
+        def _save():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showwarning("Pflichtfeld", "Name der Kategorie ist erforderlich.", parent=win)
+                return
+            if name in self.KATEGORIEN:
+                messagebox.showwarning("Duplikat", f"Kategorie '{name}' existiert bereits.", parent=win)
+                return
+            # Dynamisch hinzufügen
+            self.KATEGORIEN.insert(-1, name)  # Vor "Kategorie offen"
+            self.KOSTENARTEN[name] = {
+                "kategorie": ober_var.get(),
+                "umlagefaehig": uml_var.get(),
+                "schluessel": schluessel_var.get()
+            }
+            # Persistieren in Config
+            cfg = load_config()
+            custom = cfg.get("custom_kategorien", [])
+            custom.append({"name": name, "kategorie": ober_var.get(),
+                          "umlagefaehig": uml_var.get(), "schluessel": schluessel_var.get()})
+            cfg["custom_kategorien"] = custom
+            save_config(cfg)
+            win.destroy()
+            self._load_kostenarten()
+        btn_row = tk.Frame(win, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0,12))
+        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
+        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
+
+    def _edit_kostenart(self):
+        """Bestehende Kategorie bearbeiten (Oberkategorie, Schlüssel, Umlagefähig)."""
+        sel = self.tree_k.selection()
+        if not sel: return
+        idx = int(sel[0])
+        if idx >= len(self.KATEGORIEN): return
+        kat_name = self.KATEGORIEN[idx]
+        meta = self.KOSTENARTEN.get(kat_name, {})
+        win = tk.Toplevel(self)
+        win.title("Kostenkategorie bearbeiten")
+        win.geometry("400x280")
+        win.configure(bg=BG_CARD)
+        win.grab_set()
+        win.resizable(False, False)
+        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text=f"Kategorie: {kat_name}", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H3).pack(side="left", padx=14, pady=10)
+        body = tk.Frame(win, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=20, pady=12)
+        tk.Label(body, text="Oberkategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+        ober_var = tk.StringVar(value=meta.get("kategorie", "Sonstiges"))
+        ober_vals = sorted(set(m.get("kategorie", "Sonstiges") for m in self.KOSTENARTEN.values()))
+        ttk.Combobox(body, textvariable=ober_var, values=ober_vals, font=FONT_BODY).pack(fill="x", ipady=4)
+        tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
+        schluessel_var = tk.StringVar(value=meta.get("schluessel", "MEA"))
+        ttk.Combobox(body, textvariable=schluessel_var,
+                     values=["MEA", "Wohnfläche", "Verbrauch/Wohnfläche", "MEA/Fläche", "MEA/Wohneinheiten", "Wohneinheiten/MEA", "–"],
+                     font=FONT_BODY).pack(fill="x", ipady=4)
+        uml = meta.get("umlagefaehig", False)
+        uml_var = tk.BooleanVar(value=uml if isinstance(uml, bool) else False)
+        tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
+                       fg=TEXT, font=FONT_BODY, activebackground=BG_CARD).pack(anchor="w", pady=(8,0))
+        def _save():
+            self.KOSTENARTEN[kat_name] = {
+                "kategorie": ober_var.get(),
+                "umlagefaehig": uml_var.get(),
+                "schluessel": schluessel_var.get()
+            }
+            win.destroy()
+            self._load_kostenarten()
+        btn_row = tk.Frame(win, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0,12))
+        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
+        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
+
+    def _toggle_kostenart(self):
+        """Kategorie aktivieren/deaktivieren."""
+        sel = self.tree_k.selection()
+        if not sel: return
+        idx = int(sel[0])
+        if idx >= len(self.KATEGORIEN): return
+        kat_name = self.KATEGORIEN[idx]
+        deaktiviert = self._deaktivierte_kategorien()
+        if kat_name in deaktiviert:
+            deaktiviert.discard(kat_name)
+        else:
+            deaktiviert.add(kat_name)
+        self._save_deaktivierte(deaktiviert)
+        self._load_kostenarten()
+
+    def _delete_kostenart(self):
+        """Kategorie löschen (nur wenn nicht in Buchungen verwendet)."""
+        sel = self.tree_k.selection()
+        if not sel: return
+        idx = int(sel[0])
+        if idx >= len(self.KATEGORIEN): return
+        kat_name = self.KATEGORIEN[idx]
+        # Schutz: Verwendete Kategorien nicht löschbar
+        conn = get_db()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM zahlungen WHERE kategorie=?", (kat_name,)
+        ).fetchone()[0]
+        conn.close()
+        if count > 0:
+            messagebox.showwarning("Geschützt",
+                f"Kategorie '{kat_name}' wird in {count} Buchung(en) verwendet "
+                f"und kann nicht gelöscht werden.\n\nSie können die Kategorie stattdessen deaktivieren.",
+                parent=self)
+            return
+        if not messagebox.askyesno("Löschen", f"Kategorie '{kat_name}' wirklich löschen?", parent=self):
+            return
+        self.KATEGORIEN.remove(kat_name)
+        self.KOSTENARTEN.pop(kat_name, None)
+        # Aus Config entfernen
+        cfg = load_config()
+        custom = cfg.get("custom_kategorien", [])
+        cfg["custom_kategorien"] = [c for c in custom if c.get("name") != kat_name]
+        deakt = set(cfg.get("deaktivierte_kategorien", []))
+        deakt.discard(kat_name)
+        cfg["deaktivierte_kategorien"] = sorted(deakt)
+        save_config(cfg)
+        self._load_kostenarten()
+
     # Compat: alter Name → neuer Name
     def _load(self):
         self._load_buchungen()
@@ -1765,9 +2231,11 @@ class ZahlungDialog(BaseDialog):
         self._add_field("Betrag € *", "betrag", abs(r.get("betrag", 0) or 0))
         self._add_field("Kategorie", "kategorie", r.get("kategorie", ""),
                         widget_type="combo",
-                        options=["Miete", "Nebenkosten", "Wartung", "Verwaltung", "Versicherung", "Sonstiges"])
+                        options=BuchhaltungPage.aktive_kategorien())
         self._add_field("Beschreibung", "beschreibung", r.get("beschreibung", ""))
         self._add_field("Belegnummer",  "belegnr",      r.get("belegnr", ""))
+        self._add_field("Status", "status", r.get("status", "Neu"),
+                        widget_type="combo", options=["Neu", "Geprüft", "Freigegeben"])
 
     def _on_save(self):
         v = self._get_values()
@@ -2412,12 +2880,23 @@ class KontoauszugPage(tk.Frame):
                  color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20)
 
+        # Konto-Filter-Zeile
+        filter_row = tk.Frame(self, bg=BG_CARD)
+        filter_row.pack(fill="x", padx=20, pady=(6, 0))
+        tk.Label(filter_row, text="Konto:", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(side="left")
+        self._konto_var = tk.StringVar(value="Alle")
+        self._konto_combo = ttk.Combobox(filter_row, textvariable=self._konto_var,
+                                          state="readonly", font=FONT_SMALL, width=40)
+        self._konto_combo.pack(side="left", padx=(6, 0))
+        self._konto_combo.bind("<<ComboboxSelected>>", lambda e: self._load())
+
         # Info-Zeile (wird nach Import aktualisiert)
         self._info_var = tk.StringVar(
             value="Kontoauszug importieren: CAMT.052 XML (Sparkasse Bodensee) oder CSV")
         tk.Label(self, textvariable=self._info_var,
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(
-                 anchor="w", padx=20, pady=(6, 0))
+                 anchor="w", padx=20, pady=(4, 0))
 
         # Saldo-Kacheln (pro Konto)
         self._saldo_frame = tk.Frame(self, bg=BG_CARD)
@@ -2431,9 +2910,12 @@ class KontoauszugPage(tk.Frame):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w,
                              anchor="e" if col == "Betrag" else "w")
-        # Farb-Tags: Grün = Gutschrift, Rot = Lastschrift
+        # Farb-Tags: Grün = Gutschrift, Rot = Lastschrift, Fett = Neu
         self.tree.tag_configure("crdt", foreground=SUCCESS)
         self.tree.tag_configure("dbit", foreground=DANGER)
+        self.tree.tag_configure("neu", font=("Segoe UI Semibold", 10))
+        # Klick auf Zeile: "Neu"-Markierung entfernen
+        self.tree.bind("<<TreeviewSelect>>", self._on_row_click)
 
         # Aktions-Buttons (unten)
         btn_row = tk.Frame(self, bg=BG_CARD)
@@ -2449,36 +2931,98 @@ class KontoauszugPage(tk.Frame):
         for i in self.tree.get_children():
             self.tree.delete(i)
         conn = get_db()
-        rows = conn.execute(
-            "SELECT * FROM kontoauszug ORDER BY datum DESC, id DESC"
+        # Konto-Filter aktualisieren
+        konten_raw = conn.execute(
+            "SELECT DISTINCT iban FROM kontoauszug WHERE iban IS NOT NULL AND iban != '' ORDER BY iban"
         ).fetchall()
+        cfg = load_config()
+        konto_labels = ["Alle"]
+        self._iban_map = {"Alle": None}
+        for kr in konten_raw:
+            iban = kr["iban"]
+            label = self._konto_bezeichnung(iban, cfg)
+            konto_labels.append(label)
+            self._iban_map[label] = iban
+        self._konto_combo["values"] = konto_labels
+        if self._konto_var.get() not in konto_labels:
+            self._konto_var.set("Alle")
+
+        # Gefilterte Abfrage
+        selected_iban = self._iban_map.get(self._konto_var.get())
+        if selected_iban:
+            rows = conn.execute(
+                "SELECT * FROM kontoauszug WHERE iban=? ORDER BY datum DESC, id DESC",
+                (selected_iban,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM kontoauszug ORDER BY datum DESC, id DESC").fetchall()
         conn.close()
         for r in rows:
-            betrag = r["betrag"] or 0.0
-            tag = "crdt" if betrag >= 0 else "dbit"
-            # Buchungstext: CAMT speichert "Gegenkonto||Verwendungszweck",
-            # CSV-Altdaten sind plain text ohne "||"
-            raw = r["buchungstext"] or ""
+            rd = dict(r)
+            betrag = rd["betrag"] or 0.0
+            tags_list = ["crdt" if betrag >= 0 else "dbit"]
+            # Neue Buchungen fett markieren
+            if rd.get("ist_neu"):
+                tags_list.append("neu")
+            raw = rd["buchungstext"] or ""
             if "||" in raw:
                 gegenkonto, vzweck = raw.split("||", 1)
             else:
                 gegenkonto, vzweck = "", raw
-            self.tree.insert("", "end", values=(
-                fmt_date(r["datum"]),
+            self.tree.insert("", "end", iid=rd["id"], values=(
+                fmt_date(rd["datum"]),
                 gegenkonto or "–",
                 vzweck or "–",
                 fmt_euro(betrag),
-                "✔" if r["zugeordnet"] else ""),
-                tags=(tag,))
+                "✔" if rd["zugeordnet"] else ""),
+                tags=tuple(tags_list))
         self._refresh_saldo_kacheln()
 
+    def _konto_bezeichnung(self, iban, cfg=None):
+        """Gibt die Konto-Bezeichnung für eine IBAN zurück (aus Einstellungen oder Standard)."""
+        if not cfg:
+            cfg = load_config()
+        iban_clean = (iban or "").replace(" ", "")
+        # Prüfe alle konfigurierten IBANs (nur Wohngeld + Rücklage)
+        for key, bez_key in [("iban_wohngeld", "bez_wohngeld"),
+                              ("iban_ruecklage", "bez_ruecklage")]:
+            cfg_iban = cfg.get(key, "").replace(" ", "")
+            if cfg_iban and cfg_iban == iban_clean:
+                bez = cfg.get(bez_key, "")
+                if bez:
+                    return f"{bez} (···{iban_clean[-4:]})"
+                # Fallback: Key-basiert
+                namen = {"iban_wohngeld": "Wohngeldkonto", "iban_ruecklage": "Rücklagenkonto"}
+                return f"{namen.get(key, 'Konto')} (···{iban_clean[-4:]})"
+        return f"Konto ···{iban_clean[-4:]}" if iban_clean else "Unbekannt"
+
+    def _on_row_click(self, event=None):
+        """Markierung 'Neu' entfernen, sobald eine Zeile angeklickt wird."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        row_id = int(sel[0])
+        # Prüfe ob die Zeile „neu" ist
+        tags = self.tree.item(sel[0], "tags")
+        if "neu" in tags:
+            # Fett-Tag entfernen
+            new_tags = tuple(t for t in tags if t != "neu")
+            self.tree.item(sel[0], tags=new_tags)
+            # In DB markieren
+            conn = get_db()
+            conn.execute("UPDATE kontoauszug SET ist_neu=0 WHERE id=?", (row_id,))
+            conn.commit()
+            conn.close()
+            self._refresh_saldo_kacheln()
+
     def _refresh_saldo_kacheln(self):
-        """Zeigt pro importiertem Konto eine Kachel mit Buchungsanzahl und Saldo."""
+        """Zeigt pro importiertem Konto eine Kachel mit Bezeichnung, IBAN, Kontostand, Buchungen, neue."""
         for w in self._saldo_frame.winfo_children():
             w.destroy()
         conn = get_db()
         konten = conn.execute(
-            "SELECT iban, COUNT(*) AS n, SUM(betrag) AS s "
+            "SELECT iban, COUNT(*) AS n, SUM(betrag) AS s, "
+            "SUM(CASE WHEN ist_neu=1 THEN 1 ELSE 0 END) AS neu "
             "FROM kontoauszug "
             "WHERE iban IS NOT NULL AND iban != '' "
             "GROUP BY iban"
@@ -2488,90 +3032,185 @@ class KontoauszugPage(tk.Frame):
         conn.close()
         if gesamt == 0:
             return
+        cfg = load_config()
         for k in konten:
-            iban_kurz = f"IBAN ···{k['iban'][-8:]}" if k["iban"] else "–"
-            saldo_wert = k["s"] or 0.0
+            kd = dict(k)
+            iban = kd["iban"] or ""
+            bezeichnung = self._konto_bezeichnung(iban, cfg)
+            iban_fmt = " ".join([iban[i:i+4] for i in range(0, len(iban), 4)]) if iban else "–"
+            saldo_wert = kd["s"] or 0.0
             farbe = SUCCESS if saldo_wert >= 0 else DANGER
-            card = tk.Frame(self._saldo_frame, bg=BG_INPUT, relief="flat")
+            n_gesamt = kd["n"] or 0
+            n_neu = kd.get("neu") or 0
+
+            card = tk.Frame(self._saldo_frame, bg=BG_INPUT, relief="flat", cursor="hand2")
             card.pack(side="left", padx=(0, 10), pady=4, ipadx=14, ipady=8)
-            tk.Label(card, text=iban_kurz,
+            # Klick auf Kachel → Filter auf dieses Konto
+            card.bind("<Button-1>", lambda e, lbl=bezeichnung: self._filter_konto(lbl))
+            for child_widget in [card]:
+                child_widget.bind("<Button-1>", lambda e, lbl=bezeichnung: self._filter_konto(lbl))
+
+            tk.Label(card, text=bezeichnung,
+                     bg=BG_INPUT, fg=TEXT, font=("Segoe UI Semibold", 10)).pack(anchor="w")
+            tk.Label(card, text=iban_fmt,
                      bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
             tk.Label(card, text=fmt_euro(saldo_wert),
                      bg=BG_INPUT, fg=farbe, font=FONT_H3).pack(anchor="w")
-            tk.Label(card, text=f"{k['n']} Buchungen",
+            info_text = f"{n_gesamt} Buchungen"
+            if n_neu:
+                info_text += f"  ·  {n_neu} neu"
+            tk.Label(card, text=info_text,
                      bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+            # Alle Labels auch klickbar machen
+            for child in card.winfo_children():
+                child.bind("<Button-1>", lambda e, lbl=bezeichnung: self._filter_konto(lbl))
+
+    def _filter_konto(self, label):
+        """Setzt den Konto-Filter auf das geklickte Konto."""
+        self._konto_var.set(label)
+        self._load()
 
     # ── CAMT.052 XML Import ───────────────────────────────────────────────────
 
-    def _import_xml(self):
-        """CAMT.052 XML-Datei (Sparkasse Bodensee / ISO 20022) importieren."""
-        path = filedialog.askopenfilename(
-            filetypes=[("CAMT.052 XML", "*.xml"), ("Alle Dateien", "*.*")],
-            title="CAMT.052 Kontoauszug (XML) importieren")
-        if not path:
-            return
-        try:
-            buchungen, iban, bank, saldo, saldo_datum = self._parse_camt(path)
-            conn = get_db()
-            # Konto-Typ bestimmen anhand IBAN
-            cfg = load_config()
-            iban_ruecklage = cfg.get("iban_ruecklage", "DE14690500011007212085").replace(" ", "")
-            iban_wohngeld  = cfg.get("iban_wohngeld",  "DE11690500010000081703").replace(" ", "")
-            iban_clean = iban.replace(" ", "")
-            if iban_clean == iban_ruecklage:
-                konto_typ = "Rücklagenkonto"
-            elif iban_clean == iban_wohngeld:
-                konto_typ = "Wohngeldkonto"
-            else:
-                konto_typ = "Unbekannt"
+    def _get_default_import_dir(self):
+        """Gibt den Standard-Importpfad aus den Einstellungen zurück."""
+        cfg = load_config()
+        d = cfg.get("pfad_kontoauszug_import", "")
+        if d and os.path.isdir(d):
+            return d
+        return None
 
-            auto_count = 0
-            for datum, buchungstext, betrag in buchungen:
-                # Kategorie-Vorschlag ermitteln
-                kat, typ, kt = vorschlag_kategorie(buchungstext)
-                if not kt or kt == "Girokonto":
-                    kt = konto_typ
-                conn.execute(
-                    "INSERT INTO kontoauszug (datum, buchungstext, betrag, iban, konto_typ, kategorie_vorschlag) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (datum, buchungstext, betrag, iban, konto_typ, kat or None))
-                ka_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                # Auto-Transfer: wenn Kategorie erkannt, direkt als Buchung übernehmen
-                if kat:
-                    if betrag < 0:
-                        typ = "Ausgabe"
-                    else:
-                        typ = "Einnahme"
-                    # Verwendungszweck als Beschreibung
-                    if "||" in buchungstext:
-                        gegenkonto, vzweck = buchungstext.split("||", 1)
-                        beschr = f"{gegenkonto} – {vzweck}" if gegenkonto else vzweck
-                    else:
-                        beschr = buchungstext
+    def _import_xml(self):
+        """CAMT.052 XML-Dateien oder -Ordner (Sparkasse Bodensee / ISO 20022) importieren."""
+        default_dir = self._get_default_import_dir()
+        # Dialog: Mehrere Dateien ODER einen Ordner wählen
+        choice = messagebox.askyesnocancel(
+            "CAMT.052 Import",
+            "Mehrere Dateien auswählen?\n\n"
+            "Ja = Dateien auswählen\n"
+            "Nein = Ordner auswählen (alle XML-Dateien darin)\n"
+            "Abbrechen = Import abbrechen")
+        if choice is None:
+            return
+        if choice:  # Ja → Dateien wählen
+            kw = {}
+            if default_dir:
+                kw["initialdir"] = default_dir
+            paths = filedialog.askopenfilenames(
+                filetypes=[("CAMT.052 XML", "*.xml"), ("Alle Dateien", "*.*")],
+                title="CAMT.052 Kontoauszüge (XML) importieren", **kw)
+            if not paths:
+                return
+        else:  # Nein → Ordner wählen
+            kw = {}
+            if default_dir:
+                kw["initialdir"] = default_dir
+            folder = filedialog.askdirectory(title="Ordner mit CAMT.052 XML-Dateien wählen", **kw)
+            if not folder:
+                return
+            paths = sorted(glob.glob(os.path.join(folder, "*.xml")))
+            if not paths:
+                messagebox.showwarning("Keine Dateien", "Keine XML-Dateien im gewählten Ordner gefunden.")
+                return
+
+        gesamt_buchungen = 0
+        gesamt_auto = 0
+        gesamt_duplikate = 0
+        fehler_dateien = []
+        letzte_bank = ""
+        letzte_iban = ""
+        letzte_saldo = None
+
+        # EINE gemeinsame DB-Verbindung für den gesamten Import (verhindert "database is locked")
+        conn = get_db()
+        cfg = load_config()
+        iban_ruecklage = cfg.get("iban_ruecklage", "DE14690500011007212085").replace(" ", "")
+        iban_wohngeld  = cfg.get("iban_wohngeld",  "DE11690500010000081703").replace(" ", "")
+
+        total_files = len(paths)
+        for idx, path in enumerate(paths):
+            # Fortschrittsanzeige aktualisieren
+            self._info_var.set(f"Importiere Datei {idx + 1} von {total_files}...")
+            self.update_idletasks()
+            try:
+                buchungen, iban, bank, saldo, saldo_datum = self._parse_camt(path)
+                # Konto-Typ bestimmen anhand IBAN
+                iban_clean = iban.replace(" ", "")
+                if iban_clean == iban_ruecklage:
+                    konto_typ = "Rücklagenkonto"
+                elif iban_clean == iban_wohngeld:
+                    konto_typ = "Wohngeldkonto"
+                else:
+                    konto_typ = "Unbekannt"
+
+                auto_count = 0
+                dup_count = 0
+                imp_count = 0
+                for datum, buchungstext, betrag in buchungen:
+                    # Dublettenprüfung: gleiche Buchung bereits vorhanden?
+                    existing = conn.execute(
+                        "SELECT COUNT(*) FROM kontoauszug WHERE datum=? AND buchungstext=? AND betrag=? AND iban=?",
+                        (datum, buchungstext, betrag, iban)).fetchone()[0]
+                    if existing:
+                        dup_count += 1
+                        continue
+
+                    # Kategorie-Vorschlag ermitteln
+                    kat, typ, kt = vorschlag_kategorie(buchungstext)
+                    if not kt or kt in ("Girokonto", "Wohngeldkonto"):
+                        kt = konto_typ
                     conn.execute(
-                        "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,konto_typ) VALUES (?,?,?,?,?,?)",
-                        (datum, betrag, typ, kat, beschr[:200], kt))
-                    zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                    conn.execute(
-                        "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, zahlung_id=? WHERE id=?",
-                        (zahlung_id, ka_id))
-                    lerne_buchung(buchungstext, kat, typ, kt)
-                    auto_count += 1
-            conn.commit()
-            conn.close()
-            saldo_str = fmt_euro(saldo) if saldo is not None else "–"
-            auto_msg = f"\n\nDavon automatisch gebucht: {auto_count}" if auto_count else ""
-            messagebox.showinfo(
-                "CAMT.052 Import erfolgreich",
-                f"{len(buchungen)} Buchung(en) importiert{auto_msg}\n\n"
-                f"Konto:        {iban}\n"
-                f"Bank:         {bank}\n"
-                f"Schlusssaldo: {saldo_str}"
-                + (f"  (per {fmt_date(saldo_datum)})" if saldo_datum else ""))
+                        "INSERT INTO kontoauszug (datum, buchungstext, betrag, iban, konto_typ, kategorie_vorschlag) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (datum, buchungstext, betrag, iban, konto_typ, kat or None))
+                    ka_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    imp_count += 1
+                    # Auto-Transfer: wenn Kategorie erkannt, direkt als Buchung übernehmen
+                    if kat:
+                        if betrag < 0:
+                            typ = "Ausgabe"
+                        else:
+                            typ = "Einnahme"
+                        # Verwendungszweck als Beschreibung
+                        if "||" in buchungstext:
+                            gegenkonto, vzweck = buchungstext.split("||", 1)
+                            beschr = f"{gegenkonto} – {vzweck}" if gegenkonto else vzweck
+                        else:
+                            beschr = buchungstext
+                        conn.execute(
+                            "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,konto_typ,status) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (datum, betrag, typ, kat, beschr[:200], kt, "Neu"))
+                        zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                        conn.execute(
+                            "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, zahlung_id=? WHERE id=?",
+                            (zahlung_id, ka_id))
+                        lerne_buchung(buchungstext, kat, typ, kt)
+                        auto_count += 1
+                conn.commit()
+                gesamt_buchungen += imp_count
+                gesamt_auto += auto_count
+                gesamt_duplikate += dup_count
+                letzte_bank = bank
+                letzte_iban = iban
+                letzte_saldo = saldo
+            except Exception as exc:
+                fehler_dateien.append(f"{os.path.basename(path)}: {exc}")
+        conn.close()
+
+        # Ergebnis-Meldung
+        saldo_str = fmt_euro(letzte_saldo) if letzte_saldo is not None else "–"
+        msg = f"{gesamt_buchungen} Buchung(en) aus {len(paths)} Datei(en) importiert"
+        if gesamt_duplikate:
+            msg += f"\n{gesamt_duplikate} Duplikat(e) übersprungen"
+        if gesamt_auto:
+            msg += f"\nDavon automatisch gebucht: {gesamt_auto}"
+        if fehler_dateien:
+            msg += f"\n\n⚠ Fehler in {len(fehler_dateien)} Datei(en):\n" + "\n".join(fehler_dateien[:5])
+        messagebox.showinfo("CAMT.052 Import", msg)
+        if letzte_iban:
             self._info_var.set(
-                f"Zuletzt importiert: {bank} · ···{iban[-8:]} · Saldo {saldo_str}")
-        except Exception as exc:
-            messagebox.showerror("XML-Import Fehler", str(exc))
+                f"Zuletzt importiert: {letzte_bank} · ···{letzte_iban[-8:]} · Saldo {saldo_str}")
         self._load()
 
     def _parse_camt(self, path):
@@ -2642,49 +3281,96 @@ class KontoauszugPage(tk.Frame):
     # ── CSV Import (Rückwärtskompatibilität) ─────────────────────────────────
 
     def _import_csv_action(self):
-        """Sparkassen-CSV oder generisches Semikolon-CSV importieren."""
-        path = filedialog.askopenfilename(
-            filetypes=[("CSV-Dateien", "*.csv"), ("Alle Dateien", "*.*")],
-            title="Kontoauszug CSV importieren")
-        if not path:
+        """Sparkassen-CSV oder generisches Semikolon-CSV importieren (Mehrfachauswahl)."""
+        default_dir = self._get_default_import_dir()
+        # Dialog: Mehrere Dateien ODER einen Ordner wählen
+        choice = messagebox.askyesnocancel(
+            "CSV Import",
+            "Mehrere Dateien auswählen?\n\n"
+            "Ja = Dateien auswählen\n"
+            "Nein = Ordner auswählen (alle CSV-Dateien darin)\n"
+            "Abbrechen = Import abbrechen")
+        if choice is None:
             return
-        imported = 0
-        conn = get_db()
-        try:
-            with open(path, newline="", encoding="utf-8-sig") as f:
-                reader = csv.DictReader(f, delimiter=";")
-                for row in reader:
-                    datum = row.get("Datum", "").strip()
-                    text  = row.get(
-                        "Buchungstext", row.get("Verwendungszweck", "")).strip()
-                    bstr  = (row.get("Betrag", "0")
-                             .replace(".", "").replace(",", ".").strip())
-                    sstr  = (row.get("Saldo", "")
-                             .replace(".", "").replace(",", ".").strip())
-                    try:
-                        betrag = float(bstr)
-                    except ValueError:
-                        continue
-                    saldo = None
-                    try:
-                        saldo = float(sstr)
-                    except ValueError:
-                        pass
-                    try:
-                        datum = datetime.strptime(
-                            datum, "%d.%m.%Y").strftime("%Y-%m-%d")
-                    except ValueError:
-                        pass
-                    conn.execute(
-                        "INSERT INTO kontoauszug "
-                        "(datum, buchungstext, betrag, saldo) VALUES (?,?,?,?)",
-                        (datum, text, betrag, saldo))
-                    imported += 1
-            conn.commit()
-            messagebox.showinfo("CSV Import", f"{imported} Buchung(en) importiert.")
-        except Exception as exc:
-            messagebox.showerror("CSV-Import Fehler", str(exc))
-        conn.close()
+        if choice:  # Ja → Dateien wählen
+            kw = {}
+            if default_dir:
+                kw["initialdir"] = default_dir
+            paths = filedialog.askopenfilenames(
+                filetypes=[("CSV-Dateien", "*.csv"), ("Alle Dateien", "*.*")],
+                title="Kontoauszug CSV-Dateien importieren", **kw)
+            if not paths:
+                return
+        else:  # Nein → Ordner wählen
+            kw = {}
+            if default_dir:
+                kw["initialdir"] = default_dir
+            folder = filedialog.askdirectory(title="Ordner mit CSV-Dateien wählen", **kw)
+            if not folder:
+                return
+            paths = sorted(glob.glob(os.path.join(folder, "*.csv")))
+            if not paths:
+                messagebox.showwarning("Keine Dateien", "Keine CSV-Dateien im gewählten Ordner gefunden.")
+                return
+
+        gesamt_imported = 0
+        gesamt_duplikate = 0
+        fehler_dateien = []
+
+        for path in paths:
+            try:
+                conn = get_db()
+                imported = 0
+                dup_count = 0
+                with open(path, newline="", encoding="utf-8-sig") as f:
+                    reader = csv.DictReader(f, delimiter=";")
+                    for row in reader:
+                        datum = row.get("Datum", "").strip()
+                        text  = row.get(
+                            "Buchungstext", row.get("Verwendungszweck", "")).strip()
+                        bstr  = (row.get("Betrag", "0")
+                                 .replace(".", "").replace(",", ".").strip())
+                        sstr  = (row.get("Saldo", "")
+                                 .replace(".", "").replace(",", ".").strip())
+                        try:
+                            betrag = float(bstr)
+                        except ValueError:
+                            continue
+                        saldo = None
+                        try:
+                            saldo = float(sstr)
+                        except ValueError:
+                            pass
+                        try:
+                            datum = datetime.strptime(
+                                datum, "%d.%m.%Y").strftime("%Y-%m-%d")
+                        except ValueError:
+                            pass
+                        # Dublettenprüfung
+                        existing = conn.execute(
+                            "SELECT COUNT(*) FROM kontoauszug WHERE datum=? AND buchungstext=? AND betrag=?",
+                            (datum, text, betrag)).fetchone()[0]
+                        if existing:
+                            dup_count += 1
+                            continue
+                        conn.execute(
+                            "INSERT INTO kontoauszug "
+                            "(datum, buchungstext, betrag, saldo) VALUES (?,?,?,?)",
+                            (datum, text, betrag, saldo))
+                        imported += 1
+                conn.commit()
+                conn.close()
+                gesamt_imported += imported
+                gesamt_duplikate += dup_count
+            except Exception as exc:
+                fehler_dateien.append(f"{os.path.basename(path)}: {exc}")
+
+        msg = f"{gesamt_imported} Buchung(en) aus {len(paths)} Datei(en) importiert."
+        if gesamt_duplikate:
+            msg += f"\n{gesamt_duplikate} Duplikat(e) übersprungen."
+        if fehler_dateien:
+            msg += f"\n\n⚠ Fehler in {len(fehler_dateien)} Datei(en):\n" + "\n".join(fehler_dateien[:5])
+        messagebox.showinfo("CSV Import", msg)
         self._load()
 
     # ── Löschen ───────────────────────────────────────────────────────────────
@@ -2744,13 +3430,17 @@ class EinstellungenPage(tk.Frame):
         self._section(body, "WEG-Stammdaten")
         self._path_field(body, "WEG-Name", "weg_name", is_path=False)
         self._path_field(body, "Adresse (Straße, PLZ Ort)", "weg_adresse", is_path=False)
-        self._path_field(body, "IBAN Girokonto", "iban_giro", is_path=False)
-        self._path_field(body, "IBAN Tagesgeldkonto", "iban_tagesgeld", is_path=False)
+
+        # Section: Konten (nur Wohngeld + Rücklage)
+        self._section(body, "Konten")
+        self._path_field(body, "Bezeichnung Wohngeldkonto", "bez_wohngeld", is_path=False)
+        self._iban_field(body, "IBAN Wohngeldkonto", "iban_wohngeld")
+        self._path_field(body, "Bezeichnung Rücklagenkonto", "bez_ruecklage", is_path=False)
+        self._iban_field(body, "IBAN Rücklagenkonto", "iban_ruecklage")
 
         # Section: Speicherpfade Kontoauszüge
-        self._section(body, "Speicherpfade Kontoauszüge (XML)")
-        self._path_field(body, "Ordner Girokonto XML-Dateien", "pfad_giro_xml", is_path=True, is_dir=True)
-        self._path_field(body, "Ordner Tagesgeldkonto XML-Dateien", "pfad_tagesgeld_xml", is_path=True, is_dir=True)
+        self._section(body, "Speicherpfade Kontoauszüge")
+        self._path_field(body, "Standard-Importordner Kontoauszüge", "pfad_kontoauszug_import", is_path=True, is_dir=True)
 
         # Section: Weitere Speicherpfade
         self._section(body, "Weitere Speicherpfade")
@@ -2768,6 +3458,29 @@ class EinstellungenPage(tk.Frame):
         tk.Label(parent, text=title, bg=BG_CARD, fg=TEXT, font=FONT_H3).pack(
             anchor="w", padx=20, pady=(16,4))
         tk.Frame(parent, bg=BG_INPUT, height=1).pack(fill="x", padx=20, pady=(0,4))
+
+    def _iban_field(self, parent, label, key):
+        """IBAN-Feld mit automatischer Formatierung (#### #### #### ...).
+        Gespeichert wird ohne Leerzeichen, angezeigt mit Leerzeichen alle 4 Stellen."""
+        tk.Label(parent, text=label, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(
+            anchor="w", padx=20, pady=(6,1))
+        row = tk.Frame(parent, bg=BG_CARD)
+        row.pack(fill="x", padx=20, pady=(0,2))
+        # Intern ohne Leerzeichen speichern, anzeigen mit Leerzeichen
+        raw_value = self._cfg.get(key, "").replace(" ", "")
+        display_value = " ".join([raw_value[i:i+4] for i in range(0, len(raw_value), 4)]) if raw_value else ""
+        var = tk.StringVar(value=display_value)
+        self._vars[key] = var
+        entry = make_entry(row, textvariable=var)
+        entry.pack(side="left", fill="x", expand=True, ipady=6)
+        # Auto-Format bei Tastendruck
+        def _format_iban(*args):
+            current = var.get().replace(" ", "").upper()
+            formatted = " ".join([current[i:i+4] for i in range(0, len(current), 4)])
+            if var.get() != formatted:
+                entry.icursor(len(formatted))
+                var.set(formatted)
+        var.trace_add("write", _format_iban)
 
     def _path_field(self, parent, label, key, is_path=True, is_dir=True):
         tk.Label(parent, text=label, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(
@@ -2789,8 +3502,13 @@ class EinstellungenPage(tk.Frame):
             make_btn(row, "…", browse, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(4,0))
 
     def _save(self):
+        iban_keys = {"iban_wohngeld", "iban_ruecklage"}
         for key, var in self._vars.items():
-            self._cfg[key] = var.get()
+            val = var.get()
+            # IBAN ohne Leerzeichen speichern
+            if key in iban_keys:
+                val = val.replace(" ", "")
+            self._cfg[key] = val
         save_config(self._cfg)
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.\n" + str(CONFIG_PATH))
 
@@ -2807,10 +3525,10 @@ class BenutzerverwaltungPage(tk.Frame):
     
     def _build(self):
         section_header(self, "Benutzerverwaltung", "＋ Benutzer", self._new)
-        cols = ("Benutzername", "Rolle", "Aktiv", "Erstellt")
+        cols = ("Benutzername", "Rolle", "Aktiv", "PW-Skip", "Erstellt")
         f, self.tree = make_table(self, cols, height=12)
         f.pack(fill="both", expand=True, padx=20, pady=10)
-        for c, w in zip(cols, [200, 160, 80, 160]):
+        for c, w in zip(cols, [180, 140, 60, 70, 140]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
         btn_row = tk.Frame(self, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0,10))
@@ -2824,10 +3542,12 @@ class BenutzerverwaltungPage(tk.Frame):
     def _load(self):
         for i in self.tree.get_children(): self.tree.delete(i)
         conn = get_db()
-        for r in conn.execute("SELECT b.*, COALESCE(ro.name, b.rolle) AS rolle_name FROM benutzer b LEFT JOIN rollen ro ON b.rolle_id=ro.id ORDER BY b.benutzername"):
+        for row in conn.execute("SELECT b.*, COALESCE(ro.name, b.rolle) AS rolle_name FROM benutzer b LEFT JOIN rollen ro ON b.rolle_id=ro.id ORDER BY b.benutzername"):
+            r = dict(row)
             self.tree.insert("", "end", iid=r["id"], values=(
-                r["benutzername"], r["rolle_name"] or "–",
+                r["benutzername"], r.get("rolle_name") or "–",
                 "✔" if r["aktiv"] else "✗",
+                "✔" if r.get("passwort_skip") else "–",
                 fmt_date(str(r["erstellt_am"])[:10] if r["erstellt_am"] else "")))
         conn.close()
 
@@ -2842,8 +3562,11 @@ class BenutzerverwaltungPage(tk.Frame):
             pw_hash = hashlib.sha256(v["passwort"].encode()).hexdigest()
             conn = get_db()
             try:
-                conn.execute("INSERT INTO benutzer (benutzername, passwort_hash, rolle, rolle_id) VALUES (?,?,?,?)",
-                    (v["benutzername"], pw_hash, v.get("rolle_name", "Benutzer"), v.get("rolle_id")))
+                conn.execute(
+                    "INSERT INTO benutzer (benutzername, passwort_hash, rolle, rolle_id, passwort_skip) "
+                    "VALUES (?,?,?,?,?)",
+                    (v["benutzername"], pw_hash, v.get("rolle_name", "Benutzer"),
+                     v.get("rolle_id"), v.get("passwort_skip", 0)))
                 conn.commit()
             except Exception as e:
                 messagebox.showerror("Fehler", f"Benutzername bereits vergeben.\n{e}")
@@ -2862,8 +3585,10 @@ class BenutzerverwaltungPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("UPDATE benutzer SET benutzername=?, rolle=?, rolle_id=?, aktiv=? WHERE id=?",
-                (v["benutzername"], v.get("rolle_name", "Benutzer"), v.get("rolle_id"), v.get("aktiv", 1), int(sel[0])))
+            conn.execute(
+                "UPDATE benutzer SET benutzername=?, rolle=?, rolle_id=?, aktiv=?, passwort_skip=? WHERE id=?",
+                (v["benutzername"], v.get("rolle_name", "Benutzer"), v.get("rolle_id"),
+                 v.get("aktiv", 1), v.get("passwort_skip", 0), int(sel[0])))
             conn.commit(); conn.close(); self._load()
 
     def _change_pw(self):
@@ -2871,14 +3596,33 @@ class BenutzerverwaltungPage(tk.Frame):
             messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
         sel = self.tree.selection()
         if not sel: return
-        new_pw = simpledialog.askstring("Passwort ändern", "Neues Passwort:", show="●", parent=self)
-        if new_pw:
-            import hashlib
-            pw_hash = hashlib.sha256(new_pw.encode()).hexdigest()
-            conn = get_db()
-            conn.execute("UPDATE benutzer SET passwort_hash=? WHERE id=?", (pw_hash, int(sel[0])))
-            conn.commit(); conn.close()
-            messagebox.showinfo("Gespeichert", "Passwort wurde geändert.")
+        # Dialog: Manuell eingeben oder automatisch generieren?
+        choice = messagebox.askyesnocancel(
+            "Passwort ändern",
+            "Passwort automatisch generieren?\n\n"
+            "Ja = Automatisch generieren\n"
+            "Nein = Manuell eingeben\n"
+            "Abbrechen = Abbrechen")
+        if choice is None:
+            return
+        import hashlib
+        if choice:  # Automatisch generieren
+            import secrets, string
+            chars = string.ascii_letters + string.digits + "!@#$%"
+            new_pw = ''.join(secrets.choice(chars) for _ in range(12))
+            messagebox.showinfo("Generiertes Passwort",
+                                f"Das neue Passwort lautet:\n\n{new_pw}\n\n"
+                                "Bitte notieren Sie es, da es nur jetzt sichtbar ist.",
+                                parent=self)
+        else:  # Manuell eingeben
+            new_pw = simpledialog.askstring("Passwort ändern", "Neues Passwort:", show="●", parent=self)
+            if not new_pw:
+                return
+        pw_hash = hashlib.sha256(new_pw.encode()).hexdigest()
+        conn = get_db()
+        conn.execute("UPDATE benutzer SET passwort_hash=? WHERE id=?", (pw_hash, int(sel[0])))
+        conn.commit(); conn.close()
+        messagebox.showinfo("Gespeichert", "Passwort wurde geändert.")
 
     def _delete(self):
         if not hat_recht("Benutzer", "loeschen"):
@@ -2901,8 +3645,9 @@ class BenutzerverwaltungPage(tk.Frame):
 
 class BenutzerDialog(BaseDialog):
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Benutzer " + ("bearbeiten" if row else "hinzufügen"), 420, 400)
+        super().__init__(parent, "Benutzer " + ("bearbeiten" if row else "hinzufügen"), 420, 480)
         r = dict(row) if row else {}
+        self._is_edit = bool(row)
         self._add_field("Benutzername *", "benutzername", r.get("benutzername",""))
         # Rollen aus DB laden
         conn = get_db()
@@ -2922,9 +3667,28 @@ class BenutzerDialog(BaseDialog):
         self._add_field("Rolle", "rolle_name", current_rolle,
                         widget_type="combo", options=rollen_namen)
         if not row:
-            self._add_field("Passwort *", "passwort", "")
+            # Neuer Benutzer: Passwort-Feld + Generieren-Button
+            pw_frame = tk.Frame(self._body, bg=BG_CARD)
+            pw_frame.pack(fill="x", padx=20, pady=(6, 0))
+            tk.Label(pw_frame, text="Passwort *", bg=BG_CARD, fg=TEXT_LIGHT,
+                     font=FONT_SMALL).pack(anchor="w")
+            pw_row = tk.Frame(pw_frame, bg=BG_CARD)
+            pw_row.pack(fill="x")
+            self._pw_var = tk.StringVar(value="")
+            pw_entry = tk.Entry(pw_row, textvariable=self._pw_var, font=FONT_BODY,
+                                bg=BG_INPUT, fg=TEXT, relief="flat", show="●")
+            pw_entry.pack(side="left", fill="x", expand=True, ipady=5)
+            make_btn(pw_row, "🎲 Generieren", self._generate_pw,
+                     color=ACCENT2).pack(side="right", padx=(6, 0))
+            self._fields["passwort"] = self._pw_var
         else:
             self._fields["passwort"] = tk.StringVar(value="(unverändert)")
+        # Passwortabfrage abschaltbar
+        self._pw_skip_var = tk.IntVar(value=int(r.get("passwort_skip", 0)))
+        tk.Checkbutton(self._body, text="Passwortabfrage beim Login überspringen",
+                       variable=self._pw_skip_var,
+                       bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                       activebackground=BG_CARD, selectcolor=BG_INPUT).pack(anchor="w", padx=20, pady=(8, 0))
         # Aktiv-Checkbox (nur bei Bearbeiten)
         if row:
             self._aktiv_var = tk.IntVar(value=int(r.get("aktiv", 1)))
@@ -2932,13 +3696,30 @@ class BenutzerDialog(BaseDialog):
                            bg=BG_CARD, fg=TEXT, font=FONT_BODY,
                            activebackground=BG_CARD, selectcolor=BG_INPUT).pack(anchor="w", padx=20, pady=(8, 0))
 
+    def _generate_pw(self):
+        """Generiert ein zufälliges 12-Zeichen-Passwort."""
+        import secrets, string
+        chars = string.ascii_letters + string.digits + "!@#$%"
+        pw = ''.join(secrets.choice(chars) for _ in range(12))
+        self._pw_var.set(pw)
+        # Kurz anzeigen
+        messagebox.showinfo("Generiertes Passwort",
+                            f"Das generierte Passwort lautet:\n\n{pw}\n\n"
+                            "Bitte notieren Sie es, da es nur jetzt sichtbar ist.",
+                            parent=self)
+
     def _on_save(self):
         v = self._get_values()
         if not v.get("benutzername"):
             messagebox.showwarning("Pflichtfeld", "Benutzername ist erforderlich.", parent=self); return
+        # Passwort bei neuem Benutzer prüfen
+        if not self._is_edit and not self._pw_var.get():
+            messagebox.showwarning("Pflichtfeld", "Passwort ist erforderlich.", parent=self); return
+        v["passwort"] = self._pw_var.get() if hasattr(self, "_pw_var") else "(unverändert)"
         # rolle_id aus Map
         rolle_name = v.get("rolle_name", "")
         v["rolle_id"] = self._rollen_map.get(rolle_name)
+        v["passwort_skip"] = self._pw_skip_var.get()
         if hasattr(self, "_aktiv_var"):
             v["aktiv"] = self._aktiv_var.get()
         self.result = v; self.destroy()
@@ -2996,6 +3777,17 @@ class RollenverwaltungPage(tk.Frame):
         self._matrix_frame = tk.Frame(right, bg=BG_CARD)
         self._matrix_frame.pack(fill="both", expand=True, pady=(6, 0))
 
+        # Zusätzliche Rollen-Optionen
+        self._opts_frame = tk.Frame(right, bg=BG_CARD)
+        self._opts_frame.pack(fill="x", pady=(6, 0))
+        self._rolle_pw_skip_var = tk.IntVar(value=0)
+        self._pw_skip_cb = tk.Checkbutton(self._opts_frame,
+            text="Passwortabfrage für alle Benutzer dieser Rolle überspringen",
+            variable=self._rolle_pw_skip_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+            activebackground=BG_CARD, selectcolor=BG_INPUT,
+            command=self._save_rolle_pw_skip)
+        self._pw_skip_cb.pack(anchor="w")
+
         self._checks = {}  # {(bereich, aktion): IntVar}
         self._selected_rolle_id = None
 
@@ -3020,8 +3812,10 @@ class RollenverwaltungPage(tk.Frame):
         conn.close()
         if not rolle:
             return
-        self._rechte_info.config(text=f"Berechtigungen für: {rolle['name']}"
-                                      + (" (Superadmin – alle Rechte)" if rolle["ist_superadmin"] else ""))
+        rd = dict(rolle)
+        self._rechte_info.config(text=f"Berechtigungen für: {rd['name']}"
+                                      + (" (Superadmin – alle Rechte)" if rd["ist_superadmin"] else ""))
+        self._rolle_pw_skip_var.set(int(rd.get("passwort_skip", 0)))
         self._build_matrix(rolle)
 
     def _build_matrix(self, rolle):
@@ -3089,6 +3883,16 @@ class RollenverwaltungPage(tk.Frame):
             d = self._checks.get((bereich, "loeschen"), tk.IntVar(value=0)).get()
             conn.execute("INSERT INTO rechte (rolle_id, bereich, lesen, schreiben, loeschen) VALUES (?,?,?,?,?)",
                          (self._selected_rolle_id, bereich, l, s, d))
+        conn.commit()
+        conn.close()
+
+    def _save_rolle_pw_skip(self):
+        """Passwort-Skip für die ausgewählte Rolle speichern."""
+        if not self._selected_rolle_id:
+            return
+        conn = get_db()
+        conn.execute("UPDATE rollen SET passwort_skip=? WHERE id=?",
+                     (self._rolle_pw_skip_var.get(), self._selected_rolle_id))
         conn.commit()
         conn.close()
 
@@ -3240,8 +4044,23 @@ class LoginDialog(tk.Toplevel):
         import hashlib
         username = self._user_var.get().strip()
         password = self._pw_var.get()
-        pw_hash = hashlib.sha256(password.encode()).hexdigest()
         conn = get_db()
+        # Prüfe ob Benutzer Passwortabfrage überspringt
+        user_check = conn.execute(
+            "SELECT b.*, r.passwort_skip AS rolle_pw_skip "
+            "FROM benutzer b LEFT JOIN rollen r ON b.rolle_id=r.id "
+            "WHERE b.benutzername=? AND b.aktiv=1",
+            (username,)).fetchone()
+        if user_check:
+            u = dict(user_check)
+            # Passwortabfrage überspringen: entweder pro Benutzer oder pro Rolle
+            if u.get("passwort_skip") or u.get("rolle_pw_skip"):
+                conn.close()
+                self.result = u
+                self.destroy()
+                return
+        # Normaler Passwort-Login
+        pw_hash = hashlib.sha256(password.encode()).hexdigest()
         user = conn.execute(
             "SELECT * FROM benutzer WHERE benutzername=? AND passwort_hash=? AND aktiv=1",
             (username, pw_hash)

@@ -7,6 +7,88 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.6.0] — 2026-03-21
+
+### Bugfixes
+- **Kontoauszug – „database is locked"**: XML-Import verwendet jetzt eine einzige DB-Verbindung für alle Dateien (statt je Datei eine neue Verbindung) — löst SQLite-Locking-Fehler bei Multi-Datei-Import
+- **Buchhaltung – Übernehmen**: Eintrag-Übernahme aus Vorschläge speichert jetzt korrekt `konto_typ`, `zahlung_id` und setzt `zugeordnet=1` in `kontoauszug`
+- **Buchhaltung – Batch-Übernahme**: Konto-Typ-Fallback von „Girokonto" auf „Wohngeldkonto" korrigiert
+- **Einstellungen**: Girokonto- und Tagesgeldkonto-Felder entfernt; nur Wohngeldkonto und Rücklagenkonto verbleiben (inkl. Bezeichnungsfelder)
+- **Kategorie-Erkennung**: Fallback-Konto-Typ in `vorschlag_kategorie()` und `lerne_buchung()` von „Girokonto" auf „Wohngeldkonto" korrigiert
+
+### Hinzugefügt
+- **Kontoauszug – Importfortschritt**: Statuszeile zeigt während des Imports „Importiere Datei X von Y…"
+- **Buchhaltung – Kostenarten-Tab**: Neuer Sub-Tab „Kostenarten" zur Verwaltung der WEG-Kostenkategorien (CRUD)
+  - Neue Kategorie anlegen (Name, Oberkategorie, Schlüssel, Umlagefähig)
+  - Kategorie bearbeiten (Oberkategorie, Schlüssel, Umlagefähig ändern)
+  - Kategorie deaktivieren/aktivieren (Toggle) — deaktivierte Kategorien erscheinen nicht mehr in Dropdowns
+  - Kategorie löschen — geschützt wenn in Buchungen verwendet (zeigt Anzahl der Verwendungen)
+  - Tabellenübersicht mit Kategorie, Oberkategorie, Umlagefähigkeit, Schlüssel, Status und Verwendungsanzahl
+- **Buchhaltung – „Kategorie offen"**: Neue Kategorie für nicht erkannte Buchungen; erscheint in allen Kategorie-Dropdowns
+- **Buchungsregeln – Verbessertes Matching**: Dreistufige Matching-Strategie
+  1. Exakter Muster-Match im gesamten Buchungstext
+  2. Auftraggeber/Empfänger-Match (vor dem `||`-Trennzeichen)
+  3. Keyword-Match im Verwendungszweck (nach dem `||`)
+- **Buchungsregeln – Füllwörter**: Globale Liste mit ~50 Füllwörtern (Artikel, Präpositionen, Rechtsformen wie GmbH/AG/KG) wird beim Matching ignoriert
+- **Buchungsregeln – Muster-Extraktion**: Bei Buchungstexten mit `||` wird der Auftraggeber/Empfänger (bis 60 Zeichen) als primäres Muster gespeichert statt der ersten 40 Zeichen des Gesamttexts
+- **Kategorie-Dropdowns**: Verwenden jetzt `aktive_kategorien()` statt der vollständigen KATEGORIEN-Liste
+
+### Geändert
+- **Einstellungen – Speicherpfade**: „Ordner Girokonto XML-Dateien" und „Ordner Tagesgeldkonto XML-Dateien" entfernt; nur Standard-Importordner bleibt
+- **IBAN-Mapping in Import**: Konto-Typ-Erkennung prüft nur noch Wohngeldkonto und Rücklagenkonto (keine Girokonto/Tagesgeld-Fallbacks mehr)
+
+---
+
+## [0.5.0] — 2026-03-21
+
+### Hinzugefügt
+- **WEG-Kostenkategorien**: 27 Kategorien mit Metadaten (Umlagefähigkeit, Verteilerschlüssel) gemäß Notion-Spezifikation „Kostenkategorie/Kostenart" — gruppiert in: Laufende Betriebskosten, Verwaltungskosten, Instandhaltung & Wartung, Versicherungen, Finanzplanung & Rücklagen, Einnahmen, Sonstiges
+- **Einstellungen – Kontobezeichnungen**: Jedes Konto (Wohngeld, Rücklage, Giro, Tagesgeld) hat ein eigenes Bezeichnungsfeld
+- **Einstellungen – IBAN-Formatierung**: IBAN wird beim Eingeben automatisch im Format `DE## #### #### …` angezeigt und ohne Leerzeichen gespeichert
+- **Einstellungen – Standard-Importordner**: Neues Feld für den Standard-Importpfad für Kontoauszüge — wird beim Import automatisch als Startverzeichnis geöffnet
+- **Kontoauszug – Konto-Filter**: Dropdown-Filter zum Anzeigen einzelner Konten oder aller Konten
+- **Kontoauszug – Fett-Markierung**: Neue Buchungen werden fett angezeigt; Klick auf eine Zeile entfernt die Markierung
+- **Kontoauszug – Erweiterte Kacheln**: Jede Konto-Kachel zeigt Bezeichnung (aus Einstellungen), IBAN formatiert, Kontostand, Gesamtbuchungen und neue Buchungen. Klick auf Kachel filtert auf dieses Konto
+- **Buchhaltung – Konto-Filter für Vorschläge**: Dropdown zur Filterung der Kontoauszug-Vorschläge nach Konto
+- **Buchhaltung – Batch-Übernahme**: Button „Alle grünen übernehmen" übernimmt alle Vorschläge mit erkannter Kategorie automatisch in einem Schritt
+- **Rollen – Passwort-Skip pro Rolle**: Checkbox in der Rollenverwaltung, um die Passwortabfrage für alle Benutzer einer Rolle zu deaktivieren (Login prüft sowohl User- als auch Rollen-Einstellung)
+
+### Geändert
+- **Kategorie-Dropdowns**: ZahlungDialog und Korrigieren-Dialog verwenden jetzt die erweiterte Kategorienliste
+- **Einstellungen-Seite**: Neu organisiert in Abschnitte „WEG-Stammdaten", „Konten", „Speicherpfade Kontoauszüge", „Weitere Speicherpfade"
+
+---
+
+## [0.4.1] — 2026-03-21
+
+### Hinzugefügt
+- **Passwort generieren**: Automatische Passwort-Generierung (12 Zeichen) beim Anlegen neuer Benutzer und beim Passwort-Ändern
+- **Passwortabfrage abschaltbar**: Pro Benutzer kann die Passwortabfrage beim Login deaktiviert werden (Checkbox im BenutzerDialog, neue Spalte in der Benutzerliste)
+- **Passwort-Ändern-Dialog**: Wahl zwischen automatisch generiertem und manuell eingegebenem Passwort
+
+### Behoben
+- **Buchhaltung Vorschläge**: Kontoauszug-Vorschläge konnten nicht geladen oder übernommen werden — `sqlite3.Row` hat keine `.get()`-Methode, Rows werden jetzt korrekt zu `dict()` konvertiert
+- **Kategorie korrigieren**: Gleiches Problem beim Korrigieren von Vorschlägen behoben
+
+---
+
+## [0.4.0] — 2026-03-21
+
+### Hinzugefügt
+- **Multi-Datei-Import**: Kontoauszug-Import (CAMT.052 XML und CSV) unterstützt jetzt mehrere Dateien gleichzeitig
+- **Ordner-Import**: Kompletten Ordner mit XML- oder CSV-Dateien auf einmal importieren
+- **Dublettenprüfung**: Bereits vorhandene Buchungen werden beim Import automatisch erkannt und übersprungen (anhand Datum, Betrag, Buchungstext)
+- **Buchungsstatus**: Neues Status-Feld in der Buchhaltung mit Werten „Neu", „Geprüft", „Freigegeben"
+- **Visuelle Hervorhebung**: Neue Buchungen (Status „Neu") werden in der Buchungsliste farblich hervorgehoben (blau, fett)
+- **Status im ZahlungDialog**: Buchungsstatus kann beim Erstellen und Bearbeiten gesetzt werden
+
+### Geändert
+- **Kontoauszug-Import**: Dialog fragt jetzt Dateien vs. Ordner-Auswahl ab
+- **Auto-Transfer**: Automatisch aus Kontoauszug übernommene Buchungen erhalten Status „Neu"
+- **Buchhaltung-Tabelle**: Neue Spalte „Status" in der Buchungsliste
+
+---
+
 ## [0.3.0] — 2026-03-19
 
 ### Hinzugefügt
