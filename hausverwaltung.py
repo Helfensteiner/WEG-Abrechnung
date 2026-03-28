@@ -54,7 +54,7 @@ from pathlib import Path
 #            zahlungen beim Import, Aufteilung Typ Wasserkosten nach Punkten,
 #            bedingte Navigation Wasserkosten-Seite
 #   0.9.2 — Issue #17: WEG-Stammdaten in einzelne Felder aufgeteilt (Straße, PLZ, Ort, E-Mail, Telefon)
-APP_VERSION = "0.9.3"
+APP_VERSION = "0.9.4"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 
@@ -169,6 +169,7 @@ FONT_NAV    = ("Segoe UI Semibold", 10)
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")  # Referentielle Integrität erzwingen
     return conn
 
 def init_db():
@@ -352,6 +353,22 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
     wasserkosten_eur REAL    DEFAULT 0
 );
 """)
+    conn.commit()
+    # Indizes für häufig abgefragte Spalten (IF NOT EXISTS = idempotent)
+    for idx_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_zahlungen_datum   ON zahlungen(datum)",
+        "CREATE INDEX IF NOT EXISTS idx_zahlungen_typ     ON zahlungen(typ)",
+        "CREATE INDEX IF NOT EXISTS idx_zahlungen_kat     ON zahlungen(kategorie)",
+        "CREATE INDEX IF NOT EXISTS idx_kontoauszug_datum ON kontoauszug(datum)",
+        "CREATE INDEX IF NOT EXISTS idx_kontoauszug_uebernommen ON kontoauszug(als_buchung_uebernommen)",
+        "CREATE INDEX IF NOT EXISTS idx_nachrichten_gelesen ON nachrichten(gelesen)",
+        "CREATE INDEX IF NOT EXISTS idx_wohnungen_eigentuemer ON wohnungen(eigentuemer_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mieter_wohnung ON mieter(wohnung_id)",
+    ]:
+        try:
+            c.execute(idx_sql)
+        except Exception:
+            pass
     conn.commit()
     # Schema-Migration: neue Spalten hinzufügen falls noch nicht vorhanden
     for sql in [
@@ -1768,12 +1785,16 @@ class BuchhaltungPage(tk.Frame):
         for i in self.tree_b.get_children(): self.tree_b.delete(i)
         conn = get_db()
         typ = self._typ_var.get()
-        q = "SELECT * FROM zahlungen"
+        # Parametrisierte Abfrage – kein String-Formatting (SQL-Injection-Schutz)
         if typ != "Alle":
-            q += f" WHERE typ='{typ}'"
-        q += " ORDER BY datum DESC, erstellt_am DESC"
+            rows = conn.execute(
+                "SELECT * FROM zahlungen WHERE typ=? ORDER BY datum DESC, erstellt_am DESC",
+                (typ,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM zahlungen ORDER BY datum DESC, erstellt_am DESC").fetchall()
         einnahmen = ausgaben = 0.0
-        for r in conn.execute(q):
+        for r in rows:
             rd = dict(r)
             status = rd.get("status") or "Geprüft"
             tags_list = ["einnahme" if rd["typ"] == "Einnahme" else "ausgabe"]
@@ -2570,7 +2591,7 @@ class NachrichtenPage(tk.Frame):
         f.pack(fill="x", padx=20, pady=8)
         for c, w in zip(cols, [20, 140, 140, 220, 80, 120]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
-        self.tree.bind("<Double-1>", self._read)
+        self.tree.bind("<Double-1>", self._mark_read)
 
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20)
         tk.Label(self, text="Nachricht", bg=BG_CARD, fg=TEXT_LIGHT,
@@ -2626,14 +2647,8 @@ class NachrichtenPage(tk.Frame):
                 (v["von"], v["an"], v["betreff"], v["inhalt"], v["prioritaet"]))
             conn.commit(); conn.close(); self._load()
 
-    def _read(self, event=None):
-        sel = self.tree.selection()
-        if not sel: return
-        conn = get_db()
-        conn.execute("UPDATE nachrichten SET gelesen=1 WHERE id=?", (int(sel[0]),))
-        conn.commit(); conn.close(); self._load()
-
-    def _mark_read(self):
+    def _mark_read(self, event=None):
+        """Markiert die gewählte Nachricht als gelesen (auch per Doppelklick)."""
         sel = self.tree.selection()
         if not sel: return
         conn = get_db()
@@ -3861,7 +3876,7 @@ class WasserkostenPage(tk.Frame):
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
         make_btn(btn_row, "Bearbeiten", self._edit_wohnung,
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
-        make_btn(btn_row, "Loeschen", self._delete_wohnung,
+        make_btn(btn_row, "🗑 Löschen", self._delete_wohnung,
                  color=DANGER).pack(side="left")
 
     def _load_punkte(self):

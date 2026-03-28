@@ -7,6 +7,24 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.9.4] — 2026-03-28
+
+### Behoben (Profi-Review: Python · Buchhalter · UX · Datenbank)
+- **SQL-Injection** in `BuchhaltungPage._load_buchungen()`: String-Formatierung durch parametrisierte SQLite-Abfrage ersetzt
+- **Duplikat-Code** in `NachrichtenPage`: `_read()` und `_mark_read()` zusammengeführt (identische Funktion)
+- **Typo UX**: „Loeschen" → „🗑 Löschen" in Wasserkosten-Punktetabelle
+- **FOREIGN KEY Pragma**: `PRAGMA foreign_keys = ON` in `get_db()` — referentielle Integrität jetzt erzwungen
+- **DB-Indizes**: 8 neue Indizes für häufig abgefragte Spalten (`zahlungen`, `kontoauszug`, `nachrichten`, `wohnungen`, `mieter`)
+
+### Neue GitHub Issues (aus Profi-Review)
+- **#18** 🔐 Passwort-Hashing SHA256 → PBKDF2
+- **#19** 📊 Wohngeld-Übersicht Soll/Ist-Vergleich
+- **#20** 🗄️ MEA-Felder vereinheitlichen
+- **#21** 🖥️ Leere Tabellen mit Hinweistext
+- **#22** 📋 Jahresabschluss-Bericht PDF §28 WEG
+
+---
+
 ## [0.9.3] — 2026-03-28
 
 ### Behoben
