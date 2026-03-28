@@ -7,6 +7,54 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.9.3] — 2026-03-28
+
+### Behoben
+- **AufteilungDialog – Eingaben erschienen nicht in Tabelle**: `_on_typ_change()` rief `.configure()` und `.bind()` auf `tk.StringVar`-Objekte auf (statt auf die echten Widget-Referenzen), was einen `AttributeError` verursachte; jetzt werden `self._typ_combo` und `self._bezug_entry` direkt als Widget-Referenzen gespeichert
+- **Wasserkosten-Navigation erscheint nicht**: Bedingung `_wk_aktiv` wurde nur beim App-Start geprüft; 💧 Wasserkosten ist jetzt immer in der Navigation sichtbar (kein nachträglicher Neustart nötig)
+
+---
+
+## [0.9.2] — 2026-03-28
+
+### Behoben
+- **#17 WEG-Stammdaten – Felder getrennt**: Einstellungen → WEG-Stammdaten zeigt jetzt einzelne Felder: WEG-Name, Straße, PLZ, Ort, E-Mail, Telefon (statt einem kombinierten Adressfeld); Sidebar kombiniert PLZ + Ort automatisch; Rückwärtskompatibilität mit altem `weg_adresse`-Feld
+
+---
+
+## [0.9.1] — 2026-03-28
+
+### Behoben (Issues #10–#16)
+- **#16 KI-Assistent – Keine Eingabe möglich**: Schnell-Aktionen-Buttons durch echte `make_btn`-Buttons ersetzt; Entry-Feld erhält automatisch Fokus
+- **#16 KI-Assistent – Modell-Dropdown**: Combobox für Modellauswahl (Opus/Sonnet/Haiku), wird in Einstellungen gespeichert
+- **#16 KI-Assistent – Einstellungen-Button**: Navigiert zur Einstellungen-Seite
+- **#15 Fenstertitel**: Sidebar-Logo und Fenstertitel zeigen WEG-Name/Adresse aus Einstellungen; Fallback auf "Hausverwaltung"/"Musterstraße 12"
+- **#12 Wohnung – MEA doppelt**: Redundantes Feld "MEA (Miteigentumsanteil)" entfernt; "MEA Tausendstel" → "MEA Tausendstel (Miteigentumsanteil)"
+- **#11 Buchhaltung – Mehrfach-Löschen**: Alle per SHIFT markierten Buchungen werden gemeinsam gelöscht
+- **#10 Doppelimport**: Belt-and-Suspenders-Dublettencheck für `zahlungen` beim CAMT.052-Import verhindert doppelte Einträge bei Re-Import
+- **#13 Aufteilungen – Typ "Wasserkosten nach Punkten"**: Neuer Typ im Aufteilung-Dialog; Bezug wird automatisch gesetzt; Hinweistext eingeblendet
+- **#14 Wasserkosten – Bedingte Navigation**: 💧 Wasserkosten-Seite erscheint nur wenn eine Aufteilung vom Typ "Wasserkosten nach Punkten" existiert
+
+---
+
+## [0.9.0] — 2026-03-28
+
+### Hinzugefügt
+- **🤖 KI-Assistent** (neue Seite): Chat-Interface mit Claude (Anthropic API) direkt in der App
+  - Fragen in natürlicher Sprache: „Welche Eigentümer haben nicht bezahlt?", „Ausgaben Q1 2026?"
+  - KI generiert SQL-Abfragen und führt sie direkt auf der DB aus, Ergebnis wird im Chat angezeigt
+  - **Auto-Kategorisierung**: Unkategorisierte Bankbuchungen werden per KI kategorisiert
+  - **Anomalie-Check**: Fehlende Wohngeld-Zahlungen und ungewöhnliche Beträge werden erkannt
+  - **Monats-Bericht**: Automatische Zusammenfassung der Finanzen des aktuellen Monats
+  - **Offene Forderungen**: Wer hat diesen Monat noch nicht bezahlt?
+- **Anthropic API-Key** in Einstellungen: Schlüssel und Modell konfigurierbar
+
+### Behoben
+- **parse_float()** Hilfsfunktion: SQLite gibt REAL-Spalten manchmal als deutschen Komma-String zurück (`'334,69'`) — `float()` scheiterte daran, `parse_float()` normiert korrekt
+- Alle `mea_tausendstel`- und `nutzflaeche_qm`-Formatierungen verwenden jetzt `parse_float()`
+
+---
+
 ## [0.8.0] — 2026-03-22
 
 ### Hinzugefügt

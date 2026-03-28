@@ -12,6 +12,9 @@ import glob
 import csv
 import re
 import subprocess
+import threading
+import urllib.request
+import urllib.error
 import xml.etree.ElementTree as ET
 from datetime import datetime, date
 from pathlib import Path
@@ -43,7 +46,15 @@ from pathlib import Path
 #            Keywords, Füllwörter-Filterung, dreistufige Matching-Strategie)
 # ───────────────────────────────────────────────────────────────────────────────
 
-APP_VERSION = "0.8.0"
+#   0.9.0 — KI-Assistent (Claude/Anthropic API): Chat, Auto-Kategorisierung,
+#            Anomalie-Check, Monats-Bericht, Offene Forderungen, Modell-Dropdown;
+#            parse_float() für deutsche Kommazahlen aus SQLite;
+#   0.9.1 — Issues #10-16: KI-Buttons repariert, Fenstertitel aus WEG-Stammdaten,
+#            MEA-Doppelfeld entfernt, Mehrfach-Löschen Buchhaltung, Dublettencheck
+#            zahlungen beim Import, Aufteilung Typ Wasserkosten nach Punkten,
+#            bedingte Navigation Wasserkosten-Seite
+#   0.9.2 — Issue #17: WEG-Stammdaten in einzelne Felder aufgeteilt (Straße, PLZ, Ort, E-Mail, Telefon)
+APP_VERSION = "0.9.3"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 
@@ -1473,8 +1484,7 @@ class WohnungDialog(BaseDialog):
         self._add_field("Stellplatz", "stellplatz", r.get("stellplatz",""), row=ri)
 
         self._add_field("Heizungsart", "heizungsart", r.get("heizungsart","Zentralheizung"))
-        self._add_field("MEA Tausendstel", "mea_tausendstel", r.get("mea_tausendstel",""))
-        self._add_field("MEA (Miteigentumsanteil)", "miteigentumsanteil", r.get("miteigentumsanteil",""))
+        self._add_field("MEA Tausendstel (Miteigentumsanteil)", "mea_tausendstel", r.get("mea_tausendstel",""))
         self._add_field("Baujahr", "baujahr", r.get("baujahr",""))
 
         # Eigentümer-Dropdown
@@ -1830,9 +1840,12 @@ class BuchhaltungPage(tk.Frame):
             messagebox.showwarning("Berechtigung", "Keine Löschberechtigung.", parent=self); return
         sel = self.tree_b.selection()
         if not sel: return
-        if messagebox.askyesno("Löschen", "Buchung unwiderruflich löschen?"):
+        anzahl = len(sel)
+        frage = f"{anzahl} Buchung(en) unwiderruflich löschen?" if anzahl > 1 else "Buchung unwiderruflich löschen?"
+        if messagebox.askyesno("Löschen", frage):
             conn = get_db()
-            conn.execute("DELETE FROM zahlungen WHERE id=?", (int(sel[0]),))
+            for iid in sel:
+                conn.execute("DELETE FROM zahlungen WHERE id=?", (int(iid),))
             conn.commit(); conn.close()
             self._load_buchungen()
 
@@ -3011,22 +3024,53 @@ class AufteilungenPage(tk.Frame):
 
 
 class AufteilungDialog(BaseDialog):
+    TYPEN = ["Wohnfläche", "Personenanzahl", "Einheiten gleich", "Verbrauch",
+             "MEA", "Wasserkosten nach Punkten", "Sonstiges"]
+
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Aufteilung " + ("bearbeiten" if row else "hinzufügen"), 480, 560)
+        super().__init__(parent, "Aufteilung " + ("bearbeiten" if row else "hinzufügen"), 480, 580)
         r = dict(row) if row else {}
         self._add_field("Name *", "name", r.get("name",""))
-        self._add_field("Typ", "typ", r.get("typ","Wohnfläche"),
-                        widget_type="combo",
-                        options=["Wohnfläche", "Personenanzahl", "Einheiten gleich", "Verbrauch", "MEA", "Sonstiges"])
-        self._add_field("Bezug / Einheit", "bezug", r.get("bezug",""))
+        # Widgetreferenzen direkt speichern – _fields enthält nur StringVar, nicht das Widget selbst
+        self._typ_combo   = self._add_field("Typ", "typ", r.get("typ","Wohnfläche"),
+                                            widget_type="combo", options=self.TYPEN)
+        self._bezug_entry = self._add_field("Bezug / Einheit", "bezug", r.get("bezug",""))
         self._add_field("Wert", "wert", r.get("wert",""))
         self._add_field("Beschreibung", "beschreibung", r.get("beschreibung",""))
         self._add_field("Notizen", "notizen", r.get("notizen",""), widget_type="text")
+
+        # Hinweis-Label: wird bei Typ "Wasserkosten nach Punkten" eingeblendet
+        self._wk_hinweis = tk.Label(self._body, bg=BG_CARD, fg=ACCENT2, font=FONT_SMALL,
+            text="\u2139  Bezug/Einheit wird automatisch aus der\n   Wasserkosten-Berechnung \u00fcbernommen.",
+            justify="left", anchor="w")
+        self._wk_hinweis.pack(fill="x", padx=20, pady=(0, 6))
+
+        # Auf Combobox-Widget binden (nicht auf StringVar)
+        self._typ_combo.bind("<<ComboboxSelected>>", self._on_typ_change)
+        self._on_typ_change()  # Initialzustand setzen
+
+    def _on_typ_change(self, event=None):
+        """Zeigt/versteckt den Wasserkosten-Hinweis je nach gewähltem Typ."""
+        typ = self._fields["typ"].get()
+        if typ == "Wasserkosten nach Punkten":
+            self._wk_hinweis.pack(fill="x", padx=20, pady=(0, 6))
+            self._bezug_entry.configure(state="disabled")
+            if not self._fields["bezug"].get():
+                self._bezug_entry.configure(state="normal")
+                self._bezug_entry.delete(0, "end")
+                self._bezug_entry.insert(0, "Aus Wasserkosten-Berechnung")
+                self._bezug_entry.configure(state="disabled")
+        else:
+            self._wk_hinweis.pack_forget()
+            self._bezug_entry.configure(state="normal")
 
     def _on_save(self):
         v = self._get_values()
         if not v.get("name"):
             messagebox.showwarning("Pflichtfeld", "Name ist erforderlich.", parent=self); return
+        # Bezug automatisch setzen bei Wasserkosten-Typ
+        if v.get("typ") == "Wasserkosten nach Punkten":
+            v["bezug"] = "Wasserkosten nach Punkten"
         self.result = v; self.destroy()
 
 # ── Kontoauszug-Seite ──────────────────────────────────────────────────────
@@ -3352,16 +3396,26 @@ class KontoauszugPage(tk.Frame):
                             beschr = f"{gegenkonto} – {vzweck}" if gegenkonto else vzweck
                         else:
                             beschr = buchungstext
-                        conn.execute(
-                            "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,konto_typ,status) "
-                            "VALUES (?,?,?,?,?,?,?)",
-                            (datum, betrag, typ, kat, beschr[:200], kt, "Neu"))
-                        zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                        conn.execute(
-                            "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, zahlung_id=? WHERE id=?",
-                            (zahlung_id, ka_id))
-                        datei_lern_queue.append((buchungstext, kat, typ, kt))
-                        auto_count += 1
+                        # Sicherheits-Dublettencheck für zahlungen (verhindert Duplikate bei Re-Import)
+                        z_exists = conn.execute(
+                            "SELECT id FROM zahlungen WHERE datum=? AND betrag=? AND kategorie=? AND konto_typ=?",
+                            (datum, betrag, kat, kt)).fetchone()
+                        if z_exists:
+                            # Zahlung existiert bereits – nur kontoauszug verknüpfen
+                            conn.execute(
+                                "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, zahlung_id=? WHERE id=?",
+                                (z_exists[0], ka_id))
+                        else:
+                            conn.execute(
+                                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,konto_typ,status) "
+                                "VALUES (?,?,?,?,?,?,?)",
+                                (datum, betrag, typ, kat, beschr[:200], kt, "Neu"))
+                            zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                            conn.execute(
+                                "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, zahlung_id=? WHERE id=?",
+                                (zahlung_id, ka_id))
+                            datei_lern_queue.append((buchungstext, kat, typ, kt))
+                            auto_count += 1
                 conn.commit()
                 # lerne_buchung nach commit – verhindert "database is locked"
                 for _bt, _kat, _typ, _kt in datei_lern_queue:
@@ -4250,6 +4304,400 @@ class WasserkostenPage(tk.Frame):
 # ── EinstellungenPage ─────────────────────────────────────────────────────────
 
 
+class KIAssistentPage(tk.Frame):
+    """KI-Assistent: Chat mit Claude, Auto-Kategorisierung, Anomalie-Check."""
+
+    # DB-Schema als Kontext für das Sprachmodell
+    _SCHEMA_KONTEXT = """
+Du bist ein Assistent für eine WEG-Hausverwaltungs-Software (Python/SQLite).
+Die Datenbank enthält folgende Tabellen:
+
+eigentuemer(id, name, vorname, strasse, plz, ort, telefon, email, iban, einheit)
+wohnungen(id, bezeichnung, typ, lage, nutzflaeche_qm, zimmer, mea_tausendstel, eigentuemer_id, mieter_id)
+mieter(id, name, vorname, strasse, plz, ort, telefon, email, einzug, auszug, kaltmiete, wohnungs_id, personen, spuelmaschinen, waschmaschinen, trockner_wasserkuehlung)
+zahlungen(id, datum, betrag, kategorie, beschreibung, typ, konto_typ, status)
+kontoauszug(id, datum, buchungstext, betrag, saldo, iban, konto_typ, kategorie_vorschlag, als_buchung_uebernommen, zugeordnet, zahlung_id)
+wartung(id, titel, beschreibung, prioritaet, status, gemeldet_von, einheit, erstellt_am, erledigt_am)
+nebenkosten(id, jahr, bezeichnung, betrag, umlageschluessel)
+nachrichten(id, datum, betreff, inhalt, absender, empfaenger, gelesen)
+dokumente(id, datum, titel, pfad, kategorie, wohnungs_id)
+benutzer(id, benutzername, rolle, aktiv)
+
+Beträge: positiv = Einnahmen, negativ = Ausgaben.
+kontoauszug.buchungstext = "Gegenkonto||Verwendungszweck" (mit || getrennt).
+kontoauszug.kategorie_vorschlag: automatisch erkannte Kategorie beim Import.
+kontoauszug.als_buchung_uebernommen: 1 = bereits in zahlungen übernommen.
+Kategorien (zahlungen.kategorie): Wohngeld, Rücklage, Betriebskosten, Instandhaltung, Verwaltung, Versicherung, Wasser, Strom, Heizung, Müll, Sonstiges.
+zahlungen.status: Neu, Geprüft, Freigegeben.
+
+Wenn du SQL-Abfragen generierst, antworte im Format:
+SQL: <deine Abfrage>
+ANTWORT: <kurze Erklärung was die Abfrage zurückgibt>
+
+Für allgemeine Fragen antworte direkt ohne SQL.
+Antworte immer auf Deutsch.
+"""
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self._messages = []   # Liste von (rolle, text) Tuples
+        self._build()
+
+    def _build(self):
+        # ── Titel ────────────────────────────────────────────────────────────
+        header = tk.Frame(self, bg=BG_CARD, pady=0)
+        header.pack(fill="x")
+        tk.Label(header, text="🤖  KI-Assistent", bg=BG_CARD, fg=TEXT,
+                 font=FONT_H2).pack(side="left", padx=20, pady=14)
+        tk.Label(header, text="Powered by Claude (Anthropic API)",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left", padx=4, pady=14)
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
+
+        # ── Haupt-Layout: Chat links, Aktionen rechts ─────────────────────
+        main = tk.Frame(self, bg=BG)
+        main.pack(fill="both", expand=True, padx=16, pady=12)
+        main.columnconfigure(0, weight=3)
+        main.columnconfigure(1, weight=1)
+        main.rowconfigure(0, weight=1)
+
+        # ── Linke Spalte: Chat ────────────────────────────────────────────
+        chat_frame = tk.Frame(main, bg=BG_CARD, bd=0, relief="flat")
+        chat_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        chat_frame.rowconfigure(0, weight=1)
+        chat_frame.columnconfigure(0, weight=1)
+
+        # Chat-Verlauf
+        self._chat_text = tk.Text(
+            chat_frame, wrap="word", state="disabled",
+            bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+            relief="flat", padx=12, pady=8, cursor="arrow",
+            spacing3=6
+        )
+        chat_sb = ttk.Scrollbar(chat_frame, command=self._chat_text.yview)
+        self._chat_text.configure(yscrollcommand=chat_sb.set)
+        chat_sb.grid(row=0, column=1, sticky="ns")
+        self._chat_text.grid(row=0, column=0, sticky="nsew")
+
+        # Farb-Tags für Chat
+        self._chat_text.tag_configure("user_bubble", foreground=ACCENT2,
+                                       font=("Segoe UI Semibold", 10), lmargin1=10, lmargin2=10)
+        self._chat_text.tag_configure("ki_bubble", foreground=TEXT,
+                                       font=FONT_BODY, lmargin1=10, lmargin2=10)
+        self._chat_text.tag_configure("sql_result", foreground=SUCCESS,
+                                       font=("Consolas", 9), lmargin1=20, lmargin2=20)
+        self._chat_text.tag_configure("error_msg", foreground=DANGER,
+                                       font=FONT_SMALL, lmargin1=10, lmargin2=10)
+        self._chat_text.tag_configure("hint", foreground=TEXT_LIGHT,
+                                       font=FONT_SMALL, lmargin1=10)
+
+        # Willkommensnachricht
+        self._append_chat("hint",
+            "Stell mir Fragen zur Hausverwaltung \u2013 z.B.:\n"
+            "  \u2022 Welche Eigentuemer haben diesen Monat nicht bezahlt?\n"
+            "  \u2022 Wie hoch sind die Ausgaben in Q1 2026?\n"
+            "  \u2022 Gibt es ueberfaellige Wartungsaufgaben?\n"
+            "  \u2022 Zeige alle Buchungen ueber 500 Euro\n")
+
+        # Eingabe-Zeile
+        input_row = tk.Frame(chat_frame, bg=BG_INPUT, pady=8)
+        input_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self._entry = make_entry(input_row)
+        self._entry.pack(side="left", fill="x", expand=True, padx=(10, 6), ipady=7)
+        self._entry.bind("<Return>", lambda e: self._send())
+        make_btn(input_row, "➤ Senden", self._send, color=ACCENT2).pack(side="left", padx=(0, 10))
+
+        # Fokus auf Entry setzen sobald Seite geladen
+        self.after(100, lambda: self._entry.focus_set())
+
+        # ── Rechte Spalte: Schnell-Aktionen ───────────────────────────────
+        right = tk.Frame(main, bg=BG_CARD)
+        right.grid(row=0, column=1, sticky="nsew")
+
+        tk.Label(right, text="Schnell-Aktionen", bg=BG_CARD, fg=TEXT,
+                 font=FONT_H3).pack(anchor="w", padx=12, pady=(12, 4))
+        tk.Frame(right, bg=BORDER, height=1).pack(fill="x", padx=10, pady=(0, 8))
+
+        make_btn(right, "🏷  Auto-Kategorisierung", self._auto_kategorisierung,
+                 color=ACCENT2).pack(fill="x", padx=10, pady=(0, 6))
+        make_btn(right, "⚠  Anomalie-Check", self._anomalie_check,
+                 color="#C8960E").pack(fill="x", padx=10, pady=(0, 6))
+        make_btn(right, "📊  Monats-Bericht", self._monatsbericht,
+                 color=SUCCESS).pack(fill="x", padx=10, pady=(0, 6))
+        make_btn(right, "💰  Offene Forderungen", self._offene_forderungen,
+                 color=ACCENT2).pack(fill="x", padx=10, pady=(0, 6))
+
+        # Modell-Auswahl
+        tk.Frame(right, bg=BORDER, height=1).pack(fill="x", padx=10, pady=(8, 8))
+        tk.Label(right, text="KI-Modell", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w", padx=12)
+        cfg = load_config()
+        modelle = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+        self._modell_var = tk.StringVar(value=cfg.get("ki_modell", "claude-opus-4-6"))
+        modell_cb = ttk.Combobox(right, textvariable=self._modell_var,
+                                  values=modelle, state="readonly", font=FONT_SMALL)
+        modell_cb.pack(fill="x", padx=10, pady=(2, 8))
+        modell_cb.bind("<<ComboboxSelected>>", self._modell_geaendert)
+
+        # API-Key Status
+        tk.Frame(right, bg=BORDER, height=1).pack(fill="x", padx=10, pady=(0, 8))
+        key = cfg.get("anthropic_api_key", "")
+        if key:
+            status_text = f"✅ API-Key gesetzt (…{key[-6:]})"
+            status_color = SUCCESS
+        else:
+            status_text = "⚠️ Kein API-Key!\nBitte in Einstellungen eintragen."
+            status_color = DANGER
+        self._api_status = tk.Label(right, text=status_text, bg=BG_CARD, fg=status_color,
+                                     font=FONT_SMALL, wraplength=180, anchor="w", justify="left")
+        self._api_status.pack(anchor="w", padx=12, pady=4)
+        make_btn(right, "⚙  Einstellungen öffnen", self._zu_einstellungen,
+                 color=TEXT_LIGHT).pack(fill="x", padx=10, pady=(4, 8))
+
+    def _modell_geaendert(self, event=None):
+        """Gewähltes Modell in Konfiguration speichern."""
+        cfg = load_config()
+        cfg["ki_modell"] = self._modell_var.get()
+        save_config(cfg)
+
+    def _zu_einstellungen(self):
+        """Zur Einstellungen-Seite navigieren."""
+        app = self.winfo_toplevel()
+        if hasattr(app, "_switch"):
+            # Einstellungen ist der letzte Eintrag in PAGES
+            idx = len(app.PAGES) - 1
+            app._switch(idx)
+
+    # ── Chat-Ausgabe ──────────────────────────────────────────────────────────
+
+    def _append_chat(self, tag, text):
+        self._chat_text.configure(state="normal")
+        self._chat_text.insert("end", text + "\n", tag)
+        self._chat_text.configure(state="disabled")
+        self._chat_text.see("end")
+
+    # ── Senden & API-Call ─────────────────────────────────────────────────────
+
+    def _send(self):
+        frage = self._entry.get().strip()
+        if not frage:
+            return
+        self._entry.delete(0, "end")
+        self._append_chat("user_bubble", f"👤 Du: {frage}")
+        self._messages.append({"role": "user", "content": frage})
+        self._append_chat("hint", "⏳ Claude denkt …")
+        threading.Thread(target=self._api_call_thread,
+                         args=(list(self._messages),), daemon=True).start()
+
+    def _api_call_thread(self, messages):
+        cfg = load_config()
+        key = cfg.get("anthropic_api_key", "").strip()
+        if not key:
+            self.after(0, lambda: self._append_chat("error_msg",
+                "❌ Kein Anthropic API-Key. Bitte in Einstellungen eintragen."))
+            return
+        try:
+            modell = cfg.get("ki_modell", "claude-opus-4-6")
+            payload = json.dumps({
+                "model": modell,
+                "max_tokens": 1024,
+                "system": self._SCHEMA_KONTEXT,
+                "messages": messages
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=payload,
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                }
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            antwort = data["content"][0]["text"]
+            self._messages.append({"role": "assistant", "content": antwort})
+
+            # SQL ausführen wenn Antwort enthält
+            if "SQL:" in antwort:
+                self.after(0, lambda a=antwort: self._handle_sql_response(a))
+            else:
+                self.after(0, lambda a=antwort: self._append_chat("ki_bubble", f"🤖 Claude: {a}"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            self.after(0, lambda b=body: self._append_chat("error_msg", f"❌ API-Fehler: {b[:200]}"))
+        except Exception as ex:
+            self.after(0, lambda x=str(ex): self._append_chat("error_msg", f"❌ Fehler: {x}"))
+
+    def _handle_sql_response(self, antwort):
+        """SQL aus KI-Antwort extrahieren, ausführen, Ergebnis anzeigen."""
+        lines = antwort.split("\n")
+        sql_line = next((l for l in lines if l.startswith("SQL:")), None)
+        erklärung_lines = [l for l in lines if not l.startswith("SQL:")]
+        erklärung = "\n".join(erklärung_lines).strip()
+        if erklärung:
+            self._append_chat("ki_bubble", f"🤖 Claude: {erklärung}")
+        if sql_line:
+            sql = sql_line[4:].strip()
+            try:
+                conn = get_db()
+                rows = conn.execute(sql).fetchall()
+                conn.close()
+                if rows:
+                    # Spaltenköpfe
+                    cols = rows[0].keys() if hasattr(rows[0], "keys") else []
+                    header = "  |  ".join(str(c) for c in cols)
+                    self._append_chat("sql_result", f"📋 Ergebnis:\n{header}")
+                    self._append_chat("sql_result", "─" * min(len(header), 60))
+                    for row in rows[:25]:
+                        self._append_chat("sql_result",
+                            "  |  ".join(str(v) if v is not None else "–" for v in row))
+                    if len(rows) > 25:
+                        self._append_chat("hint", f"  … und {len(rows)-25} weitere Zeilen")
+                else:
+                    self._append_chat("hint", "  (Keine Ergebnisse)")
+            except Exception as ex:
+                self._append_chat("error_msg", f"❌ SQL-Fehler: {ex}")
+
+    # ── Schnell-Aktionen ──────────────────────────────────────────────────────
+
+    def _auto_kategorisierung(self):
+        """Unkategorisierte Buchungen der KI zur Kategorisierung vorlegen."""
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT id, datum, betrag, buchungstext "
+            "FROM kontoauszug WHERE (kategorie_vorschlag IS NULL OR kategorie_vorschlag='') "
+            "AND (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) LIMIT 20"
+        ).fetchall()
+        conn.close()
+        if not rows:
+            self._append_chat("hint", "✅ Keine unkategorisierten Buchungen gefunden.")
+            return
+        def _split_bt(bt):
+            """buchungstext 'Gegenkonto||Verwendungszweck' aufteilen."""
+            if bt and "||" in bt:
+                gk, vz = bt.split("||", 1)
+                return gk.strip(), vz.strip()
+            return (bt or ""), ""
+        liste = "\n".join(
+            f"  ID {r['id']} | {r['datum']} | {r['betrag']:+.2f} € | {_split_bt(r['buchungstext'])[0] or '–'} | {_split_bt(r['buchungstext'])[1] or '–'}"
+            for r in rows
+        )
+        frage = (
+            f"Bitte kategorisiere folgende {len(rows)} Bankbuchungen. "
+            f"Mögliche Kategorien: Wohngeld, Rücklage, Betriebskosten, Instandhaltung, "
+            f"Verwaltung, Versicherung, Wasser, Strom, Heizung, Müll, Sonstiges.\n\n"
+            f"{liste}\n\n"
+            f"Nenne für jede Buchung: ID | Kategorie | Begründung (kurz)"
+        )
+        self._append_chat("user_bubble", "👤 Auto-Kategorisierung gestartet …")
+        self._messages.append({"role": "user", "content": frage})
+        self._append_chat("hint", "⏳ Claude analysiert Buchungen …")
+        threading.Thread(target=self._api_call_thread,
+                         args=(list(self._messages),), daemon=True).start()
+
+    def _anomalie_check(self):
+        """KI prüft auf Anomalien: fehlende Zahlungen, ungewöhnliche Beträge."""
+        conn = get_db()
+        heute = date.today()
+        monat = heute.strftime("%Y-%m")
+        # Statistiken aus zahlungen-Tabelle sammeln (hat echte kategorie-Spalte)
+        zahlungen_stats = conn.execute(
+            "SELECT kategorie, SUM(betrag) as gesamt, COUNT(*) as anzahl "
+            "FROM zahlungen WHERE datum LIKE ? GROUP BY kategorie",
+            (f"{monat}%",)
+        ).fetchall()
+        eigentuemer = conn.execute("SELECT COUNT(*) as n FROM eigentuemer").fetchone()["n"]
+        wohngeld = conn.execute(
+            "SELECT COUNT(*) as n FROM zahlungen "
+            "WHERE datum LIKE ? AND kategorie='Wohngeld' AND betrag > 0",
+            (f"{monat}%",)
+        ).fetchone()["n"]
+        conn.close()
+
+        stats = f"Monat: {monat}\nEigentümer gesamt: {eigentuemer}\nWohngeld-Eingänge: {wohngeld}\n"
+        if zahlungen_stats:
+            stats += "Buchungen nach Kategorie:\n"
+            for r in zahlungen_stats:
+                stats += f"  {r['kategorie'] or 'Ohne'}: {r['gesamt']:+.2f} € ({r['anzahl']} Buchungen)\n"
+
+        frage = (
+            f"Führe einen Anomalie-Check für die WEG durch:\n{stats}\n"
+            f"Analysiere: 1) Fehlende Wohngeld-Zahlungen (erwartet {eigentuemer}), "
+            f"2) Ungewöhnliche Beträge, 3) Handlungsempfehlungen. "
+            f"Antworte strukturiert mit konkreten Befunden."
+        )
+        self._append_chat("user_bubble", f"👤 Anomalie-Check für {monat} …")
+        self._messages.append({"role": "user", "content": frage})
+        self._append_chat("hint", "⏳ Claude prüft …")
+        threading.Thread(target=self._api_call_thread,
+                         args=(list(self._messages),), daemon=True).start()
+
+    def _monatsbericht(self):
+        """Monatlicher Finanzbericht vom aktuellen Monat."""
+        conn = get_db()
+        monat = date.today().strftime("%Y-%m")
+        einnahmen = conn.execute(
+            "SELECT SUM(betrag) FROM zahlungen WHERE datum LIKE ? AND betrag > 0",
+            (f"{monat}%",)
+        ).fetchone()[0] or 0
+        ausgaben = conn.execute(
+            "SELECT SUM(betrag) FROM zahlungen WHERE datum LIKE ? AND betrag < 0",
+            (f"{monat}%",)
+        ).fetchone()[0] or 0
+        kategorien = conn.execute(
+            "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+            "WHERE datum LIKE ? GROUP BY kategorie ORDER BY s",
+            (f"{monat}%",)
+        ).fetchall()
+        conn.close()
+        saldo = einnahmen + ausgaben
+        details = "\n".join(f"  {r['kategorie'] or 'Ohne'}: {r['s']:+.2f} €" for r in kategorien)
+        frage = (
+            f"Erstelle einen Monats-Finanzbericht für {monat}:\n"
+            f"Einnahmen: {einnahmen:+.2f} €\nAusgaben: {ausgaben:+.2f} €\nSaldo: {saldo:+.2f} €\n"
+            f"Nach Kategorien:\n{details}\n\n"
+            f"Kommentiere die Zahlen und gib eine Einschätzung zur finanziellen Lage der WEG."
+        )
+        self._append_chat("user_bubble", f"👤 Monats-Bericht {monat} …")
+        self._messages.append({"role": "user", "content": frage})
+        self._append_chat("hint", "⏳ Claude erstellt Bericht …")
+        threading.Thread(target=self._api_call_thread,
+                         args=(list(self._messages),), daemon=True).start()
+
+    def _offene_forderungen(self):
+        """Wer hat diesen Monat Wohngeld noch nicht bezahlt?"""
+        conn = get_db()
+        monat = date.today().strftime("%Y-%m")
+        alle = conn.execute(
+            "SELECT e.id, e.vorname || ' ' || e.name as name "
+            "FROM eigentuemer e ORDER BY e.name"
+        ).fetchall()
+        # Wohngeld-Buchungen aus zahlungen (hat echte kategorie-Spalte)
+        wohngeld_eingaenge = conn.execute(
+            "SELECT beschreibung, betrag, datum "
+            "FROM zahlungen WHERE datum LIKE ? AND kategorie='Wohngeld' AND betrag > 0",
+            (f"{monat}%",)
+        ).fetchall()
+        conn.close()
+        eingaenge_str = "\n".join(
+            f"  {r['datum']} | {r['beschreibung'] or '–'} | {r['betrag']:.2f} €"
+            for r in wohngeld_eingaenge
+        ) or "  (keine)"
+        alle_str = "\n".join(f"  {r['name']}" for r in alle)
+        frage = (
+            f"Offene Forderungen Wohngeld {monat}:\n"
+            f"Alle Eigentümer:\n{alle_str}\n\n"
+            f"Wohngeld-Eingänge diesen Monat:\n{eingaenge_str}\n\n"
+            f"Analysiere wer wahrscheinlich noch nicht gezahlt hat (Name-Matching) "
+            f"und formuliere eine freundliche Erinnerungsnotiz."
+        )
+        self._append_chat("user_bubble", f"👤 Offene Forderungen {monat} …")
+        self._messages.append({"role": "user", "content": frage})
+        self._append_chat("hint", "⏳ Claude analysiert …")
+        threading.Thread(target=self._api_call_thread,
+                         args=(list(self._messages),), daemon=True).start()
+
+
 class EinstellungenPage(tk.Frame):
     """Einstellungen-Seite: Speicherpfade und Konfiguration."""
 
@@ -4286,7 +4734,11 @@ class EinstellungenPage(tk.Frame):
         # Section: WEG-Stammdaten
         self._section(body, "WEG-Stammdaten")
         self._path_field(body, "WEG-Name", "weg_name", is_path=False)
-        self._path_field(body, "Adresse (Straße, PLZ Ort)", "weg_adresse", is_path=False)
+        self._path_field(body, "Stra\u00dfe", "weg_strasse", is_path=False)
+        self._path_field(body, "PLZ", "weg_plz", is_path=False)
+        self._path_field(body, "Ort", "weg_ort", is_path=False)
+        self._path_field(body, "E-Mail", "weg_email", is_path=False)
+        self._path_field(body, "Telefon", "weg_telefon", is_path=False)
 
         # Section: Konten (nur Wohngeld + Rücklage)
         self._section(body, "Konten")
@@ -4304,6 +4756,13 @@ class EinstellungenPage(tk.Frame):
         self._path_field(body, "Ordner Dokumente / Belege", "pfad_dokumente", is_path=True, is_dir=True)
         self._path_field(body, "Ordner Datenbank-Backup", "pfad_backup", is_path=True, is_dir=True)
         self._path_field(body, "Datenbankdatei (hausverwaltung.db)", "pfad_datenbank", is_path=True, is_dir=False)
+
+        # Section: KI-Assistent
+        self._section(body, "🤖 KI-Assistent (Anthropic API)")
+        tk.Label(body, text="API-Key von https://console.anthropic.com/keys",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(0,4))
+        self._path_field(body, "Anthropic API-Key (sk-ant-…)", "anthropic_api_key", is_path=False)
+        self._path_field(body, "Modell (Standard: claude-opus-4-6)", "ki_modell", is_path=False)
 
         # Speichern-Button
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(20,0))
@@ -4948,6 +5407,7 @@ class HausverwaltungApp(tk.Tk):
         ("⚖",  "Aufteilungen",   AufteilungenPage),
         ("✉️",  "Nachrichten",    NachrichtenPage),
         ("📁", "Dokumente",      DokumentePage),
+        ("🤖", "KI-Assistent",   KIAssistentPage),
         ("👤", "Benutzer",       BenutzerverwaltungPage),
         ("🔐", "Rollen & Rechte",RollenverwaltungPage),
         ("⚙",  "Einstellungen",  EinstellungenPage),
@@ -4966,7 +5426,9 @@ class HausverwaltungApp(tk.Tk):
         self._current_user = login.result
         _CURRENT_USER = login.result
         self.deiconify()
-        self.title(f"Hausverwaltung v{APP_VERSION} – {login.result['benutzername']}")
+        _cfg_t = load_config()
+        _titel_name = _cfg_t.get("weg_name", "").strip() or "Hausverwaltung"
+        self.title(f"{_titel_name} v{APP_VERSION} – {login.result['benutzername']}")
         self.geometry("1280x800")
         self.minsize(1024, 680)
         self.configure(bg=BG_SIDEBAR)
@@ -4986,9 +5448,20 @@ class HausverwaltungApp(tk.Tk):
                  font=("Georgia", 28)).pack(side="left", padx=(16, 6), pady=14)
         info = tk.Frame(logo, bg=BG_SIDEBAR)
         info.pack(side="left", pady=16)
-        tk.Label(info, text="Hausverwaltung", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+        _cfg = load_config()
+        _weg_name = _cfg.get("weg_name", "").strip() or "Hausverwaltung"
+        # Neue Einzelfelder bevorzugen, Fallback auf altes kombiniertes Feld
+        _weg_strasse = _cfg.get("weg_strasse", "").strip()
+        _weg_plz    = _cfg.get("weg_plz", "").strip()
+        _weg_ort    = _cfg.get("weg_ort", "").strip()
+        if _weg_strasse or _weg_plz or _weg_ort:
+            _plz_ort = f"{_weg_plz} {_weg_ort}".strip()
+            _weg_adr = ", ".join(filter(None, [_weg_strasse, _plz_ort])) or "Musterstra\u00dfe 12"
+        else:
+            _weg_adr = _cfg.get("weg_adresse", "").strip() or "Musterstra\u00dfe 12"
+        tk.Label(info, text=_weg_name, bg=BG_SIDEBAR, fg=TEXT_WHITE,
                  font=("Segoe UI Semibold", 10)).pack(anchor="w")
-        tk.Label(info, text="Musterstraße 12", bg=BG_SIDEBAR, fg=SIDEBAR_FG,
+        tk.Label(info, text=_weg_adr, bg=BG_SIDEBAR, fg=SIDEBAR_FG,
                  font=FONT_SMALL).pack(anchor="w")
 
         tk.Frame(sidebar, bg="#2C3E50", height=1).pack(fill="x", padx=12)
@@ -4997,7 +5470,7 @@ class HausverwaltungApp(tk.Tk):
         nav_frame = tk.Frame(sidebar, bg=BG_SIDEBAR)
         nav_frame.pack(fill="x", pady=8)
 
-        for i, (icon, label, _) in enumerate(self.PAGES):
+        for i, (icon, label, PageClass) in enumerate(self.PAGES):
             btn = tk.Button(nav_frame,
                 text=f"  {icon}  {label}",
                 command=lambda idx=i: self._switch(idx),
@@ -5031,6 +5504,8 @@ class HausverwaltungApp(tk.Tk):
             return
         self._active = idx
         for i, btn in enumerate(self._nav_btns):
+            if btn is None:
+                continue  # ausgeblendete Seite (z.B. Wasserkosten ohne Aufteilung)
             if i == idx:
                 btn.config(bg="#253545", fg=SIDEBAR_ACT)
             else:
