@@ -7,6 +7,24 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.11.0] — 2026-03-29
+
+### Neu
+
+- **#27 Mietende (Auszugsdatum)**: `auszug`-Feld in `MieterDialog` hinzugefügt (neben Einzug); Datum wird normalisiert und in `NULL`/ISO-Format gespeichert; Spalte „Auszug" in der Mieter-Tabelle sichtbar; INSERT/UPDATE aktualisiert; §556 BGB Mieter-Abrechnung berücksichtigt jetzt nur Mieter, die im gewählten Jahr aktiv waren (`auszug IS NULL OR auszug >= JJJJ-01-01`)
+
+- **#21 Leere Tabellen mit Hinweistext**: Neue Hilfsfunktion `tree_empty_hint()` zeigt „(Keine Einträge vorhanden)" in allen leeren Treeview-Tabellen (grauer Hinweistext); betrifft Mieter, Eigentümer, Wohnungen, Buchhaltung, Wartung, Nachrichten, Dokumente, Aufteilungen, Benutzer, Kontoauszug
+
+- **#29 Rechnungs-Upload (Beleg-Dateipfad)**: Neue Spalte `beleg_dateipfad TEXT` in `zahlungen` (Migration automatisch); `ZahlungDialog` hat Datei-Picker-Zeile (📂 Durchsuchen) für PDF/Bild-Dateien; Buchungstabelle zeigt 📎-Indikator bei hinterlegtem Beleg; neuer Button „📎 Beleg öffnen" öffnet hinterlegte Datei plattformübergreifend (Windows/Mac/Linux)
+
+- **#28 Einstellungen: 4-Tab-Layout**: `EinstellungenPage` vollständig neu gestaltet mit `ttk.Notebook`; 4 Tabs: **🏛 Stammdaten** (WEG-Name, Anschrift, Kontakt), **🏦 Bankdaten** (Wohngeld- + Rücklagenkonto mit IBAN), **📁 Speicherpfade** (Kontoauszüge, Belege, Dokumente, Datenbank), **🤖 KI-Administration** (Anbieter-Auswahl Anthropic/Ollama, API-Key, Modell, Rollenzugriff); Speichern-Button im Header
+
+### Behoben
+
+- **#26 Wirtschaftsplan leer**: `_wp_soll_ist()` zeigt jetzt Fehlermeldung anstatt leeres Fenster, wenn keine Wirtschaftsplan-Einträge für das Jahr vorhanden sind
+
+---
+
 ## [0.10.1] — 2026-03-29
 
 ### Behoben (4-Rollen-Review: Python · Buchhalter · UX · Datenbank)

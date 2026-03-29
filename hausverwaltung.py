@@ -64,7 +64,15 @@ from pathlib import Path
 #             + nebenkosten_vorauszahlung); try/finally in _wp_delete; Index wirtschaftsplan(jahr);
 #             Soll/Ist-Status "– kein Soll" wenn kein Soll-Wert geplant (statt fälschlicherweise
 #             "⚠ Überzogen"); Issues #23-26 angelegt
-APP_VERSION = "0.10.1"
+#   0.11.0 — Issues #21, #26, #27, #28, #29 umgesetzt:
+#             #27 Mietende (auszug) in MieterDialog, MieterPage, §556 BGB aktive-Mieter-Filter;
+#             #21 Leere Tabellen zeigen Hinweistext "(Keine Einträge vorhanden)";
+#             #26 Soll/Ist-Dialog: Fehlermeldung wenn keine Wirtschaftsplan-Daten vorhanden;
+#             #29 Rechnungs-Upload: Beleg-Datei-Picker in ZahlungDialog, beleg_dateipfad-Spalte,
+#                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
+#             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
+#                 mit Ollama-Integration und Anbieter-Auswahl
+APP_VERSION = "0.11.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 
@@ -475,6 +483,7 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
         "ALTER TABLE mieter ADD COLUMN spuelmaschinen INTEGER DEFAULT 0",
         "ALTER TABLE mieter ADD COLUMN waschmaschinen INTEGER DEFAULT 1",
         "ALTER TABLE mieter ADD COLUMN trockner_wasserkuehlung INTEGER DEFAULT 0",
+        "ALTER TABLE zahlungen ADD COLUMN beleg_dateipfad TEXT",
     ]:
         try:
             c.execute(sql)
@@ -638,6 +647,14 @@ def make_table(parent, columns, height=12):
     tree.pack(side="left", fill="both", expand=True)
     vsb.pack(side="right", fill="y")
     return frame, tree
+
+def tree_empty_hint(tree, text="(Keine Einträge vorhanden)"):
+    """Zeigt einen Hinweis-Eintrag, wenn die Tabelle leer ist."""
+    if not tree.get_children():
+        cols = tree["columns"]
+        vals = [text] + [""] * (len(cols) - 1)
+        tree.insert("", "end", iid="__empty__", values=vals, tags=("empty",))
+        tree.tag_configure("empty", foreground=TEXT_LIGHT)
 
 # ── Dialog-Basis ──────────────────────────────────────────────────────────────
 
@@ -994,10 +1011,10 @@ class MieterPage(tk.Frame):
 
     def _build(self):
         section_header(self, "Mieter", "＋ Mieter", self._new)
-        cols = ("Name", "Wohnung", "Kaltmiete", "NK-Voraus.", "Einzug", "Telefon", "IBAN")
+        cols = ("Name", "Wohnung", "Kaltmiete", "NK-Voraus.", "Einzug", "Auszug", "Telefon", "IBAN")
         f, self.tree = make_table(self, cols, height=16)
         f.pack(fill="both", expand=True, padx=20, pady=10)
-        for c, w in zip(cols, [160, 130, 110, 110, 110, 130, 180]):
+        for c, w in zip(cols, [160, 130, 110, 110, 110, 110, 130, 180]):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=w, anchor="w")
         self.tree.bind("<Double-1>", self._edit)
@@ -1021,10 +1038,12 @@ class MieterPage(tk.Frame):
                 fmt_euro(r["kaltmiete"]),
                 fmt_euro(r["nebenkosten_vorauszahlung"]),
                 fmt_date(r["einzug"]),
+                fmt_date(r["auszug"]) if r["auszug"] else "–",
                 r["telefon"] or "–",
                 r["iban"] or "–"
             ))
         conn.close()
+        tree_empty_hint(self.tree)
 
     def _new(self):
         if not hat_recht("Mieter", "schreiben"):
@@ -1034,9 +1053,9 @@ class MieterPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("INSERT INTO mieter (vorname,name,strasse,plz,ort,land,telefon,email,iban,wohnung_id,einzug,kaltmiete,nebenkosten_vorauszahlung,kaution,notizen,personen,spuelmaschinen,waschmaschinen,trockner_wasserkuehlung) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            conn.execute("INSERT INTO mieter (vorname,name,strasse,plz,ort,land,telefon,email,iban,wohnung_id,einzug,auszug,kaltmiete,nebenkosten_vorauszahlung,kaution,notizen,personen,spuelmaschinen,waschmaschinen,trockner_wasserkuehlung) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (v.get("vorname",""), v.get("name",""), v.get("strasse",""), v.get("plz",""), v.get("ort",""), v.get("land","Deutschland"), v.get("telefon",""), v.get("email",""), v.get("iban",""),
-                 v.get("wohnung_id"), v.get("einzug",""), float(v.get("kaltmiete") or 0), float(v.get("nk") or 0), float(v.get("kaution") or 0), v.get("notizen",""),
+                 v.get("wohnung_id"), v.get("einzug",""), v.get("auszug"), float(v.get("kaltmiete") or 0), float(v.get("nk") or 0), float(v.get("kaution") or 0), v.get("notizen",""),
                  int(v.get("personen") or 1), int(v.get("spuelmaschinen") or 0), int(v.get("waschmaschinen") or 1), int(v.get("trockner_wasserkuehlung") or 0)))
             conn.commit(); conn.close()
             self._load()
@@ -1055,9 +1074,9 @@ class MieterPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("UPDATE mieter SET vorname=?,name=?,strasse=?,plz=?,ort=?,land=?,telefon=?,email=?,iban=?,wohnung_id=?,einzug=?,kaltmiete=?,nebenkosten_vorauszahlung=?,kaution=?,notizen=?,personen=?,spuelmaschinen=?,waschmaschinen=?,trockner_wasserkuehlung=? WHERE id=?",
+            conn.execute("UPDATE mieter SET vorname=?,name=?,strasse=?,plz=?,ort=?,land=?,telefon=?,email=?,iban=?,wohnung_id=?,einzug=?,auszug=?,kaltmiete=?,nebenkosten_vorauszahlung=?,kaution=?,notizen=?,personen=?,spuelmaschinen=?,waschmaschinen=?,trockner_wasserkuehlung=? WHERE id=?",
                 (v.get("vorname",""), v.get("name",""), v.get("strasse",""), v.get("plz",""), v.get("ort",""), v.get("land","Deutschland"), v.get("telefon",""), v.get("email",""), v.get("iban",""),
-                 v.get("wohnung_id"), v.get("einzug",""), float(v.get("kaltmiete") or 0), float(v.get("nk") or 0), float(v.get("kaution") or 0), v.get("notizen",""),
+                 v.get("wohnung_id"), v.get("einzug",""), v.get("auszug"), float(v.get("kaltmiete") or 0), float(v.get("nk") or 0), float(v.get("kaution") or 0), v.get("notizen",""),
                  int(v.get("personen") or 1), int(v.get("spuelmaschinen") or 0), int(v.get("waschmaschinen") or 1), int(v.get("trockner_wasserkuehlung") or 0), mid))
             conn.commit(); conn.close()
             self._load()
@@ -1230,13 +1249,15 @@ class MieterDialog(BaseDialog):
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
         self._add_field("Einzug (JJJJ-MM-TT)", "einzug", r.get("einzug",""), row=l)
-        self._add_field("Kaltmiete €", "kaltmiete", r.get("kaltmiete",""), row=ri)
+        self._add_field("Auszug (JJJJ-MM-TT)", "auszug", r.get("auszug","") or "", row=ri)
 
         two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
-        self._add_field("NK-Vorausz. €", "nk", r.get("nebenkosten_vorauszahlung",""), row=l)
-        self._add_field("Kaution €", "kaution", r.get("kaution",""), row=ri)
+        self._add_field("Kaltmiete €", "kaltmiete", r.get("kaltmiete",""), row=l)
+        self._add_field("NK-Vorausz. €", "nk", r.get("nebenkosten_vorauszahlung",""), row=ri)
+
+        self._add_field("Kaution €", "kaution", r.get("kaution",""))
 
         self._add_field("Notizen", "notizen", r.get("notizen",""), widget_type="text")
 
@@ -1270,6 +1291,10 @@ class MieterDialog(BaseDialog):
         # Normalisiere Datum
         if v.get("einzug"):
             v["einzug"] = parse_datum(v["einzug"])
+        if v.get("auszug"):
+            v["auszug"] = parse_datum(v["auszug"])
+        else:
+            v["auszug"] = None
 
         self.result = v; self.destroy()
 
@@ -1308,6 +1333,7 @@ class EigentuemerPage(tk.Frame):
                 r["telefon"] or "–",
                 r["email"] or "–", r["iban"] or "–", mea_str))
         conn.close()
+        tree_empty_hint(self.tree)
 
     def _new(self):
         if not hat_recht("Eigentümer", "schreiben"):
@@ -1493,6 +1519,7 @@ class WohnungenPage(tk.Frame):
                 r["zimmer"] or "–", mea,
                 ename, mname))
         conn.close()
+        tree_empty_hint(self.tree)
 
     def _new(self):
         if not hat_recht("Wohnungen", "schreiben"):
@@ -1690,10 +1717,10 @@ class BuchhaltungPage(tk.Frame):
 
         # Buchungen-View
         self._view_buchungen = tk.Frame(self._content, bg=BG_CARD)
-        cols_b = ("Datum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Belegnr.")
+        cols_b = ("Datum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Belegnr.", "📎")
         fb, self.tree_b = make_table(self._view_buchungen, cols_b, height=13)
         fb.pack(fill="both", expand=True, padx=20, pady=6)
-        for c, w in zip(cols_b, [90, 210, 110, 100, 80, 80, 80]):
+        for c, w in zip(cols_b, [90, 210, 110, 100, 80, 80, 80, 28]):
             self.tree_b.heading(c, text=c); self.tree_b.column(c, width=w, anchor="w")
         self.tree_b.tag_configure("einnahme", foreground=SUCCESS)
         self.tree_b.tag_configure("ausgabe",  foreground=DANGER)
@@ -1702,7 +1729,8 @@ class BuchhaltungPage(tk.Frame):
         btn_b = tk.Frame(self._view_buchungen, bg=BG_CARD)
         btn_b.pack(fill="x", padx=20, pady=(0, 8))
         make_btn(btn_b, "✏ Bearbeiten",       self._edit_buchung, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
-        make_btn(btn_b, "🗑 Löschen",         self._delete_buchung, color=DANGER).pack(side="left")
+        make_btn(btn_b, "🗑 Löschen",         self._delete_buchung, color=DANGER).pack(side="left", padx=(0,6))
+        make_btn(btn_b, "📎 Beleg öffnen",    self._beleg_oeffnen, color=BG_INPUT, fg=TEXT).pack(side="left")
 
         # Vorschläge-View
         self._view_vorschlaege = tk.Frame(self._content, bg=BG_CARD)
@@ -1821,13 +1849,15 @@ class BuchhaltungPage(tk.Frame):
             tags_list = ["einnahme" if rd["typ"] == "Einnahme" else "ausgabe"]
             if status == "Neu":
                 tags_list.append("neu")
+            beleg_ind = "📎" if rd.get("beleg_dateipfad") else ""
             self.tree_b.insert("", "end", iid=rd["id"], values=(
                 fmt_date(rd["datum"]), rd["beschreibung"] or "–",
                 rd["kategorie"] or "–", fmt_euro(rd["betrag"]),
-                rd["typ"], status, rd["belegnr"] or "–"), tags=tuple(tags_list))
+                rd["typ"], status, rd["belegnr"] or "–", beleg_ind), tags=tuple(tags_list))
             if rd["typ"] == "Einnahme": einnahmen += rd["betrag"] or 0
             else:                       ausgaben  += abs(rd["betrag"] or 0)
         conn.close()
+        tree_empty_hint(self.tree_b)
         saldo = einnahmen - ausgaben
         color = SUCCESS if saldo >= 0 else DANGER
         self._saldo_label.config(
@@ -1847,10 +1877,10 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
-                 v.get("status", "Geprüft")))
+                 v.get("status", "Geprüft"), v.get("beleg_dateipfad")))
             conn.commit(); conn.close()
             if self._active_tab == "buchungen": self._load_buchungen()
 
@@ -1870,12 +1900,39 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
-                 v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"), int(sel[0])))
+                 v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"),
+                 v.get("beleg_dateipfad"), int(sel[0])))
             conn.commit(); conn.close()
             self._load_buchungen()
+
+    def _beleg_oeffnen(self):
+        """Öffnet die hinterlegte Beleg-Datei der ausgewählten Buchung."""
+        sel = self.tree_b.selection()
+        if not sel:
+            messagebox.showinfo("Hinweis", "Bitte eine Buchung auswählen.", parent=self); return
+        conn = get_db()
+        row = conn.execute("SELECT beleg_dateipfad FROM zahlungen WHERE id=?", (int(sel[0]),)).fetchone()
+        conn.close()
+        pfad = row["beleg_dateipfad"] if row else None
+        if not pfad:
+            messagebox.showinfo("Kein Beleg", "Für diese Buchung ist kein Beleg hinterlegt.", parent=self)
+            return
+        import os, subprocess, sys
+        if not os.path.exists(pfad):
+            messagebox.showerror("Datei nicht gefunden", f"Die Datei wurde nicht gefunden:\n{pfad}", parent=self)
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(pfad)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", pfad])
+            else:
+                subprocess.Popen(["xdg-open", pfad])
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Datei konnte nicht geöffnet werden:\n{e}", parent=self)
 
     def _delete_buchung(self):
         if not hat_recht("Buchhaltung", "loeschen"):
@@ -2440,7 +2497,7 @@ class BuchhaltungPage(tk.Frame):
 
 class ZahlungDialog(BaseDialog):
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Buchung", 480, 480)
+        super().__init__(parent, "Buchung", 520, 540)
         r = dict(row) if row else {}
         self._add_field("Datum (JJJJ-MM-TT) *", "datum",
                         r.get("datum", date.today().isoformat()))
@@ -2455,6 +2512,37 @@ class ZahlungDialog(BaseDialog):
         self._add_field("Status", "status", r.get("status", "Neu"),
                         widget_type="combo", options=["Neu", "Geprüft", "Freigegeben"])
 
+        # Beleg-Datei
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        beleg_frame = tk.Frame(self._body, bg=BG_CARD)
+        beleg_frame.pack(fill="x", padx=20, pady=(0, 6))
+        tk.Label(beleg_frame, text="Beleg-Datei", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w")
+        row_f = tk.Frame(beleg_frame, bg=BG_CARD)
+        row_f.pack(fill="x")
+        self._beleg_var = tk.StringVar(value=r.get("beleg_dateipfad", "") or "")
+        beleg_entry = tk.Entry(row_f, textvariable=self._beleg_var,
+                               bg=BG_INPUT, fg=TEXT, font=FONT_BODY,
+                               relief="flat", bd=0, highlightthickness=1,
+                               highlightbackground=BORDER, highlightcolor=ACCENT2)
+        beleg_entry.pack(side="left", fill="x", expand=True, ipady=5)
+        make_btn(row_f, "📂 Durchsuchen", self._browse_beleg,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(6, 0))
+
+    def _browse_beleg(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Beleg-Datei auswählen",
+            filetypes=[
+                ("PDF-Dateien", "*.pdf"),
+                ("Bilder", "*.png *.jpg *.jpeg *.tif *.tiff"),
+                ("Alle Dateien", "*.*"),
+            ]
+        )
+        if path:
+            self._beleg_var.set(path)
+
     def _on_save(self):
         v = self._get_values()
         if not v.get("datum") or not v.get("betrag"):
@@ -2462,6 +2550,7 @@ class ZahlungDialog(BaseDialog):
         # Normalisiere Datum
         if v.get("datum"):
             v["datum"] = parse_datum(v["datum"])
+        v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
         self.result = v; self.destroy()
 
 # ── Wartung-Seite ─────────────────────────────────────────────────────────────
@@ -2512,6 +2601,7 @@ class WartungPage(tk.Frame):
                 r["status"], fmt_date(r["erstellt_am"]),
                 fmt_euro(r["kosten"]) if r["kosten"] else "–"))
         conn.close()
+        tree_empty_hint(self.tree)
 
     def _new(self):
         if not hat_recht("Wartung", "schreiben"):
@@ -2642,6 +2732,7 @@ class NachrichtenPage(tk.Frame):
                 r["betreff"], r["prioritaet"],
                 fmt_date(r["datum"][:10] if r["datum"] else "")))
         conn.close()
+        tree_empty_hint(self.tree)
 
     def _on_select(self, event):
         sel = self.tree.selection()
@@ -2738,6 +2829,7 @@ class DokumentePage(tk.Frame):
                 r["dateiname"] or "–",
                 fmt_date(r["erstellt_am"])))
         conn.close()
+        tree_empty_hint(self.tree)
 
     def _new(self):
         if not hat_recht("Dokumente", "schreiben"):
@@ -3068,12 +3160,18 @@ class NebenkostenPage(tk.Frame):
             [str(jahr)] + WEG_KATEGORIEN_UMLAGE).fetchall() if WEG_KATEGORIEN_UMLAGE else []
         total_umlage = sum(r["s"] or 0 for r in umlage_rows)
 
-        # Wohnungen mit Mietern und Fläche
+        # Wohnungen mit aktiven Mietern im gewählten Jahr
+        # Aktiv = eingezogen vor Jahresende UND (noch nicht ausgezogen ODER Auszug >= Jahresbeginn)
+        jahr_start = f"{jahr}-01-01"
+        jahr_ende  = f"{jahr}-12-31"
         wohnungen = conn.execute(
             "SELECT w.id, w.bezeichnung, w.flaeche_qm, m.id as mieter_id, "
             "m.vorname, m.name, m.nebenkosten_vorauszahlung "
             "FROM wohnungen w LEFT JOIN mieter m ON w.mieter_id=m.id "
-            "WHERE m.id IS NOT NULL").fetchall()
+            "WHERE m.id IS NOT NULL "
+            "  AND (m.einzug IS NULL OR m.einzug <= ?) "
+            "  AND (m.auszug IS NULL OR m.auszug >= ?)",
+            (jahr_ende, jahr_start)).fetchall()
         conn.close()
 
         total_flaeche = sum(parse_float(w["flaeche_qm"]) or 0 for w in wohnungen)
@@ -3210,6 +3308,14 @@ class NebenkostenPage(tk.Frame):
             "WHERE typ='Ausgabe' AND strftime('%Y', datum)=? GROUP BY kategorie",
             (str(jahr),)).fetchall()
         conn.close()
+
+        if not soll_rows:
+            messagebox.showinfo(
+                "Keine Daten",
+                f"Für {jahr} sind noch keine Wirtschaftsplan-Positionen eingetragen.\n"
+                "Bitte zuerst Positionen hinzufügen.",
+                parent=self)
+            return
 
         ist_map = {r["kategorie"]: (r["s"] or 0) for r in ist_rows}
         soll_map = {r["kategorie"]: (r["betrag_soll"] or 0) for r in soll_rows}
@@ -3361,6 +3467,7 @@ class AufteilungenPage(tk.Frame):
                 r["name"], r["typ"] or "–", r["bezug"] or "–",
                 r["wert"] or "–", r["notizen"] or "–"))
         conn.close()
+        tree_empty_hint(self.tree)
 
     def _new(self):
         if not hat_recht("Aufteilungen", "schreiben"):
@@ -3573,6 +3680,7 @@ class KontoauszugPage(tk.Frame):
                 fmt_euro(betrag),
                 "✔" if rd["zugeordnet"] else ""),
                 tags=tuple(tags_list))
+        tree_empty_hint(self.tree)
         self._refresh_saldo_kacheln()
 
     def _konto_bezeichnung(self, iban, cfg=None):
@@ -5078,7 +5186,7 @@ Antworte immer auf Deutsch.
 
 
 class EinstellungenPage(tk.Frame):
-    """Einstellungen-Seite: Speicherpfade und Konfiguration."""
+    """Einstellungen-Seite: Tabs für Stammdaten, Bankdaten, Speicherpfade, KI."""
 
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)
@@ -5087,67 +5195,125 @@ class EinstellungenPage(tk.Frame):
         self._build()
 
     def _build(self):
-        # Scrollbarer Inhalt
-        canvas = tk.Canvas(self, bg=BG_CARD, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        
-        self._inner = tk.Frame(canvas, bg=BG_CARD)
-        canvas_window = canvas.create_window((0,0), window=self._inner, anchor="nw")
-        self._inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
-
-        body = self._inner
-        
         # Header
-        tk.Label(body, text="Einstellungen", bg=BG_CARD, fg=TEXT,
-                 font=FONT_H2).pack(anchor="w", padx=20, pady=(18,6))
-        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", padx=20)
-        
-        cfg_path_text = str(CONFIG_PATH)
-        tk.Label(body, text=f"Konfigurationsdatei: {cfg_path_text}",
-                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(6,12))
+        hdr = tk.Frame(self, bg=BG_CARD)
+        hdr.pack(fill="x", padx=20, pady=(18, 0))
+        tk.Label(hdr, text="Einstellungen", bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(side="left")
+        make_btn(hdr, "💾 Speichern", self._save, color=SUCCESS).pack(side="right")
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(6, 0))
 
-        # Section: WEG-Stammdaten
-        self._section(body, "WEG-Stammdaten")
-        self._path_field(body, "WEG-Name", "weg_name", is_path=False)
-        self._path_field(body, "Stra\u00dfe", "weg_strasse", is_path=False)
-        self._path_field(body, "PLZ", "weg_plz", is_path=False)
-        self._path_field(body, "Ort", "weg_ort", is_path=False)
-        self._path_field(body, "E-Mail", "weg_email", is_path=False)
-        self._path_field(body, "Telefon", "weg_telefon", is_path=False)
+        tk.Label(self, text=f"Konfiguration: {CONFIG_PATH}",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(4, 6))
 
-        # Section: Konten (nur Wohngeld + Rücklage)
-        self._section(body, "Konten")
-        self._path_field(body, "Bezeichnung Wohngeldkonto", "bez_wohngeld", is_path=False)
-        self._iban_field(body, "IBAN Wohngeldkonto", "iban_wohngeld")
-        self._path_field(body, "Bezeichnung Rücklagenkonto", "bez_ruecklage", is_path=False)
-        self._iban_field(body, "IBAN Rücklagenkonto", "iban_ruecklage")
+        # Notebook mit 4 Tabs
+        style = ttk.Style()
+        style.configure("EinstellTab.TNotebook", background=BG_CARD, borderwidth=0)
+        style.configure("EinstellTab.TNotebook.Tab", font=FONT_BODY, padding=[12, 6])
+        nb = ttk.Notebook(self, style="EinstellTab.TNotebook")
+        nb.pack(fill="both", expand=True, padx=20, pady=8)
 
-        # Section: Speicherpfade Kontoauszüge
-        self._section(body, "Speicherpfade Kontoauszüge")
-        self._path_field(body, "Standard-Importordner Kontoauszüge", "pfad_kontoauszug_import", is_path=True, is_dir=True)
+        # ── Tab 1: Stammdaten ─────────────────────────────────────────────────
+        t1_outer, t1 = self._scrollable_tab(nb)
+        nb.add(t1_outer, text="🏛 Stammdaten")
+        self._section(t1, "WEG-Stammdaten")
+        self._path_field(t1, "WEG-Name", "weg_name", is_path=False)
+        self._path_field(t1, "Straße", "weg_strasse", is_path=False)
+        self._path_field(t1, "PLZ", "weg_plz", is_path=False)
+        self._path_field(t1, "Ort", "weg_ort", is_path=False)
+        self._path_field(t1, "E-Mail", "weg_email", is_path=False)
+        self._path_field(t1, "Telefon", "weg_telefon", is_path=False)
 
-        # Section: Weitere Speicherpfade
-        self._section(body, "Weitere Speicherpfade")
-        self._path_field(body, "Ordner Dokumente / Belege", "pfad_dokumente", is_path=True, is_dir=True)
-        self._path_field(body, "Ordner Datenbank-Backup", "pfad_backup", is_path=True, is_dir=True)
-        self._path_field(body, "Datenbankdatei (hausverwaltung.db)", "pfad_datenbank", is_path=True, is_dir=False)
+        # ── Tab 2: Bankdaten ──────────────────────────────────────────────────
+        t2_outer, t2 = self._scrollable_tab(nb)
+        nb.add(t2_outer, text="🏦 Bankdaten")
+        self._section(t2, "Wohngeldkonto")
+        self._path_field(t2, "Konto-Bezeichnung", "bez_wohngeld", is_path=False)
+        self._iban_field(t2, "IBAN", "iban_wohngeld")
+        self._section(t2, "Rücklagenkonto")
+        self._path_field(t2, "Konto-Bezeichnung", "bez_ruecklage", is_path=False)
+        self._iban_field(t2, "IBAN", "iban_ruecklage")
 
-        # Section: KI-Assistent
-        self._section(body, "🤖 KI-Assistent (Anthropic API)")
-        tk.Label(body, text="API-Key von https://console.anthropic.com/keys",
+        # ── Tab 3: Speicherpfade ──────────────────────────────────────────────
+        t3_outer, t3 = self._scrollable_tab(nb)
+        nb.add(t3_outer, text="📁 Speicherpfade")
+        self._section(t3, "Kontoauszüge")
+        self._path_field(t3, "Standard-Importordner Kontoauszüge", "pfad_kontoauszug_import", is_path=True, is_dir=True)
+        self._section(t3, "Belege & Dokumente")
+        self._path_field(t3, "Ordner für Rechnungsbelege", "pfad_belege", is_path=True, is_dir=True)
+        self._path_field(t3, "Ordner Dokumente / allgemein", "pfad_dokumente", is_path=True, is_dir=True)
+        self._section(t3, "Datenbank")
+        self._path_field(t3, "Ordner Datenbank-Backup", "pfad_backup", is_path=True, is_dir=True)
+        self._path_field(t3, "Datenbankdatei (hausverwaltung.db)", "pfad_datenbank", is_path=True, is_dir=False)
+
+        # ── Tab 4: KI-Administration ──────────────────────────────────────────
+        t4_outer, t4 = self._scrollable_tab(nb)
+        nb.add(t4_outer, text="🤖 KI-Administration")
+        self._section(t4, "KI-Anbieter")
+
+        # Anbieter-Auswahl (Radio)
+        anbieter_frame = tk.Frame(t4, bg=BG_CARD)
+        anbieter_frame.pack(fill="x", padx=20, pady=(4, 8))
+        tk.Label(anbieter_frame, text="Anbieter:", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(side="left", padx=(0, 12))
+        self._ki_anbieter_var = tk.StringVar(value=self._cfg.get("ki_anbieter", "anthropic"))
+        for val, lbl in [("anthropic", "Anthropic (Claude API)"), ("ollama", "Ollama (lokal)")]:
+            tk.Radiobutton(anbieter_frame, text=lbl, variable=self._ki_anbieter_var, value=val,
+                           bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                           activebackground=BG_CARD, selectcolor=BG_CARD,
+                           command=self._toggle_ki_provider).pack(side="left", padx=8)
+
+        # Anthropic-Felder
+        self._anthropic_frame = tk.Frame(t4, bg=BG_CARD)
+        self._anthropic_frame.pack(fill="x")
+        self._section(self._anthropic_frame, "Anthropic API")
+        tk.Label(self._anthropic_frame, text="API-Key unter https://console.anthropic.com/keys",
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(0,4))
-        self._path_field(body, "Anthropic API-Key (sk-ant-…)", "anthropic_api_key", is_path=False)
-        self._path_field(body, "Modell (Standard: claude-opus-4-6)", "ki_modell", is_path=False)
+        self._path_field(self._anthropic_frame, "Anthropic API-Key (sk-ant-…)", "anthropic_api_key", is_path=False)
+        self._path_field(self._anthropic_frame, "Modell (Standard: claude-opus-4-6)", "ki_modell", is_path=False)
 
-        # Speichern-Button
-        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(20,0))
-        btn_row = tk.Frame(body, bg=BG_CARD)
-        btn_row.pack(fill="x", padx=20, pady=12)
-        make_btn(btn_row, "💾 Einstellungen speichern", self._save, color=SUCCESS).pack(side="left")
+        # Ollama-Felder
+        self._ollama_frame = tk.Frame(t4, bg=BG_CARD)
+        self._ollama_frame.pack(fill="x")
+        self._section(self._ollama_frame, "Ollama (lokales LLM)")
+        tk.Label(self._ollama_frame, text="Ollama muss lokal installiert und gestartet sein (https://ollama.com)",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(0,4))
+        self._path_field(self._ollama_frame, "Ollama Server-URL", "ollama_url", is_path=False)
+        self._path_field(self._ollama_frame, "Ollama Modell (z.B. llama3.2)", "ollama_modell", is_path=False)
+
+        # Rollen-Zugriff
+        self._section(t4, "Zugriff nach Rolle")
+        tk.Label(t4, text="KI-Assistent verfügbar für folgende Rollen (kommagetrennt):",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(0,4))
+        self._path_field(t4, "Erlaubte Rollen (z.B. Administrator, Verwalter)", "ki_rollen", is_path=False)
+
+        # Provider-Sichtbarkeit initial setzen
+        self._toggle_ki_provider()
+
+    def _scrollable_tab(self, nb):
+        """Erstellt einen scrollbaren Frame als Tab-Inhalt.
+        Gibt (outer, inner) zurück: outer wird dem Notebook hinzugefügt,
+        inner ist der scrollbare Inhaltsbereich für Widgets."""
+        outer = tk.Frame(nb, bg=BG_CARD)
+        canvas = tk.Canvas(outer, bg=BG_CARD, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=BG_CARD)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
+        return outer, inner  # outer → nb.add(), inner → widget parent
+
+    def _toggle_ki_provider(self):
+        """Zeigt/versteckt Anthropic- vs. Ollama-Felder je nach gewähltem Anbieter."""
+        anbieter = self._ki_anbieter_var.get()
+        if anbieter == "anthropic":
+            self._anthropic_frame.pack(fill="x")
+            self._ollama_frame.pack_forget()
+        else:
+            self._anthropic_frame.pack_forget()
+            self._ollama_frame.pack(fill="x")
 
     def _section(self, parent, title):
         tk.Label(parent, text=title, bg=BG_CARD, fg=TEXT, font=FONT_H3).pack(
@@ -5204,6 +5370,9 @@ class EinstellungenPage(tk.Frame):
             if key in iban_keys:
                 val = val.replace(" ", "")
             self._cfg[key] = val
+        # KI-Anbieter-Auswahl speichern
+        if hasattr(self, "_ki_anbieter_var"):
+            self._cfg["ki_anbieter"] = self._ki_anbieter_var.get()
         save_config(self._cfg)
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.\n" + str(CONFIG_PATH))
 
@@ -5245,6 +5414,7 @@ class BenutzerverwaltungPage(tk.Frame):
                 "✔" if r.get("passwort_skip") else "–",
                 fmt_date(str(r["erstellt_am"])[:10] if r["erstellt_am"] else "")))
         conn.close()
+        tree_empty_hint(self.tree)
 
     def _new(self):
         if not hat_recht("Benutzer", "schreiben"):
