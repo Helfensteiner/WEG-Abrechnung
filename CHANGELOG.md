@@ -7,6 +7,25 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.12.0] — 2026-03-29
+
+### Neu
+
+- **#25 PDF-Export (reportlab)**: Drei neue `📄 PDF Export`-Buttons in der Nebenkostenabrechnung — für **§28 WEG Jahresabrechnung**, **§556 BGB Betriebskostenabrechnung** und **Wirtschaftsplan Soll/Ist-Vergleich**; professionelles A4-Layout mit WEG-Kopfzeile, farbigen Tabellen-Headern, Summenzeilen und Ampel-Farbgebung; Datei-Speichern-Dialog mit Vorschlagsnamen; optionales Öffnen nach Export (plattformübergreifend)
+
+- **#23 §28 WEG: Rücklage-Einlage separat ausweisen**: Neues `WEG_EINLAGE_KATEGORIEN`-Set (`Erhaltungsrücklage`, `Sonderumlage`); KPI-Zeile zeigt jetzt **Bewirtschaftungskosten** und **Rücklage-Einlage** getrennt statt einem Gesamtbetrag; neue Spalte „Typ" in der Ausgaben-Tabelle (`Betriebskosten` / `Rücklage-Einlage`); Einlage-Zeilen blau hervorgehoben (#2E6DA4)
+
+- **#24 §556 BGB: Leerstand-Wohnungen einbeziehen**: SQL-Abfrage auf LEFT JOIN mit Bedingung im ON-Teil umgestellt — alle Wohnungen (auch ohne aktiven Mieter) fließen in die Flächenberechnung ein; Leerstand-Wohnungen erscheinen als `⚠ Leerstand (Eigentümer)` (goldfarben) in der Mieter-Tabelle; neue KPI-Kachel zeigt Anzahl Leerstände; Leerstand-Kosten trägt der Eigentümer (Vorauszahlung = 0 €)
+
+### Behoben (4-Rollen-Review)
+
+- **Python-Entwickler**: `_export_pdf_*`-Methoden fangen `ImportError` (reportlab nicht installiert) und allgemeine Exceptions ab — kein unkontrollierter Absturz möglich
+- **Buchhalter (WEG)**: Rücklage-Einlagen werden nach §28 WEG korrekt separat ausgewiesen, nicht mit Betriebskosten vermengt
+- **UX-Tester**: Leerstand goldfarben (#C8A96E) statt rot/grün — eindeutig andere Bedeutung als Nachzahlung/Guthaben
+- **Datenbankexperte**: LEFT JOIN-Bedingung im ON-Teil verhindert fehlerhafte NULL-Filterung bei Leerstand-Wohnungen
+
+---
+
 ## [0.11.0] — 2026-03-29
 
 ### Neu

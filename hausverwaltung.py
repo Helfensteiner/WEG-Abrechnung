@@ -72,9 +72,21 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.12.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
+#   0.12.0 — Issues #23, #24, #25:
+#             #23 §28 WEG: Erhaltungsrücklage und Sonderumlage als "Rücklage-Einlage"
+#                 separat ausgewiesen (neues WEG_EINLAGE_KATEGORIEN-Set); KPI zeigt
+#                 Bewirtschaftungskosten / Rücklage-Einlage getrennt; Typ-Spalte in
+#                 Kategorie-Tabelle; Einlage-Zeilen blau hervorgehoben;
+#             #24 §556 BGB: Alle Wohnungen inkl. Leerstand in Flächenberechnung;
+#                 LEFT JOIN mit Bedingung im ON-Teil statt WHERE-Filter; Leerstand-
+#                 Wohnungen als "⚠ Leerstand (Eigentümer)" markiert (golden); Leerstand-
+#                 KPI-Karte zeigt Anzahl freier Wohnungen;
+#             #25 PDF-Export: reportlab-basierter PDF-Export für §28 WEG Jahresabrechnung,
+#                 §556 BGB Betriebskostenabrechnung und Wirtschaftsplan Soll/Ist-Vergleich;
+#                 "📄 PDF Export"-Buttons in allen drei NebenkostenPage-Tabs;
 
 
 def _git_info() -> dict:
@@ -214,7 +226,7 @@ WEG_KATEGORIEN = {
     "Reparaturen":                ("Instandhaltung & Wartung", False, "MEA"),
     "Wartungsverträge":           ("Instandhaltung & Wartung", False, "MEA"),
     "Sanierung":                  ("Instandhaltung & Wartung", False, "MEA"),
-    # Finanzplanung & Rücklagen
+    # Finanzplanung & Rücklagen – Einlagen (nicht Betriebskosten, §28 WEG separat ausweisen)
     "Erhaltungsrücklage":         ("Finanzplanung & Rücklagen",False, "MEA"),
     "Sonderumlage":               ("Finanzplanung & Rücklagen",False, "MEA"),
     # Einnahmen
@@ -229,6 +241,8 @@ WEG_KATEGORIEN = {
 WEG_KATEGORIEN_LISTE = list(WEG_KATEGORIEN.keys())
 # Nur umlagefähige Kategorien (§556 BGB Mieter-Abrechnung)
 WEG_KATEGORIEN_UMLAGE = [k for k, v in WEG_KATEGORIEN.items() if v[1]]
+# Rücklage-Einlagen (§28 WEG: separat ausweisen, nicht als Betriebskosten)
+WEG_EINLAGE_KATEGORIEN = {"Erhaltungsrücklage", "Sonderumlage"}
 
 # ── Datenbank ────────────────────────────────────────────────────────────────
 
@@ -489,7 +503,17 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
             c.execute(sql)
             conn.commit()
         except Exception:
-            pass  # Spalte existiert bereits
+            pass
+    # Recht "KI-Assistent" zu allen vorhandenen Rollen hinzufügen (falls fehlt)
+    for rolle_row in c.execute("SELECT id, ist_superadmin FROM rollen").fetchall():
+        existing = c.execute("SELECT 1 FROM rechte WHERE rolle_id=? AND bereich='KI-Assistent'",
+                             (rolle_row[0],)).fetchone()
+        if not existing:
+            # Superadmin und Administrator: voller Zugriff; Benutzer: nur lesen
+            zugriff = 1 if rolle_row[1] or True else 0
+            c.execute("INSERT INTO rechte (rolle_id, bereich, lesen, schreiben, loeschen) VALUES (?,?,?,?,?)",
+                      (rolle_row[0], "KI-Assistent", 1, zugriff, 0))
+    conn.commit()
     # Create default admin user if no users exist
     import hashlib
     if not c.execute("SELECT COUNT(*) FROM benutzer").fetchone()[0]:
@@ -506,7 +530,7 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
         benutzer_id = c.execute("SELECT id FROM rollen WHERE name='Benutzer'").fetchone()[0]
         bereiche = ["Übersicht","Eigentümer","Wohnungen","Mieter","Kontoauszug","Buchhaltung",
                     "Wartung","Nebenkosten","Aufteilungen","Nachrichten","Dokumente",
-                    "Benutzer","Rollen & Rechte","Einstellungen"]
+                    "Benutzer","Rollen & Rechte","Einstellungen","KI-Assistent"]
         for b in bereiche:
             c.execute("INSERT INTO rechte (rolle_id,bereich,lesen,schreiben,loeschen) VALUES (?,?,1,1,1)", (admin_id, b))
             c.execute("INSERT INTO rechte (rolle_id,bereich,lesen,schreiben,loeschen) VALUES (?,?,1,1,0)", (benutzer_id, b))
@@ -2964,18 +2988,20 @@ class NebenkostenPage(tk.Frame):
                      values=[str(y) for y in range(date.today().year, date.today().year - 6, -1)]
                      ).pack(side="left", padx=6)
         make_btn(yr_row, "🔄 Auswertung", self._load_weg).pack(side="left")
+        make_btn(yr_row, "📄 PDF Export", self._export_pdf_weg,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(8, 0))
 
         # KPI-Zeile
         self._weg_kpi = tk.Frame(self._view_weg, bg=BG_CARD)
         self._weg_kpi.pack(fill="x", padx=20, pady=(6, 4))
 
-        # Ausgaben-Tabelle (nach Kategorie)
-        tk.Label(self._view_weg, text="Ausgaben nach Kategorie", bg=BG_CARD,
+        # Ausgaben-Tabelle (nach Kategorie) — Typ-Spalte kennzeichnet Rücklage-Einlagen
+        tk.Label(self._view_weg, text="Ausgaben nach Kategorie (Einlagen separat ausgewiesen, §28 WEG)", bg=BG_CARD,
                  fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
-        cols_kat = ("Kategorie", "Gruppe", "Gesamt", "Umlagefähig")
+        cols_kat = ("Kategorie", "Gruppe", "Gesamt", "Umlagefähig", "Typ")
         fk, self._tree_weg_kat = make_table(self._view_weg, cols_kat, height=6)
         fk.pack(fill="x", padx=20, pady=(2, 6))
-        for c, w in zip(cols_kat, [200, 160, 100, 90]):
+        for c, w in zip(cols_kat, [200, 160, 100, 90, 110]):
             self._tree_weg_kat.heading(c, text=c)
             self._tree_weg_kat.column(c, width=w, anchor="w")
 
@@ -3000,6 +3026,8 @@ class NebenkostenPage(tk.Frame):
                      values=[str(y) for y in range(date.today().year, date.today().year - 6, -1)]
                      ).pack(side="left", padx=6)
         make_btn(yr_row2, "🔄 Auswertung", self._load_bgb).pack(side="left")
+        make_btn(yr_row2, "📄 PDF Export", self._export_pdf_bgb,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(8, 0))
 
         self._bgb_kpi = tk.Frame(self._view_bgb, bg=BG_CARD)
         self._bgb_kpi.pack(fill="x", padx=20, pady=(6, 4))
@@ -3034,6 +3062,8 @@ class NebenkostenPage(tk.Frame):
                      ).pack(side="left", padx=6)
         make_btn(wp_top, "🔄 Laden", self._load_wp).pack(side="left")
         make_btn(wp_top, "📊 Soll/Ist-Vergleich", self._wp_soll_ist,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(8, 0))
+        make_btn(wp_top, "📄 PDF Export", self._export_pdf_wp,
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(8, 0))
         if hat_recht("Nebenkosten", "schreiben"):
             make_btn(wp_top, "＋ Eintrag", self._wp_new).pack(side="right")
@@ -3099,15 +3129,20 @@ class NebenkostenPage(tk.Frame):
         conn.close()
 
         hausgeld_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hausgeld_rows}
-        total_ausgaben = sum(r["s"] or 0 for r in ausgaben_rows)
+        total_ausgaben   = sum(r["s"] or 0 for r in ausgaben_rows)
+        # Rücklage-Einlagen separat (§28 WEG: nicht Betriebskosten)
+        total_einlagen   = sum(r["s"] or 0 for r in ausgaben_rows
+                               if (r["kategorie"] or "") in WEG_EINLAGE_KATEGORIEN)
+        total_betrieb    = total_ausgaben - total_einlagen
 
         # KPI
         for w in self._weg_kpi.winfo_children():
             w.destroy()
         for label, wert, color in [
-            ("Gesamtausgaben", fmt_euro(total_ausgaben), DANGER),
-            ("Hausgeld-Einnahmen", fmt_euro(hausgeld_gesamt), SUCCESS),
-            ("Saldo", fmt_euro(hausgeld_gesamt - total_ausgaben),
+            ("Bewirtschaftungskosten", fmt_euro(total_betrieb),  DANGER),
+            ("Rücklage-Einlage",       fmt_euro(total_einlagen), "#2E6DA4"),
+            ("Hausgeld-Einnahmen",     fmt_euro(hausgeld_gesamt), SUCCESS),
+            ("Saldo",                  fmt_euro(hausgeld_gesamt - total_ausgaben),
              SUCCESS if hausgeld_gesamt >= total_ausgaben else DANGER),
         ]:
             karte = tk.Frame(self._weg_kpi, bg=BG_INPUT, padx=14, pady=8)
@@ -3115,15 +3150,19 @@ class NebenkostenPage(tk.Frame):
             tk.Label(karte, text=label, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
             tk.Label(karte, text=wert,  bg=BG_INPUT, fg=color,      font=FONT_H3).pack(anchor="w")
 
-        # Kategorie-Tabelle
+        # Kategorie-Tabelle — Einlagen farblich hervorgehoben
         for i in self._tree_weg_kat.get_children():
             self._tree_weg_kat.delete(i)
         for r in ausgaben_rows:
             kat = r["kategorie"] or "Kategorie offen"
             meta = WEG_KATEGORIEN.get(kat, ("Sonstiges", False, "–"))
             umlage = "✔ ja" if meta[1] else "–"
+            ist_einlage = kat in WEG_EINLAGE_KATEGORIEN
+            typ = "Rücklage-Einlage" if ist_einlage else "Betriebskosten"
+            tag = "einlage" if ist_einlage else ""
             self._tree_weg_kat.insert("", "end", values=(
-                kat, meta[0], fmt_euro(r["s"] or 0), umlage))
+                kat, meta[0], fmt_euro(r["s"] or 0), umlage, typ), tags=(tag,))
+        self._tree_weg_kat.tag_configure("einlage", foreground="#2E6DA4")
 
         # Eigentümer-Anteil-Tabelle
         for i in self._tree_weg_eig.get_children():
@@ -3160,29 +3199,35 @@ class NebenkostenPage(tk.Frame):
             [str(jahr)] + WEG_KATEGORIEN_UMLAGE).fetchall() if WEG_KATEGORIEN_UMLAGE else []
         total_umlage = sum(r["s"] or 0 for r in umlage_rows)
 
-        # Wohnungen mit aktiven Mietern im gewählten Jahr
-        # Aktiv = eingezogen vor Jahresende UND (noch nicht ausgezogen ODER Auszug >= Jahresbeginn)
+        # ALLE Wohnungen – Leerstand-Anteil trägt Eigentümer (#24)
+        # Aktiver Mieter: eingezogen vor Jahresende UND (nicht ausgezogen ODER Auszug >= Jahresbeginn)
         jahr_start = f"{jahr}-01-01"
         jahr_ende  = f"{jahr}-12-31"
         wohnungen = conn.execute(
-            "SELECT w.id, w.bezeichnung, w.flaeche_qm, m.id as mieter_id, "
-            "m.vorname, m.name, m.nebenkosten_vorauszahlung "
-            "FROM wohnungen w LEFT JOIN mieter m ON w.mieter_id=m.id "
-            "WHERE m.id IS NOT NULL "
+            "SELECT w.id, w.bezeichnung, w.flaeche_qm, "
+            "  m.id as mieter_id, m.vorname, m.name, m.nebenkosten_vorauszahlung "
+            "FROM wohnungen w "
+            "LEFT JOIN mieter m ON ("
+            "  w.mieter_id = m.id "
             "  AND (m.einzug IS NULL OR m.einzug <= ?) "
-            "  AND (m.auszug IS NULL OR m.auszug >= ?)",
+            "  AND (m.auszug IS NULL OR m.auszug >= ?)"
+            ")",
             (jahr_ende, jahr_start)).fetchall()
         conn.close()
 
         total_flaeche = sum(parse_float(w["flaeche_qm"]) or 0 for w in wohnungen)
 
-        # KPI
+        # KPI – inkl. Leerstand-Info (#24)
+        leerstand_count = sum(1 for w in wohnungen if w["mieter_id"] is None)
         for ww in self._bgb_kpi.winfo_children():
             ww.destroy()
-        for label, wert, color in [
+        kpi_items = [
             ("Umlagefähige Kosten", fmt_euro(total_umlage), DANGER),
-            ("Gesamtfläche", f"{total_flaeche:.1f} m²", TEXT),
-        ]:
+            ("Gesamtfläche",        f"{total_flaeche:.1f} m²", TEXT),
+        ]
+        if leerstand_count:
+            kpi_items.append((f"Leerstände", f"{leerstand_count} Wohnung{'en' if leerstand_count > 1 else ''}", "#C8A96E"))
+        for label, wert, color in kpi_items:
             karte = tk.Frame(self._bgb_kpi, bg=BG_INPUT, padx=14, pady=8)
             karte.pack(side="left", padx=(0, 10))
             tk.Label(karte, text=label, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
@@ -3197,24 +3242,32 @@ class NebenkostenPage(tk.Frame):
             self._tree_bgb_kat.insert("", "end", values=(
                 kat, fmt_euro(r["s"] or 0), schluessel))
 
-        # Mieter-Tabelle
+        # Mieter-Tabelle – Leerstand-Wohnungen separat kennzeichnen (#24)
         for i in self._tree_bgb_mi.get_children():
             self._tree_bgb_mi.delete(i)
         for w in wohnungen:
             flaeche = parse_float(w["flaeche_qm"]) or 0
             anteil_pct = (flaeche / total_flaeche * 100) if total_flaeche else 0
             kosten = total_umlage * anteil_pct / 100
-            vorauszahlung = (parse_float(w["nebenkosten_vorauszahlung"]) or 0) * 12
-            saldo = vorauszahlung - kosten
-            mieter_name = f"{w['vorname'] or ''} {w['name']}".strip()
-            color_tag = "plus" if saldo >= 0 else "minus"
+            ist_leerstand = w["mieter_id"] is None
+            if ist_leerstand:
+                mieter_name   = "⚠ Leerstand (Eigentümer)"
+                vorauszahlung = 0.0
+                saldo         = -kosten   # Kosten trägt Eigentümer, keine Vorauszahlung
+                color_tag     = "leerstand"
+            else:
+                mieter_name   = f"{w['vorname'] or ''} {w['name']}".strip()
+                vorauszahlung = (parse_float(w["nebenkosten_vorauszahlung"]) or 0) * 12
+                saldo         = vorauszahlung - kosten
+                color_tag     = "plus" if saldo >= 0 else "minus"
             self._tree_bgb_mi.insert("", "end", values=(
                 w["bezeichnung"], mieter_name,
                 f"{flaeche:.1f}", f"{anteil_pct:.1f}%",
                 fmt_euro(kosten), fmt_euro(vorauszahlung),
                 fmt_euro(saldo)), tags=(color_tag,))
-        self._tree_bgb_mi.tag_configure("plus",  foreground=SUCCESS)
-        self._tree_bgb_mi.tag_configure("minus", foreground=DANGER)
+        self._tree_bgb_mi.tag_configure("plus",      foreground=SUCCESS)
+        self._tree_bgb_mi.tag_configure("minus",     foreground=DANGER)
+        self._tree_bgb_mi.tag_configure("leerstand", foreground="#C8A96E")
 
     # ── Wirtschaftsplan ────────────────────────────────────────────────────────
 
@@ -3376,6 +3429,451 @@ class NebenkostenPage(tk.Frame):
                      font=FONT_SMALL).pack(side="left", padx=(0, 4))
             tk.Label(summe_frame, text=wert, bg=BG_INPUT, fg=color,
                      font=FONT_BODY).pack(side="left", padx=(0, 20))
+
+    # ── PDF-Export ─────────────────────────────────────────────────────────────
+
+    def _get_weg_name(self) -> str:
+        """Liest WEG-Namen aus Einstellungen für PDF-Header."""
+        try:
+            cfg = load_settings()
+            return cfg.get("weg_name") or "WEG Hausverwaltung"
+        except Exception:
+            return "WEG Hausverwaltung"
+
+    def _pdf_speichern(self, vorschlag: str) -> str | None:
+        """Datei-Speichern-Dialog, gibt Pfad zurück oder None."""
+        pfad = filedialog.asksaveasfilename(
+            parent=self,
+            title="PDF speichern",
+            defaultextension=".pdf",
+            initialfile=vorschlag,
+            filetypes=[("PDF-Dokument", "*.pdf"), ("Alle Dateien", "*.*")])
+        return pfad or None
+
+    def _pdf_oeffnen(self, pfad: str):
+        """Öffnet das gespeicherte PDF plattformübergreifend."""
+        try:
+            if os.name == "nt":
+                os.startfile(pfad)
+            elif os.uname().sysname == "Darwin":
+                subprocess.Popen(["open", pfad])
+            else:
+                subprocess.Popen(["xdg-open", pfad])
+        except Exception:
+            pass
+
+    def _export_pdf_weg(self):
+        """PDF-Export §28 WEG Eigentümer-Jahresabrechnung."""
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                            Paragraph, Spacer)
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import cm
+        except ImportError:
+            messagebox.showerror("Fehler",
+                "reportlab ist nicht installiert.\n"
+                "Bitte 'pip install reportlab' ausführen.", parent=self)
+            return
+
+        try:
+            jahr = int(self._weg_jahr.get())
+        except ValueError:
+            messagebox.showwarning("Jahr", "Bitte zuerst eine Auswertung laden.", parent=self); return
+
+        # Daten laden
+        conn = get_db()
+        ausgaben_rows = conn.execute(
+            "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Ausgabe' AND strftime('%Y', datum)=? "
+            "GROUP BY kategorie ORDER BY s DESC", (str(jahr),)).fetchall()
+        hausgeld_rows = conn.execute(
+            "SELECT eigentuemer_id, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y', datum)=? "
+            "GROUP BY eigentuemer_id", (str(jahr),)).fetchall()
+        hausgeld_gesamt = conn.execute(
+            "SELECT SUM(betrag) FROM zahlungen "
+            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y', datum)=?",
+            (str(jahr),)).fetchone()[0] or 0
+        eigentuemer = conn.execute(
+            "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name").fetchall()
+        conn.close()
+
+        hausgeld_map  = {r["eigentuemer_id"]: (r["s"] or 0) for r in hausgeld_rows}
+        total_ausgaben = sum(r["s"] or 0 for r in ausgaben_rows)
+        total_einlagen = sum(r["s"] or 0 for r in ausgaben_rows
+                             if (r["kategorie"] or "") in WEG_EINLAGE_KATEGORIEN)
+        total_betrieb  = total_ausgaben - total_einlagen
+
+        pfad = self._pdf_speichern(f"WEG_§28_Jahresabrechnung_{jahr}.pdf")
+        if not pfad:
+            return
+
+        try:
+            doc = SimpleDocTemplate(pfad, pagesize=A4,
+                                    leftMargin=2*cm, rightMargin=2*cm,
+                                    topMargin=2*cm, bottomMargin=2*cm)
+            styles = getSampleStyleSheet()
+            H1 = ParagraphStyle("H1", parent=styles["Heading1"],
+                                 fontSize=16, textColor=colors.HexColor("#1C2B3A"))
+            H2 = ParagraphStyle("H2", parent=styles["Heading2"],
+                                 fontSize=12, textColor=colors.HexColor("#1C2B3A"))
+            NORMAL = styles["Normal"]
+            SMALL  = ParagraphStyle("small", parent=NORMAL, fontSize=8,
+                                    textColor=colors.HexColor("#666666"))
+
+            weg_name = self._get_weg_name()
+            story = [
+                Paragraph(weg_name, H1),
+                Paragraph(f"§28 WEG – Jahresabrechnung {jahr}", H2),
+                Paragraph(f"Erstellt am {date.today().strftime('%d.%m.%Y')}", SMALL),
+                Spacer(1, 0.5*cm),
+            ]
+
+            # KPI-Tabelle
+            kpi_data = [
+                ["Bewirtschaftungskosten", fmt_euro(total_betrieb)],
+                ["Rücklage-Einlage",        fmt_euro(total_einlagen)],
+                ["Hausgeld-Einnahmen",      fmt_euro(hausgeld_gesamt)],
+                ["Saldo",                   fmt_euro(hausgeld_gesamt - total_ausgaben)],
+            ]
+            kpi_t = Table(kpi_data, colWidths=[10*cm, 5*cm])
+            kpi_t.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7F5F0")),
+                ("FONTNAME",   (0,0), (-1,-1), "Helvetica"),
+                ("FONTSIZE",   (0,0), (-1,-1), 10),
+                ("ALIGN",      (1,0), (1,-1), "RIGHT"),
+                ("ROWBACKGROUNDS", (0,0), (-1,-1),
+                 [colors.HexColor("#F7F5F0"), colors.HexColor("#EEEAE3")]),
+                ("GRID",       (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                ("TOPPADDING", (0,0), (-1,-1), 5),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ]))
+            story += [kpi_t, Spacer(1, 0.4*cm)]
+
+            # Ausgaben-Tabelle
+            story.append(Paragraph("Ausgaben nach Kategorie", H2))
+            kat_data = [["Kategorie", "Gruppe", "Betrag", "Typ"]]
+            for r in ausgaben_rows:
+                kat = r["kategorie"] or "Kategorie offen"
+                meta = WEG_KATEGORIEN.get(kat, ("Sonstiges", False, "–"))
+                typ  = "Rücklage-Einlage" if kat in WEG_EINLAGE_KATEGORIEN else "Betriebskosten"
+                kat_data.append([kat, meta[0], fmt_euro(r["s"] or 0), typ])
+            kat_data.append(["Gesamt", "", fmt_euro(total_ausgaben), ""])
+
+            kat_t = Table(kat_data, colWidths=[5*cm, 4.5*cm, 3*cm, 3.5*cm])
+            kat_t.setStyle(TableStyle([
+                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1C2B3A")),
+                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTSIZE",    (0,0), (-1,-1), 9),
+                ("ALIGN",       (2,1), (2,-1),  "RIGHT"),
+                ("ROWBACKGROUNDS", (0,1), (-1,-2),
+                 [colors.white, colors.HexColor("#F7F5F0")]),
+                ("BACKGROUND",  (0,-1), (-1,-1), colors.HexColor("#EEEAE3")),
+                ("FONTNAME",    (0,-1), (-1,-1), "Helvetica-Bold"),
+                ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                ("TOPPADDING",  (0,0), (-1,-1), 4),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ]))
+            story += [kat_t, Spacer(1, 0.4*cm)]
+
+            # Eigentümer-Tabelle
+            story.append(Paragraph("Anteil pro Eigentümer (nach MEA)", H2))
+            eig_data = [["Eigentümer", "MEA %", "Kostenanteil", "Hausgeld (Ist)", "Saldo"]]
+            for e in eigentuemer:
+                anteil_pct = parse_float(e["anteil_prozent"]) or 0
+                kostenanteil = total_ausgaben * anteil_pct / 100
+                hg_ist = hausgeld_map.get(e["id"], 0)
+                saldo  = hg_ist - kostenanteil
+                name   = f"{e['vorname'] or ''} {e['name']}".strip()
+                eig_data.append([name, f"{anteil_pct:.1f}%",
+                                  fmt_euro(kostenanteil), fmt_euro(hg_ist), fmt_euro(saldo)])
+
+            eig_t = Table(eig_data, colWidths=[4.5*cm, 2*cm, 3*cm, 3*cm, 3.5*cm])
+            eig_t.setStyle(TableStyle([
+                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1C2B3A")),
+                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTSIZE",    (0,0), (-1,-1), 9),
+                ("ALIGN",       (1,1), (-1,-1), "RIGHT"),
+                ("ROWBACKGROUNDS", (0,1), (-1,-1),
+                 [colors.white, colors.HexColor("#F7F5F0")]),
+                ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                ("TOPPADDING",  (0,0), (-1,-1), 4),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ]))
+            story.append(eig_t)
+
+            doc.build(story)
+            if messagebox.askyesno("PDF erstellt",
+                f"PDF gespeichert:\n{pfad}\n\nJetzt öffnen?", parent=self):
+                self._pdf_oeffnen(pfad)
+        except Exception as exc:
+            messagebox.showerror("PDF-Fehler", f"PDF konnte nicht erstellt werden:\n{exc}",
+                                 parent=self)
+
+    def _export_pdf_bgb(self):
+        """PDF-Export §556 BGB Mieter-Betriebskostenabrechnung."""
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                            Paragraph, Spacer)
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import cm
+        except ImportError:
+            messagebox.showerror("Fehler",
+                "reportlab ist nicht installiert.\n"
+                "Bitte 'pip install reportlab' ausführen.", parent=self)
+            return
+
+        try:
+            jahr = int(self._bgb_jahr.get())
+        except ValueError:
+            messagebox.showwarning("Jahr", "Bitte zuerst eine Auswertung laden.", parent=self); return
+
+        # Daten laden
+        conn = get_db()
+        platzhalter = ",".join("?" * len(WEG_KATEGORIEN_UMLAGE))
+        umlage_rows = conn.execute(
+            f"SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+            f"WHERE typ='Ausgabe' AND strftime('%Y', datum)=? AND kategorie IN ({platzhalter}) "
+            f"GROUP BY kategorie ORDER BY s DESC",
+            [str(jahr)] + WEG_KATEGORIEN_UMLAGE).fetchall() if WEG_KATEGORIEN_UMLAGE else []
+        total_umlage = sum(r["s"] or 0 for r in umlage_rows)
+        jahr_start = f"{jahr}-01-01"
+        jahr_ende  = f"{jahr}-12-31"
+        wohnungen = conn.execute(
+            "SELECT w.id, w.bezeichnung, w.flaeche_qm, "
+            "  m.id as mieter_id, m.vorname, m.name, m.nebenkosten_vorauszahlung "
+            "FROM wohnungen w "
+            "LEFT JOIN mieter m ON ("
+            "  w.mieter_id = m.id "
+            "  AND (m.einzug IS NULL OR m.einzug <= ?) "
+            "  AND (m.auszug IS NULL OR m.auszug >= ?)"
+            ")",
+            (jahr_ende, jahr_start)).fetchall()
+        conn.close()
+
+        total_flaeche = sum(parse_float(w["flaeche_qm"]) or 0 for w in wohnungen)
+
+        pfad = self._pdf_speichern(f"WEG_§556_Betriebskosten_{jahr}.pdf")
+        if not pfad:
+            return
+
+        try:
+            doc = SimpleDocTemplate(pfad, pagesize=A4,
+                                    leftMargin=2*cm, rightMargin=2*cm,
+                                    topMargin=2*cm, bottomMargin=2*cm)
+            styles = getSampleStyleSheet()
+            H1 = ParagraphStyle("H1", parent=styles["Heading1"],
+                                 fontSize=16, textColor=colors.HexColor("#1C2B3A"))
+            H2 = ParagraphStyle("H2", parent=styles["Heading2"],
+                                 fontSize=12, textColor=colors.HexColor("#1C2B3A"))
+            SMALL = ParagraphStyle("small", parent=styles["Normal"], fontSize=8,
+                                   textColor=colors.HexColor("#666666"))
+
+            weg_name = self._get_weg_name()
+            story = [
+                Paragraph(weg_name, H1),
+                Paragraph(f"§556 BGB – Betriebskostenabrechnung {jahr}", H2),
+                Paragraph(f"Erstellt am {date.today().strftime('%d.%m.%Y')}", SMALL),
+                Spacer(1, 0.5*cm),
+            ]
+
+            # Umlagefähige Kosten
+            story.append(Paragraph("Umlagefähige Kosten nach Kategorie", H2))
+            uk_data = [["Kategorie", "Gesamt", "Schlüssel"]]
+            for r in umlage_rows:
+                kat = r["kategorie"] or "–"
+                schluessel = WEG_KATEGORIEN.get(kat, ("–", True, "Wohnfläche"))[2]
+                uk_data.append([kat, fmt_euro(r["s"] or 0), schluessel])
+            uk_data.append(["Gesamt umlagefähig", fmt_euro(total_umlage), ""])
+
+            uk_t = Table(uk_data, colWidths=[7*cm, 4*cm, 5*cm])
+            uk_t.setStyle(TableStyle([
+                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1C2B3A")),
+                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTSIZE",    (0,0), (-1,-1), 9),
+                ("ALIGN",       (1,1), (1,-1),  "RIGHT"),
+                ("ROWBACKGROUNDS", (0,1), (-1,-2),
+                 [colors.white, colors.HexColor("#F7F5F0")]),
+                ("BACKGROUND",  (0,-1), (-1,-1), colors.HexColor("#EEEAE3")),
+                ("FONTNAME",    (0,-1), (-1,-1), "Helvetica-Bold"),
+                ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                ("TOPPADDING",  (0,0), (-1,-1), 4),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ]))
+            story += [uk_t, Spacer(1, 0.5*cm)]
+
+            # Mieter-Abrechnung
+            story.append(Paragraph(
+                f"Abrechnung pro Mieter/Wohnung  |  Gesamtfläche: {total_flaeche:.1f} m²", H2))
+            mi_data = [["Wohnung", "Mieter", "Fläche m²", "Anteil %",
+                        "Kosten", "Vorauszahlung", "Saldo"]]
+            for w in wohnungen:
+                flaeche    = parse_float(w["flaeche_qm"]) or 0
+                anteil_pct = (flaeche / total_flaeche * 100) if total_flaeche else 0
+                kosten     = total_umlage * anteil_pct / 100
+                if w["mieter_id"] is None:
+                    mieter_name   = "Leerstand (Eigentümer)"
+                    vorauszahlung = 0.0
+                    saldo         = -kosten
+                else:
+                    mieter_name   = f"{w['vorname'] or ''} {w['name']}".strip()
+                    vorauszahlung = (parse_float(w["nebenkosten_vorauszahlung"]) or 0) * 12
+                    saldo         = vorauszahlung - kosten
+                mi_data.append([
+                    w["bezeichnung"], mieter_name,
+                    f"{flaeche:.1f}", f"{anteil_pct:.1f}%",
+                    fmt_euro(kosten), fmt_euro(vorauszahlung), fmt_euro(saldo)])
+
+            mi_t = Table(mi_data, colWidths=[2.5*cm, 4*cm, 1.8*cm, 1.8*cm, 2.5*cm, 2.8*cm, 2.6*cm])
+            mi_t.setStyle(TableStyle([
+                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1C2B3A")),
+                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTSIZE",    (0,0), (-1,-1), 8),
+                ("ALIGN",       (2,1), (-1,-1), "RIGHT"),
+                ("ROWBACKGROUNDS", (0,1), (-1,-1),
+                 [colors.white, colors.HexColor("#F7F5F0")]),
+                ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                ("TOPPADDING",  (0,0), (-1,-1), 4),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ]))
+            story.append(mi_t)
+
+            doc.build(story)
+            if messagebox.askyesno("PDF erstellt",
+                f"PDF gespeichert:\n{pfad}\n\nJetzt öffnen?", parent=self):
+                self._pdf_oeffnen(pfad)
+        except Exception as exc:
+            messagebox.showerror("PDF-Fehler", f"PDF konnte nicht erstellt werden:\n{exc}",
+                                 parent=self)
+
+    def _export_pdf_wp(self):
+        """PDF-Export Wirtschaftsplan mit Soll/Ist-Vergleich."""
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                            Paragraph, Spacer)
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import cm
+        except ImportError:
+            messagebox.showerror("Fehler",
+                "reportlab ist nicht installiert.\n"
+                "Bitte 'pip install reportlab' ausführen.", parent=self)
+            return
+
+        try:
+            jahr = int(self._wp_jahr.get())
+        except ValueError:
+            messagebox.showwarning("Jahr", "Bitte zuerst ein Jahr wählen.", parent=self); return
+
+        conn = get_db()
+        soll_rows = conn.execute(
+            "SELECT kategorie, betrag_soll FROM wirtschaftsplan WHERE jahr=?",
+            (jahr,)).fetchall()
+        ist_rows = conn.execute(
+            "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Ausgabe' AND strftime('%Y', datum)=? GROUP BY kategorie",
+            (str(jahr),)).fetchall()
+        conn.close()
+
+        if not soll_rows:
+            messagebox.showinfo("Keine Daten",
+                f"Für {jahr} sind noch keine Wirtschaftsplan-Positionen vorhanden.",
+                parent=self)
+            return
+
+        ist_map  = {r["kategorie"]: (r["s"] or 0) for r in ist_rows}
+        soll_map = {r["kategorie"]: (r["betrag_soll"] or 0) for r in soll_rows}
+        alle_kat = sorted(set(list(soll_map.keys()) + list(ist_map.keys())))
+
+        pfad = self._pdf_speichern(f"WEG_Wirtschaftsplan_SollIst_{jahr}.pdf")
+        if not pfad:
+            return
+
+        try:
+            doc = SimpleDocTemplate(pfad, pagesize=A4,
+                                    leftMargin=2*cm, rightMargin=2*cm,
+                                    topMargin=2*cm, bottomMargin=2*cm)
+            styles = getSampleStyleSheet()
+            H1 = ParagraphStyle("H1", parent=styles["Heading1"],
+                                 fontSize=16, textColor=colors.HexColor("#1C2B3A"))
+            H2 = ParagraphStyle("H2", parent=styles["Heading2"],
+                                 fontSize=12, textColor=colors.HexColor("#1C2B3A"))
+            SMALL = ParagraphStyle("small", parent=styles["Normal"], fontSize=8,
+                                   textColor=colors.HexColor("#666666"))
+
+            weg_name = self._get_weg_name()
+            story = [
+                Paragraph(weg_name, H1),
+                Paragraph(f"Wirtschaftsplan – Soll/Ist-Vergleich {jahr}", H2),
+                Paragraph(f"Erstellt am {date.today().strftime('%d.%m.%Y')}", SMALL),
+                Spacer(1, 0.5*cm),
+            ]
+
+            wi_data = [["Kategorie", "Soll", "Ist", "Abweichung", "Status"]]
+            total_soll = total_ist = 0
+            for kat in alle_kat:
+                soll   = soll_map.get(kat, 0)
+                ist    = ist_map.get(kat, 0)
+                abw    = soll - ist
+                total_soll += soll
+                total_ist  += ist
+                if soll == 0:
+                    status = "– kein Soll"
+                elif abw >= 0:
+                    status = "✔ OK"
+                else:
+                    status = "⚠ Überzogen"
+                wi_data.append([kat, fmt_euro(soll), fmt_euro(ist), fmt_euro(abw), status])
+
+            total_abw = total_soll - total_ist
+            wi_data.append(["Gesamt", fmt_euro(total_soll), fmt_euro(total_ist),
+                             fmt_euro(total_abw),
+                             "✔ OK" if total_abw >= 0 else "⚠ Überzogen"])
+
+            wi_t = Table(wi_data, colWidths=[5.5*cm, 3*cm, 3*cm, 3*cm, 2.5*cm])
+            # Rote Zeilen für "Überzogen", grün für "OK"
+            style_cmds = [
+                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1C2B3A")),
+                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTSIZE",    (0,0), (-1,-1), 9),
+                ("ALIGN",       (1,1), (-1,-1), "RIGHT"),
+                ("ROWBACKGROUNDS", (0,1), (-1,-2),
+                 [colors.white, colors.HexColor("#F7F5F0")]),
+                ("BACKGROUND",  (0,-1), (-1,-1), colors.HexColor("#EEEAE3")),
+                ("FONTNAME",    (0,-1), (-1,-1), "Helvetica-Bold"),
+                ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                ("TOPPADDING",  (0,0), (-1,-1), 4),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ]
+            for i, kat in enumerate(alle_kat, start=1):
+                soll = soll_map.get(kat, 0)
+                ist  = ist_map.get(kat, 0)
+                if soll > 0 and ist > soll:
+                    style_cmds.append(
+                        ("TEXTCOLOR", (4, i), (4, i), colors.HexColor("#C0392B")))
+                elif soll > 0:
+                    style_cmds.append(
+                        ("TEXTCOLOR", (4, i), (4, i), colors.HexColor("#3A7D44")))
+            wi_t.setStyle(TableStyle(style_cmds))
+            story.append(wi_t)
+
+            doc.build(story)
+            if messagebox.askyesno("PDF erstellt",
+                f"PDF gespeichert:\n{pfad}\n\nJetzt öffnen?", parent=self):
+                self._pdf_oeffnen(pfad)
+        except Exception as exc:
+            messagebox.showerror("PDF-Fehler", f"PDF konnte nicht erstellt werden:\n{exc}",
+                                 parent=self)
 
 
 class WirtschaftsplanDialog(BaseDialog):
@@ -5596,7 +6094,8 @@ class RollenverwaltungPage(tk.Frame):
 
     BEREICHE = ["Übersicht", "Eigentümer", "Wohnungen", "Mieter", "Kontoauszug",
                 "Buchhaltung", "Wartung", "Nebenkosten", "Aufteilungen",
-                "Nachrichten", "Dokumente", "Benutzer", "Rollen & Rechte", "Einstellungen"]
+                "Nachrichten", "Dokumente", "Benutzer", "Rollen & Rechte",
+                "Einstellungen", "KI-Assistent"]
 
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)
