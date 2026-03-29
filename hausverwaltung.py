@@ -54,7 +54,17 @@ from pathlib import Path
 #            zahlungen beim Import, Aufteilung Typ Wasserkosten nach Punkten,
 #            bedingte Navigation Wasserkosten-Seite
 #   0.9.2 — Issue #17: WEG-Stammdaten in einzelne Felder aufgeteilt (Straße, PLZ, Ort, E-Mail, Telefon)
-APP_VERSION = "0.9.4"
+#   0.9.3 — SQL-Injection in Buchhaltung behoben, Duplikat-Code entfernt, DB-Indizes + FOREIGN KEY
+#   0.9.4 — AufteilungDialog: Widget-Referenzen korrekt gespeichert, Wasserkosten-Nav immer sichtbar
+#   0.10.0 — Einheitliches Kategoriensystem (§2 BetrKV): globale WEG_KATEGORIEN für Buchhaltung
+#             + Nebenkosten; NebenkostenPage komplett neu: §28 WEG Eigentümer-Abrechnung aus
+#             Zahlungen (Anteil nach MEA), §556 BGB Mieter-Abrechnung (Anteil nach Wohnfläche),
+#             Wirtschaftsplan (neue Tabelle + Soll/Ist-Vergleich); wirtschaftsplan-Tabelle in DB
+#   0.10.1 — 4-Rollen-Review: parse_float() None-sicher (crashte bei NULL-Werten in flaeche_qm
+#             + nebenkosten_vorauszahlung); try/finally in _wp_delete; Index wirtschaftsplan(jahr);
+#             Soll/Ist-Status "– kein Soll" wenn kein Soll-Wert geplant (statt fälschlicherweise
+#             "⚠ Überzogen"); Issues #23-26 angelegt
+APP_VERSION = "0.10.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 
@@ -164,6 +174,54 @@ FONT_SMALL  = ("Segoe UI", 9)
 FONT_MONO   = ("Consolas", 9)
 FONT_NAV    = ("Segoe UI Semibold", 10)
 
+# ── Einheitliches Kategoriensystem §2 BetrKV / WEG ────────────────────────────
+# Zentrale Quelle für Buchhaltung, Nebenkosten und Wirtschaftsplan
+# Format: name → (ober_gruppe, umlagefaehig_auf_mieter, empfohlener_schluessel)
+WEG_KATEGORIEN = {
+    # Laufende Betriebskosten – umlagefähig §2 BetrKV
+    "Heizung":                    ("Laufende Betriebskosten", True,  "Verbrauch/Wohnfläche"),
+    "Warmwasser":                 ("Laufende Betriebskosten", True,  "Verbrauch"),
+    "Wasser/Abwasser":            ("Laufende Betriebskosten", True,  "Verbrauch/Wohnfläche"),
+    "Allgemeinstrom":             ("Laufende Betriebskosten", True,  "MEA"),
+    "Aufzug":                     ("Laufende Betriebskosten", True,  "MEA/Wohneinheiten"),
+    "Straßenreinigung":           ("Laufende Betriebskosten", True,  "MEA/Wohneinheiten"),
+    "Müllabfuhr":                 ("Laufende Betriebskosten", True,  "MEA/Wohneinheiten"),
+    "Gebäudereinigung":           ("Laufende Betriebskosten", True,  "MEA/Fläche"),
+    "Ungezieferbekämpfung":       ("Laufende Betriebskosten", True,  "MEA"),
+    "Gartenpflege":               ("Laufende Betriebskosten", True,  "MEA/Fläche"),
+    "Beleuchtung":                ("Laufende Betriebskosten", True,  "MEA"),
+    "Schornsteinreinigung":       ("Laufende Betriebskosten", True,  "Wohneinheiten"),
+    "Hausmeister":                ("Laufende Betriebskosten", True,  "MEA/Fläche"),
+    "Winterdienst":               ("Laufende Betriebskosten", True,  "MEA/Fläche"),
+    # Versicherungen – umlagefähig §2 Nr. 13 BetrKV
+    "Wohngebäudeversicherung":    ("Versicherungen",           True,  "MEA"),
+    "Haftpflichtversicherung":    ("Versicherungen",           True,  "MEA"),
+    "Elementar-/Glasversicherung":("Versicherungen",           True,  "MEA"),
+    # Verwaltungskosten – NICHT umlagefähig auf Mieter (§26 WEG)
+    "Verwaltervergütung":         ("Verwaltungskosten",        False, "MEA"),
+    "Bankgebühren":               ("Verwaltungskosten",        False, "MEA"),
+    "Porto/Telefon":              ("Verwaltungskosten",        False, "MEA"),
+    "Rechts-/Prozesskosten":      ("Verwaltungskosten",        False, "MEA"),
+    # Instandhaltung – §28 WEG Eigentümer, nicht umlagefähig
+    "Reparaturen":                ("Instandhaltung & Wartung", False, "MEA"),
+    "Wartungsverträge":           ("Instandhaltung & Wartung", False, "MEA"),
+    "Sanierung":                  ("Instandhaltung & Wartung", False, "MEA"),
+    # Finanzplanung & Rücklagen
+    "Erhaltungsrücklage":         ("Finanzplanung & Rücklagen",False, "MEA"),
+    "Sonderumlage":               ("Finanzplanung & Rücklagen",False, "MEA"),
+    # Einnahmen
+    "Hausgeld":                   ("Einnahmen",                False, "–"),
+    "Miete":                      ("Einnahmen",                False, "–"),
+    "Nebenkosten-Vorauszahlung":  ("Einnahmen",                False, "–"),
+    # Sonstiges
+    "Sonstiges":                  ("Sonstiges",                False, "–"),
+    "Kategorie offen":            ("Offen",                    False, "–"),
+}
+# Flache Liste für Combo-Dropdowns
+WEG_KATEGORIEN_LISTE = list(WEG_KATEGORIEN.keys())
+# Nur umlagefähige Kategorien (§556 BGB Mieter-Abrechnung)
+WEG_KATEGORIEN_UMLAGE = [k for k, v in WEG_KATEGORIEN.items() if v[1]]
+
 # ── Datenbank ────────────────────────────────────────────────────────────────
 
 def get_db():
@@ -262,6 +320,14 @@ CREATE TABLE IF NOT EXISTS nebenkosten (
     betrag REAL NOT NULL,
     umlageschluessel TEXT DEFAULT 'Wohnflaeche',
     notizen TEXT
+);
+CREATE TABLE IF NOT EXISTS wirtschaftsplan (
+    id INTEGER PRIMARY KEY,
+    jahr INTEGER NOT NULL,
+    kategorie TEXT NOT NULL,
+    betrag_soll REAL DEFAULT 0,
+    notizen TEXT,
+    UNIQUE(jahr, kategorie)
 );
 CREATE TABLE IF NOT EXISTS wohnungen (
     id INTEGER PRIMARY KEY,
@@ -364,6 +430,7 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
         "CREATE INDEX IF NOT EXISTS idx_nachrichten_gelesen ON nachrichten(gelesen)",
         "CREATE INDEX IF NOT EXISTS idx_wohnungen_eigentuemer ON wohnungen(eigentuemer_id)",
         "CREATE INDEX IF NOT EXISTS idx_mieter_wohnung ON mieter(wohnung_id)",
+        "CREATE INDEX IF NOT EXISTS idx_wirtschaftsplan_jahr ON wirtschaftsplan(jahr)",
     ]:
         try:
             c.execute(idx_sql)
@@ -481,10 +548,16 @@ def _insert_demo(c):
 # ── Hilfsfunktionen ──────────────────────────────────────────────────────────
 
 def parse_float(val) -> float:
-    """Konvertiert Zahl-Strings mit deutschem Komma ('334,69') oder Punkt ('334.69') zu float."""
+    """Konvertiert Zahl-Strings mit deutschem Komma ('334,69') oder Punkt ('334.69') zu float.
+    Gibt 0.0 zurück bei None oder leerem String (kein ValueError)."""
+    if val is None:
+        return 0.0
     if isinstance(val, (int, float)):
         return float(val)
-    return float(str(val).replace(",", "."))
+    s = str(val).strip()
+    if not s:
+        return 0.0
+    return float(s.replace(",", "."))
 
 def fmt_euro(val):
     try:
@@ -1559,64 +1632,12 @@ class BuchhaltungPage(tk.Frame):
     3. Regeln      – gelernte Buchungsregeln verwalten
     """
 
-    # Kostenkategorien gemäß WEG-Verwaltung (Notion: Kostenkategorie/Kostenart)
-    KATEGORIEN = [
-        # Laufende Betriebskosten
-        "Heizung", "Wasser/Abwasser", "Allgemeinstrom",
-        "Gebäudereinigung", "Hausmeister", "Winterdienst", "Gartenpflege",
-        "Müllabfuhr", "Straßenreinigung",
-        # Verwaltungskosten
-        "Verwaltervergütung", "Bankgebühren", "Porto/Telefon",
-        "Rechts-/Prozesskosten",
-        # Instandhaltung & Wartung
-        "Reparaturen", "Wartungsverträge", "Sanierung",
-        # Versicherungen
-        "Wohngebäudeversicherung", "Haftpflichtversicherung",
-        "Elementar-/Glasversicherung",
-        # Finanzplanung & Rücklagen
-        "Erhaltungsrücklage", "Sonderumlage",
-        # Einnahmen
-        "Hausgeld", "Miete", "Nebenkosten-Vorauszahlung",
-        # Sonstiges
-        "Sonstiges",
-        # Offen / Unkategorisiert
-        "Kategorie offen",
-    ]
-    # Kostenkategorie-Zuordnung mit Metadaten
+    # Kostenkategorien – zentral aus WEG_KATEGORIEN (einheitliches System)
+    KATEGORIEN = WEG_KATEGORIEN_LISTE[:]
+    # Metadaten für Kostenarten aus dem globalen System ableiten
     KOSTENARTEN = {
-        # Laufende Betriebskosten (umlagefähig)
-        "Heizung":              {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "Verbrauch/Wohnfläche"},
-        "Wasser/Abwasser":      {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "Verbrauch/Wohnfläche"},
-        "Allgemeinstrom":       {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA"},
-        "Gebäudereinigung":     {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Fläche"},
-        "Hausmeister":          {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Fläche"},
-        "Winterdienst":         {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Fläche"},
-        "Gartenpflege":         {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Fläche"},
-        "Müllabfuhr":           {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Wohneinheiten"},
-        "Straßenreinigung":     {"kategorie": "Laufende Betriebskosten", "umlagefaehig": True,  "schluessel": "MEA/Wohneinheiten"},
-        # Verwaltungskosten (nicht umlagefähig)
-        "Verwaltervergütung":   {"kategorie": "Verwaltungskosten",       "umlagefaehig": False, "schluessel": "Wohneinheiten/MEA"},
-        "Bankgebühren":         {"kategorie": "Verwaltungskosten",       "umlagefaehig": False, "schluessel": "MEA/Wohneinheiten"},
-        "Porto/Telefon":        {"kategorie": "Verwaltungskosten",       "umlagefaehig": False, "schluessel": "MEA/Wohneinheiten"},
-        "Rechts-/Prozesskosten":{"kategorie": "Verwaltungskosten",       "umlagefaehig": False, "schluessel": "MEA"},
-        # Instandhaltung & Wartung
-        "Reparaturen":          {"kategorie": "Instandhaltung & Wartung","umlagefaehig": False, "schluessel": "MEA"},
-        "Wartungsverträge":     {"kategorie": "Instandhaltung & Wartung","umlagefaehig": "Teilweise", "schluessel": "MEA/Wohneinheiten"},
-        "Sanierung":            {"kategorie": "Instandhaltung & Wartung","umlagefaehig": False, "schluessel": "MEA"},
-        # Versicherungen (umlagefähig)
-        "Wohngebäudeversicherung":  {"kategorie": "Versicherungen",      "umlagefaehig": True,  "schluessel": "MEA"},
-        "Haftpflichtversicherung":  {"kategorie": "Versicherungen",      "umlagefaehig": True,  "schluessel": "MEA"},
-        "Elementar-/Glasversicherung":{"kategorie": "Versicherungen",    "umlagefaehig": True,  "schluessel": "MEA"},
-        # Finanzplanung & Rücklagen
-        "Erhaltungsrücklage":   {"kategorie": "Finanzplanung & Rücklagen","umlagefaehig": False,"schluessel": "MEA"},
-        "Sonderumlage":         {"kategorie": "Finanzplanung & Rücklagen","umlagefaehig": False,"schluessel": "MEA"},
-        # Einnahmen
-        "Hausgeld":             {"kategorie": "Einnahmen",               "umlagefaehig": False, "schluessel": "–"},
-        "Miete":                {"kategorie": "Einnahmen",               "umlagefaehig": False, "schluessel": "–"},
-        "Nebenkosten-Vorauszahlung":{"kategorie": "Einnahmen",           "umlagefaehig": False, "schluessel": "–"},
-        # Sonstiges
-        "Sonstiges":            {"kategorie": "Sonstiges",               "umlagefaehig": False, "schluessel": "–"},
-        "Kategorie offen":      {"kategorie": "Offen",                   "umlagefaehig": False, "schluessel": "–"},
+        k: {"kategorie": v[0], "umlagefaehig": v[1], "schluessel": v[2]}
+        for k, v in WEG_KATEGORIEN.items()
     }
 
     def __init__(self, parent):
@@ -2804,162 +2825,505 @@ class DokumentDialog(BaseDialog):
 # ── Nebenkosten-Seite ─────────────────────────────────────────────────────────
 
 class NebenkostenPage(tk.Frame):
+    """Nebenkostenabrechnung mit drei Tabs:
+    1. §28 WEG  – Eigentümer-Jahresabrechnung (Ausgaben aus Buchhaltung, Anteil nach MEA)
+    2. §556 BGB – Mieter-Betriebskostenabrechnung (umlagefähige Kosten, Anteil nach Fläche)
+    3. Wirtschaftsplan – Soll-Kosten pro Jahr und Kategorie (Soll/Ist-Vergleich)
+    """
+
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)
+        self._active_tab = "weg"
         self._build()
+
+    # ── Aufbau ────────────────────────────────────────────────────────────────
 
     def _build(self):
         top = tk.Frame(self, bg=BG_CARD)
-        top.pack(fill="x", padx=20, pady=(18, 0))
+        top.pack(fill="x", padx=20, pady=(16, 0))
         tk.Label(top, text="Nebenkostenabrechnung", bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(side="left")
-        make_btn(top, "＋ Eintrag", self._new).pack(side="right")
-        make_btn(top, "📊 Jahresauswertung", self._jahresauswertung,
-                 color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
-        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20)
 
-        cols = ("Jahr", "Monat", "Kategorie", "Betrag", "Umlage", "Notizen")
-        f, self.tree = make_table(self, cols, height=16)
-        f.pack(fill="both", expand=True, padx=20, pady=8)
-        for c, w in zip(cols, [60, 60, 160, 100, 140, 200]):
-            self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
+        # Sub-Tab-Leiste
+        self._tab_btns = {}
+        tab_bar = tk.Frame(self, bg=BG_CARD)
+        tab_bar.pack(fill="x", padx=20, pady=(8, 0))
+        for tid, label in [("weg",  "🏛 §28 WEG – Eigentümer"),
+                            ("bgb", "👤 §556 BGB – Mieter"),
+                            ("wp",  "📋 Wirtschaftsplan")]:
+            btn = tk.Button(tab_bar, text=label, font=FONT_NAV, relief="flat", bd=0,
+                            padx=14, pady=7, cursor="hand2",
+                            command=lambda t=tid: self._switch_tab(t))
+            btn.pack(side="left", padx=2)
+            self._tab_btns[tid] = btn
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(4, 0))
 
-        self.tree.bind("<Double-1>", self._edit)
-        btn_row = tk.Frame(self, bg=BG_CARD)
-        btn_row.pack(fill="x", padx=20, pady=(0, 10))
+        # Content-Bereich
+        self._content = tk.Frame(self, bg=BG_CARD)
+        self._content.pack(fill="both", expand=True)
+
+        # ── Tab §28 WEG ────────────────────────────────────────────────────
+        self._view_weg = tk.Frame(self._content, bg=BG_CARD)
+
+        yr_row = tk.Frame(self._view_weg, bg=BG_CARD)
+        yr_row.pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(yr_row, text="Jahr:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._weg_jahr = tk.StringVar(value=str(date.today().year))
+        ttk.Combobox(yr_row, textvariable=self._weg_jahr, width=8,
+                     values=[str(y) for y in range(date.today().year, date.today().year - 6, -1)]
+                     ).pack(side="left", padx=6)
+        make_btn(yr_row, "🔄 Auswertung", self._load_weg).pack(side="left")
+
+        # KPI-Zeile
+        self._weg_kpi = tk.Frame(self._view_weg, bg=BG_CARD)
+        self._weg_kpi.pack(fill="x", padx=20, pady=(6, 4))
+
+        # Ausgaben-Tabelle (nach Kategorie)
+        tk.Label(self._view_weg, text="Ausgaben nach Kategorie", bg=BG_CARD,
+                 fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
+        cols_kat = ("Kategorie", "Gruppe", "Gesamt", "Umlagefähig")
+        fk, self._tree_weg_kat = make_table(self._view_weg, cols_kat, height=6)
+        fk.pack(fill="x", padx=20, pady=(2, 6))
+        for c, w in zip(cols_kat, [200, 160, 100, 90]):
+            self._tree_weg_kat.heading(c, text=c)
+            self._tree_weg_kat.column(c, width=w, anchor="w")
+
+        # Eigentümer-Anteil-Tabelle
+        tk.Label(self._view_weg, text="Anteil pro Eigentümer (nach MEA)", bg=BG_CARD,
+                 fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
+        cols_eig = ("Eigentümer", "MEA %", "Kostenanteil", "Hausgeld (Ist)", "Saldo")
+        fe, self._tree_weg_eig = make_table(self._view_weg, cols_eig, height=5)
+        fe.pack(fill="x", padx=20, pady=(2, 8))
+        for c, w in zip(cols_eig, [180, 60, 110, 110, 100]):
+            self._tree_weg_eig.heading(c, text=c)
+            self._tree_weg_eig.column(c, width=w, anchor="w")
+
+        # ── Tab §556 BGB ───────────────────────────────────────────────────
+        self._view_bgb = tk.Frame(self._content, bg=BG_CARD)
+
+        yr_row2 = tk.Frame(self._view_bgb, bg=BG_CARD)
+        yr_row2.pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(yr_row2, text="Jahr:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._bgb_jahr = tk.StringVar(value=str(date.today().year))
+        ttk.Combobox(yr_row2, textvariable=self._bgb_jahr, width=8,
+                     values=[str(y) for y in range(date.today().year, date.today().year - 6, -1)]
+                     ).pack(side="left", padx=6)
+        make_btn(yr_row2, "🔄 Auswertung", self._load_bgb).pack(side="left")
+
+        self._bgb_kpi = tk.Frame(self._view_bgb, bg=BG_CARD)
+        self._bgb_kpi.pack(fill="x", padx=20, pady=(6, 4))
+
+        tk.Label(self._view_bgb, text="Umlagefähige Kosten nach Kategorie", bg=BG_CARD,
+                 fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
+        cols_uk = ("Kategorie", "Gesamt", "Schlüssel")
+        fu, self._tree_bgb_kat = make_table(self._view_bgb, cols_uk, height=5)
+        fu.pack(fill="x", padx=20, pady=(2, 6))
+        for c, w in zip(cols_uk, [220, 110, 160]):
+            self._tree_bgb_kat.heading(c, text=c)
+            self._tree_bgb_kat.column(c, width=w, anchor="w")
+
+        tk.Label(self._view_bgb, text="Anteil pro Mieter (nach Wohnfläche)", bg=BG_CARD,
+                 fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
+        cols_mi = ("Wohnung", "Mieter", "Fläche m²", "Anteil %", "Kosten", "Vorauszahlung", "Saldo")
+        fm, self._tree_bgb_mi = make_table(self._view_bgb, cols_mi, height=5)
+        fm.pack(fill="x", padx=20, pady=(2, 8))
+        for c, w in zip(cols_mi, [120, 150, 70, 65, 100, 110, 90]):
+            self._tree_bgb_mi.heading(c, text=c)
+            self._tree_bgb_mi.column(c, width=w, anchor="w")
+
+        # ── Tab Wirtschaftsplan ─────────────────────────────────────────────
+        self._view_wp = tk.Frame(self._content, bg=BG_CARD)
+
+        wp_top = tk.Frame(self._view_wp, bg=BG_CARD)
+        wp_top.pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(wp_top, text="Jahr:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._wp_jahr = tk.StringVar(value=str(date.today().year))
+        ttk.Combobox(wp_top, textvariable=self._wp_jahr, width=8,
+                     values=[str(y) for y in range(date.today().year + 1, date.today().year - 5, -1)]
+                     ).pack(side="left", padx=6)
+        make_btn(wp_top, "🔄 Laden", self._load_wp).pack(side="left")
+        make_btn(wp_top, "📊 Soll/Ist-Vergleich", self._wp_soll_ist,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(8, 0))
         if hat_recht("Nebenkosten", "schreiben"):
-            make_btn(btn_row, "✏ Bearbeiten", self._edit, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 8))
-        if hat_recht("Nebenkosten", "loeschen"):
-            make_btn(btn_row, "🗑 Löschen", self._delete, color=DANGER).pack(side="left")
-        self._load()
+            make_btn(wp_top, "＋ Eintrag", self._wp_new).pack(side="right")
 
-    def _load(self):
-        for i in self.tree.get_children(): self.tree.delete(i)
+        cols_wp = ("Kategorie", "Gruppe", "Soll-Betrag", "Notizen")
+        fw, self._tree_wp = make_table(self._view_wp, cols_wp, height=16)
+        fw.pack(fill="both", expand=True, padx=20, pady=(4, 4))
+        for c, w in zip(cols_wp, [220, 160, 110, 220]):
+            self._tree_wp.heading(c, text=c)
+            self._tree_wp.column(c, width=w, anchor="w")
+        self._tree_wp.bind("<Double-1>", self._wp_edit)
+
+        wp_btn = tk.Frame(self._view_wp, bg=BG_CARD)
+        wp_btn.pack(fill="x", padx=20, pady=(0, 10))
+        if hat_recht("Nebenkosten", "schreiben"):
+            make_btn(wp_btn, "✏ Bearbeiten", self._wp_edit,
+                     color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 8))
+        if hat_recht("Nebenkosten", "loeschen"):
+            make_btn(wp_btn, "🗑 Löschen", self._wp_delete, color=DANGER).pack(side="left")
+
+        self._switch_tab("weg")
+
+    # ── Tab-Wechsel ────────────────────────────────────────────────────────────
+
+    def _switch_tab(self, tid):
+        self._active_tab = tid
+        for t, btn in self._tab_btns.items():
+            btn.configure(bg=ACCENT if t == tid else BG_CARD,
+                          fg=TEXT_WHITE if t == tid else TEXT)
+        for frame in (self._view_weg, self._view_bgb, self._view_wp):
+            frame.pack_forget()
+        {"weg": self._view_weg, "bgb": self._view_bgb, "wp": self._view_wp}[tid].pack(
+            fill="both", expand=True)
+        {"weg": self._load_weg, "bgb": self._load_bgb, "wp": self._load_wp}[tid]()
+
+    # ── §28 WEG Eigentümer ─────────────────────────────────────────────────────
+
+    def _load_weg(self):
+        try:
+            jahr = int(self._weg_jahr.get())
+        except ValueError:
+            return
+
         conn = get_db()
-        for r in conn.execute("SELECT * FROM nebenkosten ORDER BY jahr DESC, monat DESC"):
-            self.tree.insert("", "end", iid=r["id"], values=(
-                r["jahr"], r["monat"] or "–", r["kategorie"],
-                fmt_euro(r["betrag"]), r["umlageschluessel"] or "–",
-                r["notizen"] or "–"))
+        # Ausgaben aus Buchhaltung
+        ausgaben_rows = conn.execute(
+            "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Ausgabe' AND strftime('%Y', datum)=? "
+            "GROUP BY kategorie ORDER BY s DESC",
+            (str(jahr),)).fetchall()
+        # Hausgeld-Einnahmen pro Eigentümer
+        hausgeld_rows = conn.execute(
+            "SELECT eigentuemer_id, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y', datum)=? "
+            "GROUP BY eigentuemer_id",
+            (str(jahr),)).fetchall()
+        hausgeld_gesamt = conn.execute(
+            "SELECT SUM(betrag) FROM zahlungen "
+            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y', datum)=?",
+            (str(jahr),)).fetchone()[0] or 0
+        eigentuemer = conn.execute(
+            "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name").fetchall()
         conn.close()
 
-    def _new(self):
+        hausgeld_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hausgeld_rows}
+        total_ausgaben = sum(r["s"] or 0 for r in ausgaben_rows)
+
+        # KPI
+        for w in self._weg_kpi.winfo_children():
+            w.destroy()
+        for label, wert, color in [
+            ("Gesamtausgaben", fmt_euro(total_ausgaben), DANGER),
+            ("Hausgeld-Einnahmen", fmt_euro(hausgeld_gesamt), SUCCESS),
+            ("Saldo", fmt_euro(hausgeld_gesamt - total_ausgaben),
+             SUCCESS if hausgeld_gesamt >= total_ausgaben else DANGER),
+        ]:
+            karte = tk.Frame(self._weg_kpi, bg=BG_INPUT, padx=14, pady=8)
+            karte.pack(side="left", padx=(0, 10))
+            tk.Label(karte, text=label, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+            tk.Label(karte, text=wert,  bg=BG_INPUT, fg=color,      font=FONT_H3).pack(anchor="w")
+
+        # Kategorie-Tabelle
+        for i in self._tree_weg_kat.get_children():
+            self._tree_weg_kat.delete(i)
+        for r in ausgaben_rows:
+            kat = r["kategorie"] or "Kategorie offen"
+            meta = WEG_KATEGORIEN.get(kat, ("Sonstiges", False, "–"))
+            umlage = "✔ ja" if meta[1] else "–"
+            self._tree_weg_kat.insert("", "end", values=(
+                kat, meta[0], fmt_euro(r["s"] or 0), umlage))
+
+        # Eigentümer-Anteil-Tabelle
+        for i in self._tree_weg_eig.get_children():
+            self._tree_weg_eig.delete(i)
+        for e in eigentuemer:
+            anteil_pct = parse_float(e["anteil_prozent"]) or 0
+            kostenanteil = total_ausgaben * anteil_pct / 100
+            hg_ist = hausgeld_map.get(e["id"], 0)
+            saldo = hg_ist - kostenanteil
+            color_tag = "plus" if saldo >= 0 else "minus"
+            name = f"{e['vorname'] or ''} {e['name']}".strip()
+            self._tree_weg_eig.insert("", "end", values=(
+                name, f"{anteil_pct:.1f}%",
+                fmt_euro(kostenanteil), fmt_euro(hg_ist),
+                fmt_euro(saldo)), tags=(color_tag,))
+        self._tree_weg_eig.tag_configure("plus",  foreground=SUCCESS)
+        self._tree_weg_eig.tag_configure("minus", foreground=DANGER)
+
+    # ── §556 BGB Mieter ────────────────────────────────────────────────────────
+
+    def _load_bgb(self):
+        try:
+            jahr = int(self._bgb_jahr.get())
+        except ValueError:
+            return
+
+        conn = get_db()
+        # Nur umlagefähige Ausgaben
+        platzhalter = ",".join("?" * len(WEG_KATEGORIEN_UMLAGE))
+        umlage_rows = conn.execute(
+            f"SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+            f"WHERE typ='Ausgabe' AND strftime('%Y', datum)=? AND kategorie IN ({platzhalter}) "
+            f"GROUP BY kategorie ORDER BY s DESC",
+            [str(jahr)] + WEG_KATEGORIEN_UMLAGE).fetchall() if WEG_KATEGORIEN_UMLAGE else []
+        total_umlage = sum(r["s"] or 0 for r in umlage_rows)
+
+        # Wohnungen mit Mietern und Fläche
+        wohnungen = conn.execute(
+            "SELECT w.id, w.bezeichnung, w.flaeche_qm, m.id as mieter_id, "
+            "m.vorname, m.name, m.nebenkosten_vorauszahlung "
+            "FROM wohnungen w LEFT JOIN mieter m ON w.mieter_id=m.id "
+            "WHERE m.id IS NOT NULL").fetchall()
+        conn.close()
+
+        total_flaeche = sum(parse_float(w["flaeche_qm"]) or 0 for w in wohnungen)
+
+        # KPI
+        for ww in self._bgb_kpi.winfo_children():
+            ww.destroy()
+        for label, wert, color in [
+            ("Umlagefähige Kosten", fmt_euro(total_umlage), DANGER),
+            ("Gesamtfläche", f"{total_flaeche:.1f} m²", TEXT),
+        ]:
+            karte = tk.Frame(self._bgb_kpi, bg=BG_INPUT, padx=14, pady=8)
+            karte.pack(side="left", padx=(0, 10))
+            tk.Label(karte, text=label, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+            tk.Label(karte, text=wert,  bg=BG_INPUT, fg=color,      font=FONT_H3).pack(anchor="w")
+
+        # Umlagefähige Kategorie-Tabelle
+        for i in self._tree_bgb_kat.get_children():
+            self._tree_bgb_kat.delete(i)
+        for r in umlage_rows:
+            kat = r["kategorie"] or "–"
+            schluessel = WEG_KATEGORIEN.get(kat, ("–", True, "Wohnfläche"))[2]
+            self._tree_bgb_kat.insert("", "end", values=(
+                kat, fmt_euro(r["s"] or 0), schluessel))
+
+        # Mieter-Tabelle
+        for i in self._tree_bgb_mi.get_children():
+            self._tree_bgb_mi.delete(i)
+        for w in wohnungen:
+            flaeche = parse_float(w["flaeche_qm"]) or 0
+            anteil_pct = (flaeche / total_flaeche * 100) if total_flaeche else 0
+            kosten = total_umlage * anteil_pct / 100
+            vorauszahlung = (parse_float(w["nebenkosten_vorauszahlung"]) or 0) * 12
+            saldo = vorauszahlung - kosten
+            mieter_name = f"{w['vorname'] or ''} {w['name']}".strip()
+            color_tag = "plus" if saldo >= 0 else "minus"
+            self._tree_bgb_mi.insert("", "end", values=(
+                w["bezeichnung"], mieter_name,
+                f"{flaeche:.1f}", f"{anteil_pct:.1f}%",
+                fmt_euro(kosten), fmt_euro(vorauszahlung),
+                fmt_euro(saldo)), tags=(color_tag,))
+        self._tree_bgb_mi.tag_configure("plus",  foreground=SUCCESS)
+        self._tree_bgb_mi.tag_configure("minus", foreground=DANGER)
+
+    # ── Wirtschaftsplan ────────────────────────────────────────────────────────
+
+    def _load_wp(self):
+        try:
+            jahr = int(self._wp_jahr.get())
+        except ValueError:
+            return
+        for i in self._tree_wp.get_children():
+            self._tree_wp.delete(i)
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT * FROM wirtschaftsplan WHERE jahr=? ORDER BY kategorie",
+            (jahr,)).fetchall()
+        conn.close()
+        for r in rows:
+            meta = WEG_KATEGORIEN.get(r["kategorie"], ("Sonstiges", False, "–"))
+            self._tree_wp.insert("", "end", iid=r["id"], values=(
+                r["kategorie"], meta[0],
+                fmt_euro(r["betrag_soll"]), r["notizen"] or "–"))
+
+    def _wp_new(self):
         if not hat_recht("Nebenkosten", "schreiben"):
             messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
-        d = NebenkostenDialog(self)
+        try:
+            jahr = int(self._wp_jahr.get())
+        except ValueError:
+            messagebox.showwarning("Jahr", "Bitte zuerst ein gültiges Jahr wählen.", parent=self); return
+        d = WirtschaftsplanDialog(self, jahr=jahr)
         self.wait_window(d)
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("INSERT INTO nebenkosten (jahr,monat,kategorie,betrag,umlageschluessel,notizen) VALUES (?,?,?,?,?,?)",
-                (v["jahr"] or date.today().year, v["monat"] or "",
-                 v["kategorie"], v["betrag"] or 0,
-                 v["umlage"], v["notizen"]))
-            conn.commit(); conn.close(); self._load()
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO wirtschaftsplan (jahr, kategorie, betrag_soll, notizen) "
+                    "VALUES (?,?,?,?)",
+                    (v["jahr"], v["kategorie"], v["betrag_soll"], v["notizen"]))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load_wp()
 
-    def _edit(self, event=None):
+    def _wp_edit(self, event=None):
         if not hat_recht("Nebenkosten", "schreiben"):
             messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
-        sel = self.tree.selection()
+        sel = self._tree_wp.selection()
         if not sel: return
         conn = get_db()
-        row = conn.execute("SELECT * FROM nebenkosten WHERE id=?", (int(sel[0]),)).fetchone()
+        row = conn.execute("SELECT * FROM wirtschaftsplan WHERE id=?", (int(sel[0]),)).fetchone()
         conn.close()
-        d = NebenkostenDialog(self, row)
+        d = WirtschaftsplanDialog(self, row=row)
         self.wait_window(d)
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("UPDATE nebenkosten SET jahr=?,monat=?,kategorie=?,betrag=?,umlageschluessel=?,notizen=? WHERE id=?",
-                (v["jahr"] or date.today().year, v["monat"] or "",
-                 v["kategorie"], v["betrag"] or 0,
-                 v["umlage"], v["notizen"], int(sel[0])))
-            conn.commit(); conn.close(); self._load()
+            try:
+                conn.execute(
+                    "UPDATE wirtschaftsplan SET kategorie=?, betrag_soll=?, notizen=? WHERE id=?",
+                    (v["kategorie"], v["betrag_soll"], v["notizen"], int(sel[0])))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load_wp()
 
-    def _delete(self):
+    def _wp_delete(self):
         if not hat_recht("Nebenkosten", "loeschen"):
             messagebox.showwarning("Berechtigung", "Keine Löschberechtigung.", parent=self); return
-        sel = self.tree.selection()
+        sel = self._tree_wp.selection()
         if not sel: return
-        if messagebox.askyesno("Löschen", "Eintrag löschen?"):
+        if messagebox.askyesno("Löschen", "Wirtschaftsplan-Eintrag löschen?", parent=self):
             conn = get_db()
-            conn.execute("DELETE FROM nebenkosten WHERE id=?", (int(sel[0]),))
-            conn.commit(); conn.close(); self._load()
+            try:
+                conn.execute("DELETE FROM wirtschaftsplan WHERE id=?", (int(sel[0]),))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load_wp()
 
-    def _jahresauswertung(self):
-        jahr = simpledialog.askinteger("Jahr", "Auswertungsjahr:", initialvalue=date.today().year, parent=self)
-        if not jahr: return
+    def _wp_soll_ist(self):
+        try:
+            jahr = int(self._wp_jahr.get())
+        except ValueError:
+            return
         conn = get_db()
-        rows   = conn.execute(
-            "SELECT kategorie, SUM(betrag) as gesamt FROM nebenkosten WHERE jahr=? GROUP BY kategorie ORDER BY gesamt DESC",
+        soll_rows = conn.execute(
+            "SELECT kategorie, betrag_soll FROM wirtschaftsplan WHERE jahr=?",
             (jahr,)).fetchall()
-        mieter = conn.execute("SELECT name, nebenkosten_vorauszahlung FROM mieter").fetchall()
+        ist_rows = conn.execute(
+            "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Ausgabe' AND strftime('%Y', datum)=? GROUP BY kategorie",
+            (str(jahr),)).fetchall()
         conn.close()
 
+        ist_map = {r["kategorie"]: (r["s"] or 0) for r in ist_rows}
+        soll_map = {r["kategorie"]: (r["betrag_soll"] or 0) for r in soll_rows}
+        alle_kat = sorted(set(list(soll_map.keys()) + list(ist_map.keys())))
+
         win = tk.Toplevel(self)
-        win.title(f"Nebenkostenauswertung {jahr}")
-        win.geometry("520x500")
+        win.title(f"Wirtschaftsplan Soll/Ist {jahr}")
+        win.geometry("640x520")
         win.configure(bg=BG_CARD)
+        win.grab_set()
 
-        tk.Frame(win, bg=BG_SIDEBAR, height=46).pack(fill="x")
-        tk.Label(win, text=f"  Jahresauswertung {jahr}", bg=BG_SIDEBAR, fg=TEXT_WHITE,
-                 font=FONT_H3).place(x=0, y=8, width=520)
+        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=46)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text=f"  Soll/Ist-Vergleich {jahr}", bg=BG_SIDEBAR,
+                 fg=TEXT_WHITE, font=FONT_H3).pack(side="left", padx=20, pady=10)
 
-        body = tk.Frame(win, bg=BG_CARD)
-        body.pack(fill="both", expand=True, padx=20, pady=14)
+        cols = ("Kategorie", "Soll", "Ist", "Abweichung", "Status")
+        f, tree = make_table(win, cols, height=18)
+        f.pack(fill="both", expand=True, padx=16, pady=10)
+        for c, w in zip(cols, [200, 100, 100, 100, 80]):
+            tree.heading(c, text=c); tree.column(c, width=w, anchor="w")
 
-        total_kosten      = sum(r["gesamt"] for r in rows)
-        total_vorauszahl  = sum((m["nebenkosten_vorauszahlung"] or 0) * 12 for m in mieter)
-        differenz         = total_vorauszahl - total_kosten
+        total_soll = total_ist = 0
+        for kat in alle_kat:
+            soll = soll_map.get(kat, 0)
+            ist = ist_map.get(kat, 0)
+            abw = soll - ist
+            total_soll += soll; total_ist += ist
+            # "Überzogen" nur wenn ein Soll-Wert geplant war und überschritten wurde
+            if soll == 0:
+                status = "– kein Soll"
+                color_tag = "neutral"
+            elif abw >= 0:
+                status = "✔ OK"
+                color_tag = "ok"
+            else:
+                status = "⚠ Überzogen"
+                color_tag = "over"
+            tree.insert("", "end", values=(
+                kat, fmt_euro(soll), fmt_euro(ist),
+                fmt_euro(abw), status), tags=(color_tag,))
 
-        tk.Label(body, text="Gesamtkosten:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
-        tk.Label(body, text=fmt_euro(total_kosten), bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(anchor="w")
-        tk.Label(body, text="Vorauszahlungen gesamt:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8, 0))
-        tk.Label(body, text=fmt_euro(total_vorauszahl), bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(anchor="w")
+        tree.tag_configure("ok",      foreground=SUCCESS)
+        tree.tag_configure("over",    foreground=DANGER)
+        tree.tag_configure("neutral", foreground=TEXT_LIGHT)
 
-        color = SUCCESS if differenz >= 0 else DANGER
-        label = "Guthaben für Mieter:" if differenz >= 0 else "Nachzahlung Mieter:"
-        tk.Label(body, text=label, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8, 0))
-        tk.Label(body, text=fmt_euro(abs(differenz)), bg=BG_CARD, fg=color, font=FONT_H2).pack(anchor="w")
+        # Summenzeile
+        total_abw = total_soll - total_ist
+        summe_frame = tk.Frame(win, bg=BG_INPUT, padx=20, pady=8)
+        summe_frame.pack(fill="x", padx=16, pady=(0, 12))
+        for label, wert, color in [
+            ("Gesamt Soll:", fmt_euro(total_soll), TEXT),
+            ("Gesamt Ist:",  fmt_euro(total_ist),  TEXT),
+            ("Abweichung:",  fmt_euro(total_abw),  SUCCESS if total_abw >= 0 else DANGER),
+        ]:
+            tk.Label(summe_frame, text=label, bg=BG_INPUT, fg=TEXT_LIGHT,
+                     font=FONT_SMALL).pack(side="left", padx=(0, 4))
+            tk.Label(summe_frame, text=wert, bg=BG_INPUT, fg=color,
+                     font=FONT_BODY).pack(side="left", padx=(0, 20))
 
-        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=10)
-        tk.Label(body, text="Kosten nach Kategorie:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
-        for r in rows:
-            row = tk.Frame(body, bg=BG_CARD)
-            row.pack(fill="x", pady=2)
-            tk.Label(row, text=r["kategorie"], bg=BG_CARD, fg=TEXT,       font=FONT_BODY).pack(side="left")
-            tk.Label(row, text=fmt_euro(r["gesamt"]), bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_MONO).pack(side="right")
 
-
-class NebenkostenDialog(BaseDialog):
-    def __init__(self, parent, row=None):
-        super().__init__(parent, "Nebenkosteneintrag", 460, 420)
+class WirtschaftsplanDialog(BaseDialog):
+    def __init__(self, parent, row=None, jahr=None):
+        super().__init__(parent, "Wirtschaftsplan-Eintrag", 480, 380)
         r = dict(row) if row else {}
-        # Row 1: Jahr + Monat
-        two = tk.Frame(self._body, bg=BG_CARD)
-        two.pack(fill="x", padx=20)
-        two.columnconfigure((0, 1), weight=1)
-        l  = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0, 6), sticky="ew")
-        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6, 0), sticky="ew")
-        self._add_field("Jahr",          "jahr",  r.get("jahr", date.today().year), row=l)
-        self._add_field("Monat (1-12)",  "monat", r.get("monat", ""),                row=ri)
-        # Single fields
-        self._add_field("Kategorie *",   "kategorie", r.get("kategorie", "Heizung"),
+        _jahr = r.get("jahr", jahr or date.today().year)
+        self._add_field("Jahr *", "jahr", str(_jahr))
+        self._add_field("Kategorie *", "kategorie",
+                        r.get("kategorie", "Heizung"),
                         widget_type="combo",
-                        options=["Heizung", "Wasser", "Müll", "Versicherung", "Hausmeister", "Strom", "Sonstiges"])
-        self._add_field("Betrag €",      "betrag",  r.get("betrag", ""))
-        self._add_field("Umlageschlüssel","umlage", r.get("umlageschluessel", "Wohnfläche"),
-                        widget_type="combo",
-                        options=["Wohnfläche", "Personenanzahl", "Einheiten gleich", "Verbrauch"])
-        self._add_field("Notizen",       "notizen", r.get("notizen", ""))
+                        options=WEG_KATEGORIEN_LISTE)
+        self._add_field("Soll-Betrag € *", "betrag_soll", r.get("betrag_soll", ""))
+        self._add_field("Notizen", "notizen", r.get("notizen", ""))
 
     def _on_save(self):
         v = self._get_values()
         if not v.get("kategorie"):
             messagebox.showwarning("Pflichtfeld", "Kategorie ist erforderlich.", parent=self); return
-        # Normalisiere Datums-Felder (falls vorhanden)
-        for field in ["ablesedatum"]:
-            if v.get(field):
-                v[field] = parse_datum(v[field])
+        try:
+            v["betrag_soll"] = float(str(v.get("betrag_soll", "0")).replace(",", ".") or 0)
+        except ValueError:
+            messagebox.showwarning("Betrag", "Bitte einen gültigen Betrag eingeben.", parent=self); return
+        try:
+            v["jahr"] = int(v.get("jahr", date.today().year))
+        except ValueError:
+            messagebox.showwarning("Jahr", "Bitte ein gültiges Jahr eingeben.", parent=self); return
+        self.result = v; self.destroy()
+
+
+class NebenkostenDialog(BaseDialog):
+    """Legacy-Dialog für manuelle Nebenkosteneinträge (Rückwärtskompatibilität)."""
+    def __init__(self, parent, row=None):
+        super().__init__(parent, "Nebenkosteneintrag", 460, 420)
+        r = dict(row) if row else {}
+        two = tk.Frame(self._body, bg=BG_CARD)
+        two.pack(fill="x", padx=20)
+        two.columnconfigure((0, 1), weight=1)
+        l  = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6, 0), sticky="ew")
+        self._add_field("Jahr", "jahr", r.get("jahr", date.today().year), row=l)
+        self._add_field("Monat (1-12)", "monat", r.get("monat", ""), row=ri)
+        self._add_field("Kategorie *", "kategorie", r.get("kategorie", "Heizung"),
+                        widget_type="combo", options=WEG_KATEGORIEN_LISTE)
+        self._add_field("Betrag €", "betrag", r.get("betrag", ""))
+        self._add_field("Umlageschlüssel", "umlage", r.get("umlageschluessel", "Wohnfläche"),
+                        widget_type="combo",
+                        options=["Wohnfläche", "Personenanzahl", "Einheiten gleich", "Verbrauch"])
+        self._add_field("Notizen", "notizen", r.get("notizen", ""))
+
+    def _on_save(self):
+        v = self._get_values()
+        if not v.get("kategorie"):
+            messagebox.showwarning("Pflichtfeld", "Kategorie ist erforderlich.", parent=self); return
         self.result = v; self.destroy()
 
 # ── Kontoauszug-Seite ─────────────────────────────────────────────────────────

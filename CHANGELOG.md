@@ -7,6 +7,45 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.10.1] — 2026-03-29
+
+### Behoben (4-Rollen-Review: Python · Buchhalter · UX · Datenbank)
+
+- **parse_float() None-sicher** (Python-Entwickler): `parse_float(None)` lieferte `ValueError` — trat auf wenn `flaeche_qm` oder `nebenkosten_vorauszahlung` in der DB `NULL` waren; Fix: frühe Rückgabe `0.0` bei `None` und leerem String
+- **try/finally in `_wp_delete`** (Python-Entwickler): DB-Connection-Leak bei Fehler in `conn.commit()` behoben
+- **Index `wirtschaftsplan(jahr)`** (Datenbankexperte): Fehlender Performance-Index in `init_db` ergänzt
+- **Soll/Ist-Status „– kein Soll"** (UX-Tester): Wenn kein Soll-Wert geplant (Soll = 0), wird jetzt „– kein Soll" (grau) statt „⚠ Überzogen" (rot) angezeigt
+
+### Neue GitHub Issues (aus 4-Rollen-Review)
+- **#23** 📊 §28 WEG: Erhaltungsrücklage als Einlage kennzeichnen
+- **#24** 👤 §556 BGB: Wohnungen ohne aktiven Mieter in Flächenberechnung
+- **#25** 📄 Export-Funktion für Jahresabrechnung PDF/CSV
+- **#26** 📋 Wirtschaftsplan Soll/Ist: Hinweis wenn kein Plan vorhanden
+
+---
+
+## [0.10.0] — 2026-03-29
+
+### Neu
+
+- **Einheitliches Kategoriensystem (§2 BetrKV / WEG)**: Globale `WEG_KATEGORIEN`-Konstante mit 34 Kategorien ersetzt die getrennten Listen in Buchhaltung und Nebenkosten; Metadaten (Obergruppe, Umlagefähigkeit nach §556 BGB, empfohlener Umlageschlüssel) direkt eingebettet; `WEG_KATEGORIEN_UMLAGE` enthält automatisch nur umlagefähige Kategorien
+
+- **§28 WEG – Eigentümer-Jahresabrechnung**: Neuer Tab in Nebenkostenabrechnung; liest Ausgaben direkt aus der Buchhaltung (Tabelle `zahlungen`), kein manuelles Nebenkosten-Befüllen mehr; Anteil pro Eigentümer wird nach `anteil_prozent` (MEA) berechnet; zeigt Hausgeld-Einnahmen-Soll vs. tatsächlichen Kostenanteil → Saldo pro Eigentümer
+
+- **§556 BGB – Mieter-Betriebskostenabrechnung**: Neuer Tab; nur umlagefähige Ausgaben aus Buchhaltung; Anteil nach Wohnfläche (m²) berechnet; zeigt geleistete Vorauszahlungen × 12 vs. tatsächlichen Anteil → Nachzahlung / Guthaben pro Mieter
+
+- **Wirtschaftsplan (§28 Abs. 1 WEG)**: Neuer Tab + neue DB-Tabelle `wirtschaftsplan` (Jahr, Kategorie, Soll-Betrag, Notizen); CRUD-Dialoge; Soll/Ist-Vergleich gegen tatsächliche Ausgaben aus Buchhaltung mit Ampelfarben
+
+- **Neuer Dialog `WirtschaftsplanDialog`**: Erstellt und bearbeitet Wirtschaftsplan-Einträge; Kategorie-Dropdown aus globalem WEG_KATEGORIEN-System
+
+### Geändert
+
+- `BuchhaltungPage.KATEGORIEN` und `KOSTENARTEN` werden jetzt aus `WEG_KATEGORIEN` abgeleitet (keine Duplikate mehr)
+- `NebenkostenDialog`-Kategorie-Dropdown nutzt jetzt die vollständige einheitliche Liste (`WEG_KATEGORIEN_LISTE`)
+- `NebenkostenPage` hat jetzt 3 Sub-Tabs statt einfacher Tabelle + Button
+
+---
+
 ## [0.9.4] — 2026-03-28
 
 ### Behoben (Profi-Review: Python · Buchhalter · UX · Datenbank)
