@@ -7,6 +7,35 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.13.0] — 2026-03-29
+
+### Neu
+
+- **#19 Wohngeld Soll/Ist-Übersicht**: Neuer Tab „💰 Wohngeld Soll/Ist" in der Buchhaltungsseite; zeigt je Eigentümer MEA-Anteil, Soll-Kostenanteil (aus Gesamtausgaben × MEA%), tatsächlich gezahltes Hausgeld (Ist), Saldo und Status (✔ ausgeglichen / ⚠ Rückstand); KPI-Leiste mit Gesamtausgaben, Hausgeld-Einnahmen und Jahressaldo; Jahres-Dropdown
+
+- **#22 Jahresabschluss-PDF**: Neuer Button „📄 Jahresabschluss" im Buchungskopf; generiert vollständige A4-PDF-Abrechnung: Gesamtübersicht mit Saldo, Einnahmen nach Kategorie (grüner Header), Ausgaben nach Kategorie (roter Header), monatliche Übersicht; Jahreseingabe per Dialog; nutzt reportlab
+
+- **#30 Datenbank Backup/Restore**: Neuer Abschnitt „Backup & Wiederherstellung" im Einstellungen-Tab „📁 Speicherpfade"; **💾 Backup erstellen** kopiert DB mit Zeitstempel in konfigurierten Backup-Ordner; **♻ Datenbank wiederherstellen** ersetzt aktuelle DB nach Warnung, legt automatisch Sicherheits-Backup der alten DB an
+
+- **#32 Dashboard-Erweiterung**: Sechs KPI-Kacheln (vorher vier); neu: **Jahressaldo** (Einnahmen − Ausgaben laufendes Jahr, grün/rot) und **Rücklagen (kumuliert)** (Summe aller Erhaltungsrücklage-Buchungen, blau)
+
+### Verbessert
+
+- **#31 CSV-Export mit Filtern**: CSV-Export fragt jetzt nach Jahr (leer = alle); berücksichtigt den aktiven Typfilter (Einnahme/Ausgabe/Alle); Dateiname enthält Jahr und Typ; Info-Dialog zeigt Anzahl exportierter Buchungen
+
+### Behoben
+
+- **#20 MEA-Felder vereinheitlichen**: Neue Funktion `sync_mea_eigentuemer()` berechnet `eigentuemer.anteil_prozent` immer aus `SUM(wohnungen.mea_tausendstel) / 10`; wird nach jedem Wohnungs-Speichern (neu + bearbeiten) und beim Datenbankstart (`init_db()`) aufgerufen — veraltete MEA-Werte werden automatisch korrigiert
+
+### Behoben (4-Rollen-Review)
+
+- **Python-Entwickler**: `sync_mea_eigentuemer()` nutzt optionale `conn`-Übergabe um Connection-Leaks zu vermeiden; `_db_restore()` legt immer Auto-Backup an vor dem Überschreiben
+- **Buchhalter**: Jahresabschluss zeigt Einnahmen und Ausgaben farblich getrennt; Saldo wird als Überschuss/Fehlbetrag korrekt benannt
+- **UX-Tester**: Dashboard-Kachel Jahressaldo wechselt Farbe (grün ↔ rot); Wohngeld-Tab zeigt Rückstand mit konkretem Betrag in Statustext
+- **Datenbankexperte**: CSV-Export verwendet parametrisierte Queries (kein SQL-Injection-Risiko durch Jahres-String)
+
+---
+
 ## [0.12.0] — 2026-03-29
 
 ### Neu

@@ -72,9 +72,25 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.13.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
+#   0.13.0 — Issues #19, #20, #22, #30, #31, #32:
+#             #19 Wohngeld Soll/Ist: neuer Tab "💰 Wohngeld Soll/Ist" in BuchhaltungPage;
+#                 KPI-Zeile + Tabelle pro Eigentümer (MEA-Soll vs. gez. Hausgeld, Saldo, Status);
+#             #20 MEA-Sync: neue Funktion sync_mea_eigentuemer(); wird nach Wohnungs-Neu/Edit
+#                 und bei init_db() aufgerufen — eigentuemer.anteil_prozent immer aus
+#                 SUM(wohnungen.mea_tausendstel)/10 berechnet; kein veralteter Wert mehr;
+#             #22 Jahresabschluss-PDF: "📄 Jahresabschluss"-Button in BuchhaltungPage-Header;
+#                 reportlab-PDF mit Einnahmen/Ausgaben nach Kategorie + monatliche Übersicht;
+#                 Jahr per Dialog eingeben; Farben: Einnahmen grün, Ausgaben rot;
+#             #30 Backup/Restore: "💾 Backup erstellen" + "♻ Wiederherstellen" in Einstellungen
+#                 Tab Speicherpfade; Backup kopiert DB mit Timestamp; Restore legt Auto-Backup
+#                 der alten DB an bevor sie ersetzt wird;
+#             #31 CSV-Export verbessert: Jahresfilter per Dialog, Typfilter aus aktuellem Filter,
+#                 Dateiname enthält Jahres-/Typ-Info; Anzahl exportierter Buchungen im Info-Dialog;
+#             #32 Dashboard-Erweiterung: 6 KPI-Karten (vorher 4); neu: Jahressaldo + Rücklagen
+#                 (kumuliert); Jahressaldo rot wenn negativ;
 #   0.12.0 — Issues #23, #24, #25:
 #             #23 §28 WEG: Erhaltungsrücklage und Sonderumlage als "Rücklage-Einlage"
 #                 separat ausgewiesen (neues WEG_EINLAGE_KATEGORIEN-Set); KPI zeigt
@@ -545,6 +561,8 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
     if not c.execute("SELECT COUNT(*) FROM eigentuemer").fetchone()[0]:
         _insert_demo(c)
     conn.commit()
+    sync_mea_eigentuemer(conn)  # #20 MEA-Sync: Bestandsdaten beim Start angleichen
+    conn.commit()
     conn.close()
 
 def _insert_demo(c):
@@ -619,6 +637,30 @@ def parse_datum(s: str) -> str:
     if m:
         return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
     return s
+
+def sync_mea_eigentuemer(conn=None):
+    """#20 MEA-Sync: Berechnet eigentuemer.anteil_prozent aus SUM(wohnungen.mea_tausendstel) / 10.
+    Wird nach jedem Wohnungs-Speichern aufgerufen, um Konsistenz sicherzustellen.
+    conn: optionale bestehende Verbindung (wird NICHT geschlossen); None → eigene Verbindung."""
+    own_conn = conn is None
+    if own_conn:
+        conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT eigentuemer_id, SUM(mea_tausendstel) as mea_sum "
+            "FROM wohnungen WHERE eigentuemer_id IS NOT NULL GROUP BY eigentuemer_id"
+        ).fetchall()
+        for r in rows:
+            if r["eigentuemer_id"] and r["mea_sum"] is not None:
+                anteil = r["mea_sum"] / 10.0   # ‰ → %
+                conn.execute(
+                    "UPDATE eigentuemer SET anteil_prozent=? WHERE id=?",
+                    (anteil, r["eigentuemer_id"]))
+        if own_conn:
+            conn.commit()
+    finally:
+        if own_conn:
+            conn.close()
 
 # ── Basis-Widget-Helfer ───────────────────────────────────────────────────────
 
@@ -968,13 +1010,22 @@ class DashboardPage(tk.Frame):
         einnahmen      = conn.execute("SELECT COALESCE(SUM(betrag),0) FROM zahlungen WHERE typ='Einnahme' AND strftime('%Y-%m',datum)=strftime('%Y-%m','now')").fetchone()[0]
         ausgaben       = conn.execute("SELECT COALESCE(SUM(ABS(betrag)),0) FROM zahlungen WHERE typ='Ausgabe' AND strftime('%Y-%m',datum)=strftime('%Y-%m','now')").fetchone()[0]
         ungelesen      = conn.execute("SELECT COUNT(*) FROM nachrichten WHERE gelesen=0").fetchone()[0]
+        # #32 Zusatz-KPIs
+        jahres_ein     = conn.execute("SELECT COALESCE(SUM(betrag),0) FROM zahlungen WHERE typ='Einnahme' AND strftime('%Y',datum)=strftime('%Y','now')").fetchone()[0]
+        jahres_aus     = conn.execute("SELECT COALESCE(SUM(betrag),0) FROM zahlungen WHERE typ='Ausgabe' AND strftime('%Y',datum)=strftime('%Y','now')").fetchone()[0]
+        jahres_saldo   = jahres_ein - jahres_aus
+        ruecklage_sum  = conn.execute("SELECT COALESCE(SUM(betrag),0) FROM zahlungen WHERE typ='Ausgabe' AND kategorie='Erhaltungsrücklage'").fetchone()[0]
         conn.close()
 
+        kpi_row.columnconfigure((0, 1, 2, 3, 4, 5), weight=1, uniform="kpi")
         kpis = [
-            ("🏠", "Mieter",        str(mieter_count),    ACCENT2),
-            ("💰", "Einnahmen",     fmt_euro(einnahmen),   SUCCESS),
-            ("🔧", "Offene Aufgaben", str(offene_wartung), WARNING),
-            ("✉️",  "Ungelesen",    str(ungelesen),        ACCENT),
+            ("🏠", "Aktive Mieter",    str(mieter_count),           ACCENT2),
+            ("💰", "Einnahmen (Monat)", fmt_euro(einnahmen),          SUCCESS),
+            ("📊", f"Jahressaldo {date.today().year}", fmt_euro(jahres_saldo),
+             SUCCESS if jahres_saldo >= 0 else DANGER),
+            ("🏦", "Rücklagen (kum.)",  fmt_euro(ruecklage_sum),      "#2E6DA4"),
+            ("🔧", "Offene Aufgaben",   str(offene_wartung),          WARNING),
+            ("✉️",  "Ungelesen",         str(ungelesen),               ACCENT),
         ]
         for col, (icon, label, val, color) in enumerate(kpis):
             card = tk.Frame(kpi_row, bg=BG_CARD, relief="flat", bd=0)
@@ -1558,6 +1609,8 @@ class WohnungenPage(tk.Frame):
                  v["balkon"], v["keller"], v["stellplatz"], v["heizungsart"], v["mea_tausendstel"] or None,
                  v["eigentuemer_id"] or None, v["mieter_id"] or None,
                  v["miteigentumsanteil"] or None, v["baujahr"] or None, v["notizen"]))
+            conn.commit()
+            sync_mea_eigentuemer(conn)   # #20 MEA-Sync
             conn.commit(); conn.close(); self._load()
 
     def _edit(self, event=None):
@@ -1578,6 +1631,8 @@ class WohnungenPage(tk.Frame):
                  v["balkon"], v["keller"], v["stellplatz"], v["heizungsart"], v["mea_tausendstel"] or None,
                  v["eigentuemer_id"] or None, v["mieter_id"] or None,
                  v["miteigentumsanteil"] or None, v["baujahr"] or None, v["notizen"], int(sel[0])))
+            conn.commit()
+            sync_mea_eigentuemer(conn)   # #20 MEA-Sync
             conn.commit(); conn.close(); self._load()
 
     def _delete(self):
@@ -1704,8 +1759,10 @@ class BuchhaltungPage(tk.Frame):
         top.pack(fill="x", padx=20, pady=(16, 0))
         self._saldo_label = tk.Label(top, text="", bg=BG_CARD, fg=TEXT, font=FONT_H2)
         self._saldo_label.pack(side="left")
-        make_btn(top, "＋ Buchung",    self._new_zahlung).pack(side="right")
-        make_btn(top, "📊 Export CSV", self._export_csv,
+        make_btn(top, "＋ Buchung",       self._new_zahlung).pack(side="right")
+        make_btn(top, "📄 Jahresabschluss", self._jahresabschluss_pdf,
+                 color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
+        make_btn(top, "📊 Export CSV",  self._export_csv,
                  color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
 
         # ── Sub-Tab-Leiste ─────────────────────────────────────────────────────
@@ -1715,7 +1772,8 @@ class BuchhaltungPage(tk.Frame):
         for tid, label in [("buchungen",  "📒  Buchungen"),
                             ("vorschlaege","🔔  Kontoauszug Vorschläge"),
                             ("regeln",    "⚙  Buchungsregeln"),
-                            ("kostenarten","📋  Kostenarten")]:
+                            ("kostenarten","📋  Kostenarten"),
+                            ("wohngeld",  "💰  Wohngeld Soll/Ist")]:
             btn = tk.Button(tab_bar, text=label, font=FONT_NAV, relief="flat", bd=0,
                             padx=14, pady=7, cursor="hand2",
                             command=lambda t=tid: self._switch_tab(t))
@@ -1821,6 +1879,30 @@ class BuchhaltungPage(tk.Frame):
         make_btn(btn_k, "🔄 Aktivieren/Deaktivieren", self._toggle_kostenart, color=WARNING, fg=TEXT_WHITE).pack(side="left", padx=(0,6))
         make_btn(btn_k, "🗑 Löschen", self._delete_kostenart, color=DANGER).pack(side="left")
 
+        # ── Tab Wohngeld Soll/Ist (#19) ───────────────────────────────────────
+        self._view_wohngeld = tk.Frame(self._content, bg=BG_CARD)
+        wg_top = tk.Frame(self._view_wohngeld, bg=BG_CARD)
+        wg_top.pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(wg_top, text="Jahr:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._wg_jahr = tk.StringVar(value=str(date.today().year))
+        ttk.Combobox(wg_top, textvariable=self._wg_jahr, width=8,
+                     values=[str(y) for y in range(date.today().year, date.today().year - 6, -1)]
+                     ).pack(side="left", padx=6)
+        make_btn(wg_top, "🔄 Auswertung", self._load_wohngeld).pack(side="left")
+
+        self._wg_kpi = tk.Frame(self._view_wohngeld, bg=BG_CARD)
+        self._wg_kpi.pack(fill="x", padx=20, pady=(6, 4))
+
+        tk.Label(self._view_wohngeld,
+                 text="Wohngeld-Einnahmen pro Eigentümer (Ist) vs. Kostenpflicht (Soll nach MEA)",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
+        cols_wg = ("Eigentümer", "MEA %", "Soll (Kostenanteil)", "Ist (gezahlt)", "Saldo", "Status")
+        fwg, self._tree_wg = make_table(self._view_wohngeld, cols_wg, height=12)
+        fwg.pack(fill="both", expand=True, padx=20, pady=(2, 8))
+        for c, w in zip(cols_wg, [180, 60, 140, 140, 110, 100]):
+            self._tree_wg.heading(c, text=c)
+            self._tree_wg.column(c, width=w, anchor="w")
+
         self._switch_tab("buchungen")
 
     # ── Tab-Umschalten ────────────────────────────────────────────────────────
@@ -1836,7 +1918,8 @@ class BuchhaltungPage(tk.Frame):
         # Filter-Zeile nur bei Buchungen
         self._filter_frame.pack_forget()
         # Views ein-/ausblenden
-        for v in [self._view_buchungen, self._view_vorschlaege, self._view_regeln, self._view_kostenarten]:
+        for v in [self._view_buchungen, self._view_vorschlaege, self._view_regeln,
+                  self._view_kostenarten, self._view_wohngeld]:
             v.pack_forget()
         if tab == "buchungen":
             self._filter_frame.pack(fill="x", padx=20, pady=(4, 0))
@@ -1851,6 +1934,9 @@ class BuchhaltungPage(tk.Frame):
         elif tab == "kostenarten":
             self._view_kostenarten.pack(fill="both", expand=True)
             self._load_kostenarten()
+        elif tab == "wohngeld":
+            self._view_wohngeld.pack(fill="both", expand=True)
+            self._load_wohngeld()
 
     # ── Tab 1: Buchungen ──────────────────────────────────────────────────────
 
@@ -1972,14 +2058,232 @@ class BuchhaltungPage(tk.Frame):
             conn.commit(); conn.close()
             self._load_buchungen()
 
+    def _jahresabschluss_pdf(self):
+        """#22 Jahresabschluss-PDF: Vollständige Einnahmen/Ausgaben-Übersicht als A4-Dokument."""
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                            Paragraph, Spacer, HRFlowable)
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import cm
+        except ImportError:
+            messagebox.showerror("Fehler",
+                "reportlab nicht installiert.\nBitte 'pip install reportlab' ausführen.",
+                parent=self)
+            return
+
+        # Jahr per Dialog erfragen
+        jahr_str = simpledialog.askstring(
+            "Jahresabschluss", "Jahr eingeben (z.B. 2025):",
+            initialvalue=str(date.today().year - 1), parent=self)
+        if not jahr_str:
+            return
+        try:
+            jahr = int(jahr_str.strip())
+        except ValueError:
+            messagebox.showwarning("Jahr", "Bitte eine gültige Jahreszahl eingeben.", parent=self)
+            return
+
+        conn = get_db()
+        # Einnahmen nach Kategorie
+        ein_rows = conn.execute(
+            "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Einnahme' AND strftime('%Y',datum)=? GROUP BY kategorie ORDER BY s DESC",
+            (str(jahr),)).fetchall()
+        # Ausgaben nach Kategorie
+        aus_rows = conn.execute(
+            "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Ausgabe' AND strftime('%Y',datum)=? GROUP BY kategorie ORDER BY s DESC",
+            (str(jahr),)).fetchall()
+        # Monatliche Übersicht
+        monat_rows = conn.execute(
+            "SELECT strftime('%m',datum) as m, "
+            "SUM(CASE WHEN typ='Einnahme' THEN betrag ELSE 0 END) as ein, "
+            "SUM(CASE WHEN typ='Ausgabe' THEN betrag ELSE 0 END) as aus "
+            "FROM zahlungen WHERE strftime('%Y',datum)=? GROUP BY m ORDER BY m",
+            (str(jahr),)).fetchall()
+        conn.close()
+
+        total_ein = sum(r["s"] or 0 for r in ein_rows)
+        total_aus = sum(r["s"] or 0 for r in aus_rows)
+        jahres_saldo = total_ein - total_aus
+
+        pfad = filedialog.asksaveasfilename(
+            parent=self, title="Jahresabschluss speichern",
+            defaultextension=".pdf",
+            initialfile=f"WEG_Jahresabschluss_{jahr}.pdf",
+            filetypes=[("PDF-Dokument", "*.pdf")])
+        if not pfad:
+            return
+
+        try:
+            cfg = load_settings()
+            weg_name = cfg.get("weg_name") or "WEG Hausverwaltung"
+
+            doc = SimpleDocTemplate(pfad, pagesize=A4,
+                                    leftMargin=2*cm, rightMargin=2*cm,
+                                    topMargin=2*cm, bottomMargin=2*cm)
+            styles = getSampleStyleSheet()
+            H1 = ParagraphStyle("H1", parent=styles["Heading1"],
+                                 fontSize=18, textColor=colors.HexColor("#1C2B3A"))
+            H2 = ParagraphStyle("H2", parent=styles["Heading2"],
+                                 fontSize=13, textColor=colors.HexColor("#1C2B3A"))
+            SMALL = ParagraphStyle("sm", parent=styles["Normal"], fontSize=8,
+                                   textColor=colors.HexColor("#666666"))
+            BOLD  = ParagraphStyle("bd", parent=styles["Normal"], fontSize=10,
+                                   fontName="Helvetica-Bold")
+
+            story = [
+                Paragraph(weg_name, H1),
+                Paragraph(f"Jahresabschluss {jahr} – Einnahmen & Ausgaben", H2),
+                Paragraph(f"Erstellt am {date.today().strftime('%d.%m.%Y')}", SMALL),
+                Spacer(1, 0.4*cm),
+            ]
+
+            # ── Gesamtübersicht ──
+            kpi_data = [
+                ["Gesamteinnahmen",  fmt_euro(total_ein)],
+                ["Gesamtausgaben",   fmt_euro(total_aus)],
+                ["Jahresüberschuss" if jahres_saldo >= 0 else "Jahresfehlbetrag",
+                 fmt_euro(jahres_saldo)],
+            ]
+            kpi_t = Table(kpi_data, colWidths=[10*cm, 5*cm])
+            kpi_t.setStyle(TableStyle([
+                ("FONTNAME",   (0,0), (-1,-1), "Helvetica"),
+                ("FONTSIZE",   (0,0), (-1,-1), 11),
+                ("FONTNAME",   (0,-1), (-1,-1), "Helvetica-Bold"),
+                ("ALIGN",      (1,0), (1,-1), "RIGHT"),
+                ("ROWBACKGROUNDS", (0,0), (-1,-1),
+                 [colors.HexColor("#F7F5F0"), colors.HexColor("#EEEAE3"),
+                  colors.HexColor("#D4EDDA") if jahres_saldo >= 0 else colors.HexColor("#FADADD")]),
+                ("GRID",       (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                ("TOPPADDING", (0,0), (-1,-1), 6), ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+            ]))
+            story += [kpi_t, Spacer(1, 0.5*cm)]
+
+            # ── Einnahmen ──
+            story.append(Paragraph("Einnahmen nach Kategorie", H2))
+            ein_data = [["Kategorie", "Betrag"]]
+            for r in ein_rows:
+                ein_data.append([r["kategorie"] or "–", fmt_euro(r["s"] or 0)])
+            ein_data.append(["Gesamt Einnahmen", fmt_euro(total_ein)])
+            ein_t = Table(ein_data, colWidths=[12*cm, 5*cm])
+            ein_t.setStyle(TableStyle([
+                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#3A7D44")),
+                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTSIZE",    (0,0), (-1,-1), 9),
+                ("ALIGN",       (1,1), (1,-1),  "RIGHT"),
+                ("ROWBACKGROUNDS", (0,1), (-1,-2),
+                 [colors.white, colors.HexColor("#F7F5F0")]),
+                ("BACKGROUND",  (0,-1), (-1,-1), colors.HexColor("#D4EDDA")),
+                ("FONTNAME",    (0,-1), (-1,-1), "Helvetica-Bold"),
+                ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                ("TOPPADDING",  (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ]))
+            story += [ein_t, Spacer(1, 0.4*cm)]
+
+            # ── Ausgaben ──
+            story.append(Paragraph("Ausgaben nach Kategorie", H2))
+            aus_data = [["Kategorie", "Betrag"]]
+            for r in aus_rows:
+                aus_data.append([r["kategorie"] or "–", fmt_euro(r["s"] or 0)])
+            aus_data.append(["Gesamt Ausgaben", fmt_euro(total_aus)])
+            aus_t = Table(aus_data, colWidths=[12*cm, 5*cm])
+            aus_t.setStyle(TableStyle([
+                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#C0392B")),
+                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTSIZE",    (0,0), (-1,-1), 9),
+                ("ALIGN",       (1,1), (1,-1),  "RIGHT"),
+                ("ROWBACKGROUNDS", (0,1), (-1,-2),
+                 [colors.white, colors.HexColor("#F7F5F0")]),
+                ("BACKGROUND",  (0,-1), (-1,-1), colors.HexColor("#FADADD")),
+                ("FONTNAME",    (0,-1), (-1,-1), "Helvetica-Bold"),
+                ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                ("TOPPADDING",  (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ]))
+            story += [aus_t, Spacer(1, 0.4*cm)]
+
+            # ── Monatliche Übersicht ──
+            if monat_rows:
+                story.append(Paragraph("Monatliche Übersicht", H2))
+                monate = ["Jan","Feb","Mär","Apr","Mai","Jun",
+                          "Jul","Aug","Sep","Okt","Nov","Dez"]
+                mon_data = [["Monat", "Einnahmen", "Ausgaben", "Monatssaldo"]]
+                for r in monat_rows:
+                    mi = int(r["m"]) - 1
+                    mon = monate[mi] if 0 <= mi < 12 else r["m"]
+                    ein_m = r["ein"] or 0
+                    aus_m = r["aus"] or 0
+                    saldo_m = ein_m - aus_m
+                    mon_data.append([
+                        f"{mon} {jahr}", fmt_euro(ein_m), fmt_euro(aus_m),
+                        fmt_euro(saldo_m)])
+                mon_t = Table(mon_data, colWidths=[3.5*cm, 4*cm, 4*cm, 4.5*cm])
+                mon_t.setStyle(TableStyle([
+                    ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1C2B3A")),
+                    ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                    ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                    ("FONTSIZE",    (0,0), (-1,-1), 9),
+                    ("ALIGN",       (1,1), (-1,-1), "RIGHT"),
+                    ("ROWBACKGROUNDS", (0,1), (-1,-1),
+                     [colors.white, colors.HexColor("#F7F5F0")]),
+                    ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                    ("TOPPADDING",  (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+                ]))
+                story.append(mon_t)
+
+            doc.build(story)
+            if messagebox.askyesno("PDF erstellt",
+                f"Jahresabschluss {jahr} gespeichert:\n{pfad}\n\nJetzt öffnen?", parent=self):
+                try:
+                    if os.name == "nt":
+                        os.startfile(pfad)
+                    elif os.uname().sysname == "Darwin":
+                        subprocess.Popen(["open", pfad])
+                    else:
+                        subprocess.Popen(["xdg-open", pfad])
+                except Exception:
+                    pass
+        except Exception as exc:
+            messagebox.showerror("PDF-Fehler", f"PDF konnte nicht erstellt werden:\n{exc}",
+                                 parent=self)
+
     def _export_csv(self):
+        """#31 CSV-Export mit optionalem Jahres- und Typfilter."""
+        # Jahreseingabe
+        jahr_str = simpledialog.askstring(
+            "CSV-Export",
+            "Jahr eingeben (leer = alle Jahre):",
+            initialvalue=str(date.today().year), parent=self)
+        if jahr_str is None:   # Abbruch
+            return
         path = filedialog.asksaveasfilename(defaultextension=".csv",
-            filetypes=[("CSV", "*.csv")], title="Buchungen exportieren")
+            filetypes=[("CSV", "*.csv")], title="Buchungen exportieren",
+            initialfile=f"Buchungen_{jahr_str.strip() or 'alle'}.csv")
         if not path: return
         conn = get_db()
+        typ = self._typ_var.get()
+        params: list = []
+        where_clauses = []
+        if jahr_str.strip():
+            try:
+                int(jahr_str.strip())  # Validierung
+                where_clauses.append("strftime('%Y',datum)=?")
+                params.append(jahr_str.strip())
+            except ValueError:
+                messagebox.showwarning("Jahr", "Ungültiges Jahr — alle Jahre werden exportiert.",
+                                       parent=self)
+        if typ != "Alle":
+            where_clauses.append("typ=?")
+            params.append(typ)
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         rows = conn.execute(
-            "SELECT datum,beschreibung,kategorie,betrag,typ,belegnr "
-            "FROM zahlungen ORDER BY datum DESC").fetchall()
+            f"SELECT datum,beschreibung,kategorie,betrag,typ,belegnr "
+            f"FROM zahlungen {where_sql} ORDER BY datum DESC",
+            params).fetchall()
         conn.close()
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f, delimiter=";")
@@ -1987,7 +2291,8 @@ class BuchhaltungPage(tk.Frame):
             for r in rows:
                 w.writerow([fmt_date(r[0]), r[1], r[2],
                              str(r[3]).replace(".", ","), r[4], r[5]])
-        messagebox.showinfo("Export", f"Exportiert: {os.path.basename(path)}")
+        messagebox.showinfo("Export",
+            f"Exportiert: {os.path.basename(path)}\n{len(rows)} Buchungen")
 
     # ── Tab 2: Kontoauszug-Vorschläge ─────────────────────────────────────────
 
@@ -2358,6 +2663,75 @@ class BuchhaltungPage(tk.Frame):
                 status,
                 count), tags=(tag,) if tag else ())
         conn.close()
+
+    def _load_wohngeld(self):
+        """#19 Wohngeld Soll/Ist: Vergleich geleisteter vs. erwarteter Hausgeld-Zahlungen."""
+        try:
+            jahr = int(self._wg_jahr.get())
+        except ValueError:
+            return
+
+        conn = get_db()
+        # Gesamtausgaben des Jahres (Soll-Basis für MEA-Anteil)
+        total_ausgaben = conn.execute(
+            "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
+            "WHERE typ='Ausgabe' AND strftime('%Y',datum)=?", (str(jahr),)
+        ).fetchone()[0]
+        # Tatsächlich gezahltes Hausgeld pro Eigentümer
+        hg_ist = conn.execute(
+            "SELECT eigentuemer_id, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=? "
+            "GROUP BY eigentuemer_id", (str(jahr),)
+        ).fetchall()
+        hg_gesamt_ist = conn.execute(
+            "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
+            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=?",
+            (str(jahr),)
+        ).fetchone()[0]
+        eigentuemer = conn.execute(
+            "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name"
+        ).fetchall()
+        conn.close()
+
+        hg_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hg_ist}
+        total_mea = sum(parse_float(e["anteil_prozent"]) or 0 for e in eigentuemer) or 100.0
+
+        # KPI
+        for w in self._wg_kpi.winfo_children():
+            w.destroy()
+        saldo_gesamt = hg_gesamt_ist - total_ausgaben
+        for label, wert, color in [
+            ("Gesamtausgaben (Soll)", fmt_euro(total_ausgaben), DANGER),
+            ("Hausgeld-Einnahmen (Ist)", fmt_euro(hg_gesamt_ist), SUCCESS),
+            ("Jahressaldo", fmt_euro(saldo_gesamt),
+             SUCCESS if saldo_gesamt >= 0 else DANGER),
+        ]:
+            karte = tk.Frame(self._wg_kpi, bg=BG_INPUT, padx=14, pady=8)
+            karte.pack(side="left", padx=(0, 10))
+            tk.Label(karte, text=label, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+            tk.Label(karte, text=wert,  bg=BG_INPUT, fg=color,      font=FONT_H3).pack(anchor="w")
+
+        # Pro-Eigentümer-Tabelle
+        for i in self._tree_wg.get_children():
+            self._tree_wg.delete(i)
+        for e in eigentuemer:
+            anteil_pct  = parse_float(e["anteil_prozent"]) or 0
+            soll        = total_ausgaben * anteil_pct / 100
+            ist         = hg_map.get(e["id"], 0)
+            saldo       = ist - soll
+            name        = f"{e['vorname'] or ''} {e['name']}".strip()
+            if saldo >= 0:
+                status    = "✔ ausgeglichen"
+                color_tag = "plus"
+            else:
+                status    = f"⚠ Rückstand {fmt_euro(abs(saldo))}"
+                color_tag = "minus"
+            self._tree_wg.insert("", "end", values=(
+                name, f"{anteil_pct:.2f}%",
+                fmt_euro(soll), fmt_euro(ist),
+                fmt_euro(saldo), status), tags=(color_tag,))
+        self._tree_wg.tag_configure("plus",  foreground=SUCCESS)
+        self._tree_wg.tag_configure("minus", foreground=DANGER)
 
     def _new_kostenart(self):
         """Neue benutzerdefinierte Kategorie hinzufügen."""
@@ -5742,6 +6116,19 @@ class EinstellungenPage(tk.Frame):
         self._section(t3, "Datenbank")
         self._path_field(t3, "Ordner Datenbank-Backup", "pfad_backup", is_path=True, is_dir=True)
         self._path_field(t3, "Datenbankdatei (hausverwaltung.db)", "pfad_datenbank", is_path=True, is_dir=False)
+        # ── Backup/Restore Aktionen (#30) ────────────────────────────────────
+        self._section(t3, "Backup & Wiederherstellung")
+        tk.Label(t3,
+                 text="Backup: Kopiert die Datenbank in den oben gewählten Backup-Ordner.\n"
+                      "Wiederherstellen: Ersetzt die aktuelle Datenbank durch eine Backup-Datei.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL, justify="left"
+                 ).pack(anchor="w", padx=20, pady=(0, 8))
+        btn_backup_row = tk.Frame(t3, bg=BG_CARD)
+        btn_backup_row.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(btn_backup_row, "💾 Backup erstellen", self._db_backup,
+                 color=ACCENT2).pack(side="left", padx=(0, 12))
+        make_btn(btn_backup_row, "♻ Datenbank wiederherstellen", self._db_restore,
+                 color=DANGER).pack(side="left")
 
         # ── Tab 4: KI-Administration ──────────────────────────────────────────
         t4_outer, t4 = self._scrollable_tab(nb)
@@ -5873,6 +6260,56 @@ class EinstellungenPage(tk.Frame):
             self._cfg["ki_anbieter"] = self._ki_anbieter_var.get()
         save_config(self._cfg)
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.\n" + str(CONFIG_PATH))
+
+    def _db_backup(self):
+        """#30 Backup erstellen: Datenbank in Backup-Ordner kopieren."""
+        import shutil
+        backup_ordner = self._vars.get("pfad_backup", tk.StringVar()).get().strip()
+        if not backup_ordner:
+            backup_ordner = str(Path.home())
+            messagebox.showinfo("Backup-Ordner",
+                "Kein Backup-Ordner konfiguriert. Backup wird im Home-Verzeichnis gespeichert.",
+                parent=self)
+        try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ziel = os.path.join(backup_ordner, f"hausverwaltung_backup_{ts}.db")
+            shutil.copy2(str(DB_PATH), ziel)
+            messagebox.showinfo("Backup erstellt",
+                f"Datenbank-Backup gespeichert:\n{ziel}", parent=self)
+        except Exception as exc:
+            messagebox.showerror("Backup-Fehler",
+                f"Backup konnte nicht erstellt werden:\n{exc}", parent=self)
+
+    def _db_restore(self):
+        """#30 Wiederherstellen: Datenbank aus Backup-Datei ersetzen."""
+        import shutil
+        if not messagebox.askyesno(
+            "⚠ Warnung",
+            "Die aktuelle Datenbank wird durch die Backup-Datei ersetzt!\n"
+            "Alle nicht gesicherten Änderungen gehen verloren.\n\n"
+            "Fortfahren?", icon="warning", parent=self):
+            return
+        quelle = filedialog.askopenfilename(
+            parent=self, title="Backup-Datei wählen",
+            filetypes=[("Datenbank-Backup", "*.db"), ("Alle Dateien", "*.*")])
+        if not quelle:
+            return
+        # Erst eigenes Backup anlegen
+        try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            auto_backup = str(DB_PATH) + f".vor_restore_{ts}.bak"
+            shutil.copy2(str(DB_PATH), auto_backup)
+        except Exception:
+            auto_backup = None
+        try:
+            shutil.copy2(quelle, str(DB_PATH))
+            info = f"Datenbank erfolgreich wiederhergestellt aus:\n{quelle}"
+            if auto_backup:
+                info += f"\n\nAutomatisches Sicherheits-Backup der alten Datenbank:\n{auto_backup}"
+            messagebox.showinfo("Wiederhergestellt", info, parent=self)
+        except Exception as exc:
+            messagebox.showerror("Fehler",
+                f"Wiederherstellung fehlgeschlagen:\n{exc}", parent=self)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HAUPTANWENDUNG
