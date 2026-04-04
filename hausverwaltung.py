@@ -72,9 +72,15 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.13.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
+#   0.13.1 — Bugfix KI-Assistent Ollama-Integration:
+#             _api_call_thread() liest ki_anbieter und routet zu _anthropic_call_thread()
+#             oder _ollama_call_thread() (POST /api/chat, stream=false);
+#             Modell-Dropdown zeigt Claude-Modelle ODER das konfigurierte Ollama-Modell;
+#             _provider_aktualisieren() synct UI mit Einstellungen inkl. Verbindungstest;
+#             "🔄 Provider neu laden"-Button; Header- und Warte-Text anbieterabhängig;
 #   0.13.0 — Issues #19, #20, #22, #30, #31, #32:
 #             #19 Wohngeld Soll/Ist: neuer Tab "💰 Wohngeld Soll/Ist" in BuchhaltungPage;
 #                 KPI-Zeile + Tabelle pro Eigentümer (MEA-Soll vs. gez. Hausgeld, Saldo, Status);
@@ -5787,35 +5793,94 @@ Antworte immer auf Deutsch.
 
         # Modell-Auswahl
         tk.Frame(right, bg=BORDER, height=1).pack(fill="x", padx=10, pady=(8, 8))
-        tk.Label(right, text="KI-Modell", bg=BG_CARD, fg=TEXT_LIGHT,
-                 font=FONT_SMALL).pack(anchor="w", padx=12)
-        cfg = load_config()
-        modelle = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
-        self._modell_var = tk.StringVar(value=cfg.get("ki_modell", "claude-opus-4-6"))
-        modell_cb = ttk.Combobox(right, textvariable=self._modell_var,
-                                  values=modelle, state="readonly", font=FONT_SMALL)
-        modell_cb.pack(fill="x", padx=10, pady=(2, 8))
-        modell_cb.bind("<<ComboboxSelected>>", self._modell_geaendert)
+        self._modell_label = tk.Label(right, text="KI-Modell", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL)
+        self._modell_label.pack(anchor="w", padx=12)
+        self._modell_var = tk.StringVar()
+        self._modell_cb = ttk.Combobox(right, textvariable=self._modell_var,
+                                        state="readonly", font=FONT_SMALL)
+        self._modell_cb.pack(fill="x", padx=10, pady=(2, 8))
+        self._modell_cb.bind("<<ComboboxSelected>>", self._modell_geaendert)
 
-        # API-Key Status
+        # Provider-Status
         tk.Frame(right, bg=BORDER, height=1).pack(fill="x", padx=10, pady=(0, 8))
-        key = cfg.get("anthropic_api_key", "")
-        if key:
-            status_text = f"✅ API-Key gesetzt (…{key[-6:]})"
-            status_color = SUCCESS
-        else:
-            status_text = "⚠️ Kein API-Key!\nBitte in Einstellungen eintragen."
-            status_color = DANGER
-        self._api_status = tk.Label(right, text=status_text, bg=BG_CARD, fg=status_color,
+        self._api_status = tk.Label(right, text="", bg=BG_CARD, fg=SUCCESS,
                                      font=FONT_SMALL, wraplength=180, anchor="w", justify="left")
         self._api_status.pack(anchor="w", padx=12, pady=4)
+        make_btn(right, "🔄  Provider neu laden", self._provider_aktualisieren,
+                 color=BG_INPUT, fg=TEXT).pack(fill="x", padx=10, pady=(0, 4))
         make_btn(right, "⚙  Einstellungen öffnen", self._zu_einstellungen,
-                 color=TEXT_LIGHT).pack(fill="x", padx=10, pady=(4, 8))
+                 color=TEXT_LIGHT).pack(fill="x", padx=10, pady=(0, 8))
+
+        # Header-Label Referenz für späteren Update
+        self._header_label = header.winfo_children()[1] if len(header.winfo_children()) > 1 else None
+        self._provider_aktualisieren()  # Initial befüllen
+
+    def _provider_aktualisieren(self):
+        """Liest ki_anbieter aus Config und passt Dropdown + Statuslabel an."""
+        cfg = load_config()
+        anbieter = cfg.get("ki_anbieter", "anthropic")
+
+        if anbieter == "ollama":
+            ollama_modell = cfg.get("ollama_modell", "llama3.2").strip() or "llama3.2"
+            ollama_url    = cfg.get("ollama_url", "http://localhost:11434").strip()
+            modelle = [ollama_modell]
+            self._modell_var.set(ollama_modell)
+            self._modell_cb.configure(values=modelle)
+            self._modell_label.config(text="Ollama-Modell")
+            # Header-Text anpassen
+            try:
+                hdr_label = [w for w in self.winfo_children()[0].winfo_children()
+                             if isinstance(w, tk.Label)][1]
+                hdr_label.config(text=f"Powered by Ollama ({ollama_url})")
+            except Exception:
+                pass
+            # Verbindungstest im Hintergrund
+            self._api_status.config(text="⏳ Ollama-Verbindung wird geprüft …", fg=TEXT_LIGHT)
+            threading.Thread(target=self._ollama_ping, args=(ollama_url,), daemon=True).start()
+        else:
+            claude_modelle = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+            current = cfg.get("ki_modell", "claude-opus-4-6")
+            if current not in claude_modelle:
+                current = "claude-opus-4-6"
+            self._modell_var.set(current)
+            self._modell_cb.configure(values=claude_modelle)
+            self._modell_label.config(text="KI-Modell (Claude)")
+            try:
+                hdr_label = [w for w in self.winfo_children()[0].winfo_children()
+                             if isinstance(w, tk.Label)][1]
+                hdr_label.config(text="Powered by Claude (Anthropic API)")
+            except Exception:
+                pass
+            key = cfg.get("anthropic_api_key", "").strip()
+            if key:
+                self._api_status.config(
+                    text=f"✅ API-Key gesetzt (…{key[-6:]})", fg=SUCCESS)
+            else:
+                self._api_status.config(
+                    text="⚠️ Kein API-Key!\nBitte in Einstellungen eintragen.", fg=DANGER)
+
+    def _ollama_ping(self, base_url: str):
+        """Prüft ob Ollama erreichbar ist und aktualisiert Statuslabel."""
+        try:
+            req = urllib.request.Request(base_url.rstrip("/") + "/api/tags", method="GET")
+            with urllib.request.urlopen(req, timeout=4) as r:
+                data = json.loads(r.read().decode())
+            modelle = [m["name"] for m in data.get("models", [])]
+            info = f"✅ Ollama verbunden\nModelle: {', '.join(modelle[:4]) or '–'}"
+            self.after(0, lambda: self._api_status.config(text=info, fg=SUCCESS))
+        except Exception as ex:
+            info = f"❌ Ollama nicht erreichbar:\n{ex}"
+            self.after(0, lambda: self._api_status.config(text=info, fg=DANGER))
 
     def _modell_geaendert(self, event=None):
         """Gewähltes Modell in Konfiguration speichern."""
         cfg = load_config()
-        cfg["ki_modell"] = self._modell_var.get()
+        anbieter = cfg.get("ki_anbieter", "anthropic")
+        if anbieter == "ollama":
+            cfg["ollama_modell"] = self._modell_var.get()
+        else:
+            cfg["ki_modell"] = self._modell_var.get()
         save_config(cfg)
 
     def _zu_einstellungen(self):
@@ -5843,16 +5908,27 @@ Antworte immer auf Deutsch.
         self._entry.delete(0, "end")
         self._append_chat("user_bubble", f"👤 Du: {frage}")
         self._messages.append({"role": "user", "content": frage})
-        self._append_chat("hint", "⏳ Claude denkt …")
+        anbieter = load_config().get("ki_anbieter", "anthropic")
+        warte_text = "⏳ Ollama denkt …" if anbieter == "ollama" else "⏳ Claude denkt …"
+        self._append_chat("hint", warte_text)
         threading.Thread(target=self._api_call_thread,
                          args=(list(self._messages),), daemon=True).start()
 
     def _api_call_thread(self, messages):
         cfg = load_config()
+        anbieter = cfg.get("ki_anbieter", "anthropic")
+
+        if anbieter == "ollama":
+            self._ollama_call_thread(messages, cfg)
+        else:
+            self._anthropic_call_thread(messages, cfg)
+
+    def _anthropic_call_thread(self, messages, cfg):
+        """API-Call an Anthropic Claude."""
         key = cfg.get("anthropic_api_key", "").strip()
         if not key:
             self.after(0, lambda: self._append_chat("error_msg",
-                "❌ Kein Anthropic API-Key. Bitte in Einstellungen eintragen."))
+                "❌ Kein Anthropic API-Key. Bitte in Einstellungen → KI-Administration eintragen."))
             return
         try:
             modell = cfg.get("ki_modell", "claude-opus-4-6")
@@ -5875,8 +5951,6 @@ Antworte immer auf Deutsch.
                 data = json.loads(resp.read().decode("utf-8"))
             antwort = data["content"][0]["text"]
             self._messages.append({"role": "assistant", "content": antwort})
-
-            # SQL ausführen wenn Antwort enthält
             if "SQL:" in antwort:
                 self.after(0, lambda a=antwort: self._handle_sql_response(a))
             else:
@@ -5886,6 +5960,42 @@ Antworte immer auf Deutsch.
             self.after(0, lambda b=body: self._append_chat("error_msg", f"❌ API-Fehler: {b[:200]}"))
         except Exception as ex:
             self.after(0, lambda x=str(ex): self._append_chat("error_msg", f"❌ Fehler: {x}"))
+
+    def _ollama_call_thread(self, messages, cfg):
+        """API-Call an lokales Ollama (POST /api/chat)."""
+        base_url = cfg.get("ollama_url", "http://localhost:11434").strip().rstrip("/")
+        modell   = cfg.get("ollama_modell", "llama3.2").strip() or "llama3.2"
+        # System-Nachricht als erstes Element in messages-Liste (Ollama-Format)
+        ollama_msgs = [{"role": "system", "content": self._SCHEMA_KONTEXT}] + messages
+        try:
+            payload = json.dumps({
+                "model":    modell,
+                "messages": ollama_msgs,
+                "stream":   False
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                f"{base_url}/api/chat",
+                data=payload,
+                headers={"content-type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            antwort = data["message"]["content"]
+            self._messages.append({"role": "assistant", "content": antwort})
+            label = f"🤖 {modell}"
+            if "SQL:" in antwort:
+                self.after(0, lambda a=antwort: self._handle_sql_response(a))
+            else:
+                self.after(0, lambda a=antwort, l=label:
+                           self._append_chat("ki_bubble", f"{l}: {a}"))
+        except urllib.error.URLError as e:
+            self.after(0, lambda x=str(e): self._append_chat("error_msg",
+                f"❌ Ollama nicht erreichbar ({base_url}):\n{x}\n"
+                "Bitte sicherstellen dass Ollama läuft: ollama serve"))
+        except Exception as ex:
+            self.after(0, lambda x=str(ex): self._append_chat("error_msg",
+                f"❌ Ollama-Fehler: {x}"))
 
     def _handle_sql_response(self, antwort):
         """SQL aus KI-Antwort extrahieren, ausführen, Ergebnis anzeigen."""

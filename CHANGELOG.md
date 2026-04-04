@@ -7,6 +7,18 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.13.1] — 2026-04-04
+
+### Behoben
+
+- **KI-Assistent: Ollama-Integration komplett verdrahtet**: `_api_call_thread()` liest jetzt `ki_anbieter` aus Einstellungen und routet zu `_anthropic_call_thread()` (Anthropic API) oder `_ollama_call_thread()` (Ollama `POST /api/chat`, `stream: false`); Ollama-Anfragen senden System-Prompt korrekt als erstes `messages`-Element; Timeout 60 s (statt 30 s für langsamere lokale Modelle)
+
+- **KI-Assistent: Modell-Dropdown dynamisch**: Bei Ollama-Anbieter zeigt das Dropdown das konfigurierte `ollama_modell` (z.B. `gemma3:4b`); bei Anthropic die drei Claude-Modelle; Auswahl wird in der richtigen Config-Einstellung gespeichert
+
+- **KI-Assistent: Provider-Status-Widget**: Neuer Button „🔄 Provider neu laden" synchronisiert UI mit aktuellen Einstellungen; bei Ollama wird automatisch `GET /api/tags` aufgerufen und verfügbare Modelle werden im Statusfeld angezeigt; Header-Label und Warte-Text wechseln je nach Anbieter
+
+---
+
 ## [0.13.0] — 2026-03-29
 
 ### Neu
