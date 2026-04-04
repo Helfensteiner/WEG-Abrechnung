@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.13.1"
+APP_VERSION = "0.14.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.13.1 — Bugfix KI-Assistent Ollama-Integration:
@@ -81,6 +81,21 @@ APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #             Modell-Dropdown zeigt Claude-Modelle ODER das konfigurierte Ollama-Modell;
 #             _provider_aktualisieren() synct UI mit Einstellungen inkl. Verbindungstest;
 #             "🔄 Provider neu laden"-Button; Header- und Warte-Text anbieterabhängig;
+#   0.14.0 — Issues #33, #34, #35, #36:
+#             #33 KI-Modell-Dropdown: zeigt ALLE konfigurierten Modelle beider Anbieter;
+#                 _alle_ki_modelle() + _parse_modell_auswahl(); Config-Key ki_aktives_modell;
+#                 Routing per Dropdown-Auswahl statt ki_anbieter-Schlüssel;
+#             #34 KI-Zugriffssteuerung in Rollen & Rechte: neuer Bereich "KI-Administration";
+#                 "Zugriff nach Rollen"-Feld aus Einstellungen entfernt; KI-Admin-Tab prüft
+#                 hat_recht("KI-Administration","lesen"); init_db() vergibt Default-Rechte;
+#             #35 KI-Rechnungsanalyse: "🤖 KI-Analyse starten"-Button in ZahlungDialog;
+#                 liest PDF/Bild, sendet an KI, parst JSON-Antwort, befüllt Formularfelder;
+#                 neues Feld "Rechnungssteller"; DB-Spalte zahlungen.rechnungssteller;
+#                 Dateiname-Generierung YYYY-MM-TT_Rechnungssteller_N; Lernfunktion;
+#             #36 Custom-Kategorien: BuchhaltungPage._sync_kategorien_from_config() lädt
+#                 custom_kategorien aus Config bei Init — Buchung-Dialog und Kostenarten-Tab
+#                 zeigen jetzt dieselben Kategorien;
+#             SQL-Injection WartungPage._load() behoben (parametrisiertes Query);
 #   0.13.0 — Issues #19, #20, #22, #30, #31, #32:
 #             #19 Wohngeld Soll/Ist: neuer Tab "💰 Wohngeld Soll/Ist" in BuchhaltungPage;
 #                 KPI-Zeile + Tabelle pro Eigentümer (MEA-Soll vs. gez. Hausgeld, Saldo, Status);
@@ -520,21 +535,29 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
         "ALTER TABLE mieter ADD COLUMN waschmaschinen INTEGER DEFAULT 1",
         "ALTER TABLE mieter ADD COLUMN trockner_wasserkuehlung INTEGER DEFAULT 0",
         "ALTER TABLE zahlungen ADD COLUMN beleg_dateipfad TEXT",
+        "ALTER TABLE zahlungen ADD COLUMN rechnungssteller TEXT",  # #35 KI-Erkennung
     ]:
         try:
             c.execute(sql)
             conn.commit()
         except Exception:
             pass
-    # Recht "KI-Assistent" zu allen vorhandenen Rollen hinzufügen (falls fehlt)
+    # Rechte "KI-Assistent" und "KI-Administration" zu allen vorhandenen Rollen hinzufügen (#34 fix)
     for rolle_row in c.execute("SELECT id, ist_superadmin FROM rollen").fetchall():
-        existing = c.execute("SELECT 1 FROM rechte WHERE rolle_id=? AND bereich='KI-Assistent'",
-                             (rolle_row[0],)).fetchone()
-        if not existing:
-            # Superadmin und Administrator: voller Zugriff; Benutzer: nur lesen
-            zugriff = 1 if rolle_row[1] or True else 0
-            c.execute("INSERT INTO rechte (rolle_id, bereich, lesen, schreiben, loeschen) VALUES (?,?,?,?,?)",
-                      (rolle_row[0], "KI-Assistent", 1, zugriff, 0))
+        for bereich in ("KI-Assistent", "KI-Administration"):
+            existing = c.execute("SELECT 1 FROM rechte WHERE rolle_id=? AND bereich=?",
+                                 (rolle_row[0], bereich)).fetchone()
+            if not existing:
+                ist_super = bool(rolle_row[1])
+                # KI-Administration: nur Superadmin/Admin; KI-Assistent: alle
+                if bereich == "KI-Administration":
+                    lesen = 1 if ist_super else 0
+                    schreiben = 1 if ist_super else 0
+                else:
+                    lesen = 1
+                    schreiben = 1
+                c.execute("INSERT INTO rechte (rolle_id, bereich, lesen, schreiben, loeschen) VALUES (?,?,?,?,0)",
+                          (rolle_row[0], bereich, lesen, schreiben))
     conn.commit()
     # Create default admin user if no users exist
     import hashlib
@@ -552,11 +575,12 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
         benutzer_id = c.execute("SELECT id FROM rollen WHERE name='Benutzer'").fetchone()[0]
         bereiche = ["Übersicht","Eigentümer","Wohnungen","Mieter","Kontoauszug","Buchhaltung",
                     "Wartung","Nebenkosten","Aufteilungen","Nachrichten","Dokumente",
-                    "Benutzer","Rollen & Rechte","Einstellungen","KI-Assistent"]
+                    "Benutzer","Rollen & Rechte","Einstellungen","KI-Assistent","KI-Administration"]
         for b in bereiche:
             c.execute("INSERT INTO rechte (rolle_id,bereich,lesen,schreiben,loeschen) VALUES (?,?,1,1,1)", (admin_id, b))
             c.execute("INSERT INTO rechte (rolle_id,bereich,lesen,schreiben,loeschen) VALUES (?,?,1,1,0)", (benutzer_id, b))
-        c.execute("UPDATE rechte SET lesen=0,schreiben=0,loeschen=0 WHERE rolle_id=? AND bereich IN ('Benutzer','Rollen & Rechte','Einstellungen')", (benutzer_id,))
+        c.execute("UPDATE rechte SET lesen=0,schreiben=0,loeschen=0 WHERE rolle_id=? "
+                  "AND bereich IN ('Benutzer','Rollen & Rechte','Einstellungen','KI-Administration')", (benutzer_id,))
         conn.commit()
     # Assign Superadmin role to admin user
     sa_role = c.execute("SELECT id FROM rollen WHERE ist_superadmin=1").fetchone()
@@ -1755,7 +1779,26 @@ class BuchhaltungPage(tk.Frame):
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)
         self._active_tab = "buchungen"
+        # Custom-Kategorien aus Config in Klassenliste laden (#36 fix)
+        self._sync_kategorien_from_config()
         self._build()
+
+    @classmethod
+    def _sync_kategorien_from_config(cls):
+        """Lädt custom_kategorien und deaktivierte_kategorien aus Config
+        in die Klassenvariablen KATEGORIEN und KOSTENARTEN (einmalig bei Init)."""
+        cfg = load_config()
+        custom = cfg.get("custom_kategorien", [])
+        for c in custom:
+            name = c.get("name", "")
+            if name and name not in cls.KATEGORIEN:
+                cls.KATEGORIEN.insert(-1, name)   # vor "Kategorie offen"
+            if name and name not in cls.KOSTENARTEN:
+                cls.KOSTENARTEN[name] = {
+                    "kategorie": c.get("kategorie", "Sonstiges"),
+                    "umlagefaehig": c.get("umlagefaehig", False),
+                    "schluessel": c.get("schluessel", "–"),
+                }
 
     # ── Aufbau ────────────────────────────────────────────────────────────────
 
@@ -1993,10 +2036,11 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
-                 v.get("status", "Geprüft"), v.get("beleg_dateipfad")))
+                 v.get("status", "Geprüft"), v.get("beleg_dateipfad"),
+                 v.get("rechnungssteller") or None))
             conn.commit(); conn.close()
             if self._active_tab == "buchungen": self._load_buchungen()
 
@@ -2016,11 +2060,11 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
                  v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"),
-                 v.get("beleg_dateipfad"), int(sel[0])))
+                 v.get("beleg_dateipfad"), v.get("rechnungssteller") or None, int(sel[0])))
             conn.commit(); conn.close()
             self._load_buchungen()
 
@@ -2901,7 +2945,7 @@ class BuchhaltungPage(tk.Frame):
 
 class ZahlungDialog(BaseDialog):
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Buchung", 520, 540)
+        super().__init__(parent, "Buchung", 540, 620)
         r = dict(row) if row else {}
         self._add_field("Datum (JJJJ-MM-TT) *", "datum",
                         r.get("datum", date.today().isoformat()))
@@ -2911,15 +2955,17 @@ class ZahlungDialog(BaseDialog):
         self._add_field("Kategorie", "kategorie", r.get("kategorie", ""),
                         widget_type="combo",
                         options=BuchhaltungPage.aktive_kategorien())
+        self._add_field("Rechnungssteller", "rechnungssteller",
+                        r.get("rechnungssteller", "") or "")   # #35
         self._add_field("Beschreibung", "beschreibung", r.get("beschreibung", ""))
         self._add_field("Belegnummer",  "belegnr",      r.get("belegnr", ""))
         self._add_field("Status", "status", r.get("status", "Neu"),
                         widget_type="combo", options=["Neu", "Geprüft", "Freigegeben"])
 
-        # Beleg-Datei
+        # ── Beleg-Datei + KI-Analyse (#35) ───────────────────────────────────
         tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
         beleg_frame = tk.Frame(self._body, bg=BG_CARD)
-        beleg_frame.pack(fill="x", padx=20, pady=(0, 6))
+        beleg_frame.pack(fill="x", padx=20, pady=(0, 4))
         tk.Label(beleg_frame, text="Beleg-Datei", bg=BG_CARD, fg=TEXT_LIGHT,
                  font=FONT_SMALL).pack(anchor="w")
         row_f = tk.Frame(beleg_frame, bg=BG_CARD)
@@ -2932,6 +2978,21 @@ class ZahlungDialog(BaseDialog):
         beleg_entry.pack(side="left", fill="x", expand=True, ipady=5)
         make_btn(row_f, "📂 Durchsuchen", self._browse_beleg,
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(6, 0))
+
+        # KI-Analyse-Button (nur sichtbar wenn KI-Assistent-Recht vorhanden)
+        # KI-Analyse-Button (#35): immer anzeigen, aber disabled wenn kein Recht (#7 fix)
+        ki_row = tk.Frame(beleg_frame, bg=BG_CARD)
+        ki_row.pack(fill="x", pady=(4, 0))
+        ki_hat_recht = hat_recht("KI-Assistent", "lesen")
+        self._ki_btn = make_btn(ki_row, "🤖 KI-Analyse starten",
+                                self._ki_analyse_starten, color=ACCENT2)
+        self._ki_btn.pack(side="left")
+        if not ki_hat_recht:
+            self._ki_btn.config(state="disabled")
+        self._ki_status_lbl = tk.Label(ki_row,
+            text="" if ki_hat_recht else "🔒 Kein Recht für KI-Assistent",
+            bg=BG_CARD, fg=TEXT_LIGHT if ki_hat_recht else DANGER, font=FONT_SMALL)
+        self._ki_status_lbl.pack(side="left", padx=(10, 0))
 
     def _browse_beleg(self):
         from tkinter import filedialog
@@ -2946,6 +3007,248 @@ class ZahlungDialog(BaseDialog):
         )
         if path:
             self._beleg_var.set(path)
+
+    # ── KI-Analyse (#35) ──────────────────────────────────────────────────────
+
+    def _ki_analyse_starten(self):
+        """Startet KI-Analyse der Beleg-Datei im Hintergrund-Thread (#35)."""
+        pfad = self._beleg_var.get().strip()
+        if not pfad:
+            messagebox.showwarning("Kein Beleg", "Bitte zuerst eine Beleg-Datei auswählen.",
+                                   parent=self)
+            return
+        import os
+        if not os.path.isfile(pfad):
+            messagebox.showwarning("Datei nicht gefunden",
+                                   f"Datei nicht gefunden:\n{pfad}", parent=self)
+            return
+        # Größenprüfung: max. 20 MB (#13 fix)
+        if os.path.getsize(pfad) > 20 * 1024 * 1024:
+            messagebox.showwarning("Datei zu groß",
+                                   "Die Beleg-Datei ist zu groß (max. 20 MB für KI-Analyse).",
+                                   parent=self)
+            return
+        cfg = load_config()
+        # Modell ermitteln: ki_aktives_modell oder Fallback auf konfigurierten Anbieter
+        aktiv = cfg.get("ki_aktives_modell", "")
+        if aktiv:
+            anbieter, modell = KiAssistentPage._parse_modell_auswahl(aktiv)
+        else:
+            anbieter = cfg.get("ki_anbieter", "anthropic")
+            modell = cfg.get("ki_modell", "claude-opus-4-6") if anbieter == "anthropic" \
+                     else cfg.get("ollama_modell", "llama3.2")
+
+        if hasattr(self, "_ki_status_lbl"):
+            self._ki_status_lbl.config(text="⏳ KI analysiert …", fg=TEXT_LIGHT)
+        if hasattr(self, "_ki_btn"):
+            self._ki_btn.config(state="disabled")
+
+        threading.Thread(target=self._ki_analyse_thread,
+                         args=(pfad, anbieter, modell, cfg), daemon=True).start()
+
+    def _ki_analyse_thread(self, pfad: str, anbieter: str, modell: str, cfg: dict):
+        """Hintergrund-Thread: liest Datei, sendet an KI, parst Ergebnis (#35)."""
+        import os, base64
+        kategorien = BuchhaltungPage.aktive_kategorien()
+        ext = os.path.splitext(pfad)[1].lower()
+        try:
+            # ── Datei-Inhalt vorbereiten ──────────────────────────────────
+            if ext == ".pdf":
+                # PDF als Text extrahieren (pypdf)
+                try:
+                    import pypdf
+                    with open(pfad, "rb") as fh:
+                        reader = pypdf.PdfReader(fh)
+                        seiten_text = "\n".join(p.extract_text() or "" for p in reader.pages)
+                    inhalt_typ = "text"
+                    inhalt = seiten_text[:6000]  # max 6000 Zeichen
+                except ImportError:
+                    inhalt_typ = "text"
+                    inhalt = "(PDF konnte nicht gelesen werden – pypdf nicht installiert)"
+            elif ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
+                with open(pfad, "rb") as fh:
+                    raw = fh.read()
+                inhalt_typ = "image"
+                inhalt = base64.b64encode(raw).decode()
+                mime = "image/jpeg" if ext in (".jpg", ".jpeg") else \
+                       ("image/png" if ext == ".png" else "image/tiff")
+            else:
+                inhalt_typ = "text"
+                with open(pfad, "r", errors="replace") as fh:
+                    inhalt = fh.read(4000)
+
+            # ── KI-Prompt ────────────────────────────────────────────────
+            kat_liste = ", ".join(f'"{k}"' for k in kategorien[:30])
+            prompt = (
+                "Analysiere diesen Buchungsbeleg und extrahiere folgende Felder als JSON.\n"
+                "Antworte NUR mit einem JSON-Objekt – kein Text davor oder danach.\n\n"
+                "Felder:\n"
+                '  "datum": Rechnungsdatum im Format JJJJ-MM-TT (falls nicht gefunden: "")\n'
+                '  "belegnr": Rechnungs- oder Belegnummer (falls nicht gefunden: "")\n'
+                '  "beschreibung": kurze Beschreibung der Leistung (max. 80 Zeichen)\n'
+                f'  "kategorie": passendste Kategorie aus dieser Liste: [{kat_liste}] (oder "")\n'
+                '  "rechnungssteller": Name des Absenders/Lieferanten\n'
+                '  "betrag": Gesamtbetrag als Dezimalzahl ohne Währungssymbol (z.B. 123.45)\n\n'
+            )
+            if inhalt_typ == "text":
+                prompt += f"Belegtext:\n{inhalt}"
+
+            # ── API-Aufruf ────────────────────────────────────────────────
+            antwort_text = ""
+            if anbieter == "anthropic":
+                key = cfg.get("anthropic_api_key", "").strip()
+                if not key:
+                    raise ValueError("Kein Anthropic API-Key konfiguriert.")
+                if inhalt_typ == "image":
+                    messages = [{"role": "user", "content": [
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": mime, "data": inhalt}},
+                        {"type": "text", "text": prompt}
+                    ]}]
+                else:
+                    messages = [{"role": "user", "content": prompt}]
+                payload = json.dumps({
+                    "model": modell, "max_tokens": 512,
+                    "messages": messages
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    "https://api.anthropic.com/v1/messages", data=payload,
+                    headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode())
+                # Robuste Fehlerbehandlung Anthropic (#18 fix)
+                try:
+                    antwort_text = data["content"][0]["text"]
+                except (KeyError, IndexError) as e:
+                    raise ValueError(f"Unerwartetes Anthropic-Antwortformat: {data}") from e
+            else:
+                # Ollama: keine Bild-Unterstützung für einfache Modelle
+                base_url = cfg.get("ollama_url", "http://localhost:11434").strip().rstrip("/")
+                # URL-Schema validieren (SSRF-Prävention, #14 fix)
+                import urllib.parse as _urlparse
+                parsed = _urlparse.urlparse(base_url)
+                if parsed.scheme not in ("http", "https"):
+                    raise ValueError(f"Ungültige Ollama-URL (nur http/https erlaubt): {base_url}")
+                msgs = [{"role": "user", "content": prompt}]
+                payload = json.dumps({"model": modell, "messages": msgs,
+                                      "stream": False}).encode("utf-8")
+                req = urllib.request.Request(f"{base_url}/api/chat", data=payload,
+                    headers={"content-type": "application/json"})
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read().decode())
+                try:
+                    antwort_text = data["message"]["content"]
+                except KeyError as e:
+                    raise ValueError(f"Unerwartetes Ollama-Antwortformat: {data}") from e
+
+            # ── JSON parsen (#15 fix: Regex für verschachtelte Objekte) ────
+            import re
+            # Versuche direktes JSON-Parsing zuerst
+            try:
+                ki_daten = json.loads(antwort_text.strip())
+            except (json.JSONDecodeError, ValueError):
+                # Fallback: JSON-Block aus Fließtext extrahieren
+                json_match = re.search(r'\{.*\}', antwort_text, re.DOTALL)
+                if not json_match:
+                    raise ValueError(f"KI-Antwort enthält kein JSON:\n{antwort_text[:300]}")
+                ki_daten = json.loads(json_match.group())
+            # Keys normalisieren (Groß-/Kleinschreibung, #20 fix)
+            ki_daten = {k.lower(): v for k, v in ki_daten.items()}
+            # Widget-Check vor after()-Aufruf (#3 fix)
+            if self.winfo_exists():
+                self.after(0, lambda d=ki_daten: self._ki_felder_befuellen(d))
+
+        except Exception as ex:
+            msg = str(ex)
+            if self.winfo_exists():
+                self.after(0, lambda m=msg: self._ki_fehler(m))
+
+    def _ki_felder_befuellen(self, daten: dict):
+        """Füllt Dialog-Felder mit KI-extrahierten Daten (#35)."""
+        def _set(key, val):
+            if not val:
+                return
+            w = self._fields.get(key)
+            if not w:
+                return
+            if hasattr(w, "set"):
+                w.set(str(val))
+            elif hasattr(w, "delete"):
+                w.delete(0, "end")
+                w.insert(0, str(val))
+
+        if daten.get("datum"):
+            # ISO-Format (YYYY-MM-DD) direkt übernehmen, kein parse_datum nötig (#16 fix)
+            raw_datum = str(daten["datum"]).strip()
+            import re as _re
+            if _re.match(r'^\d{4}-\d{2}-\d{2}$', raw_datum):
+                _set("datum", raw_datum)
+            else:
+                # Fallback: parse_datum für andere Formate
+                _set("datum", parse_datum(raw_datum) or raw_datum)
+        if daten.get("belegnr"):
+            _set("belegnr", daten["belegnr"])
+        if daten.get("beschreibung"):
+            _set("beschreibung", daten["beschreibung"])
+        if daten.get("kategorie"):
+            kat = str(daten["kategorie"])
+            if kat in BuchhaltungPage.aktive_kategorien():
+                _set("kategorie", kat)
+        if daten.get("rechnungssteller"):
+            _set("rechnungssteller", daten["rechnungssteller"])
+            # Lernfunktion: Buchungsregel anlegen (#35, #5 fix: Typ aus Formular lesen)
+            typ_w = self._fields.get("typ")
+            buchungs_typ = typ_w.get() if typ_w and hasattr(typ_w, "get") else "Ausgabe"
+            lerne_buchung(daten["rechnungssteller"],
+                          daten.get("kategorie", ""),
+                          buchungs_typ,
+                          "Wohngeldkonto",
+                          ist_korrektur=False)
+            # Dateiname generieren: YYYY-MM-TT_Rechnungssteller_Zähler
+            self._beleg_dateiname_generieren(daten)
+        if daten.get("betrag"):
+            try:
+                _set("betrag", abs(float(str(daten["betrag"]).replace(",", "."))))
+            except Exception:
+                pass
+
+        if hasattr(self, "_ki_status_lbl"):
+            self._ki_status_lbl.config(text="✅ KI-Analyse abgeschlossen", fg=SUCCESS)
+        if hasattr(self, "_ki_btn"):
+            self._ki_btn.config(state="normal")
+
+    def _beleg_dateiname_generieren(self, daten: dict):
+        """Generiert Dateiname: YYYY-MM-TT_Rechnungssteller_N (#35)."""
+        import os, re
+        pfad = self._beleg_var.get().strip()
+        if not pfad:
+            return
+        datum = daten.get("datum", date.today().isoformat()) or date.today().isoformat()
+        steller = re.sub(r'[^\w\- ]', '', daten.get("rechnungssteller", "Unbekannt"))
+        steller = steller.strip().replace(" ", "_")[:30]
+        verz = os.path.dirname(pfad)
+        ext = os.path.splitext(pfad)[1]
+        zaehler = 1
+        while True:
+            neu = os.path.join(verz, f"{datum}_{steller}_{zaehler:02d}{ext}")
+            if not os.path.exists(neu) or neu == pfad:
+                break
+            zaehler += 1
+        try:
+            if pfad != neu:
+                import shutil
+                shutil.copy2(pfad, neu)
+            self._beleg_var.set(neu)
+        except Exception:
+            pass  # Umbenennung optional
+
+    def _ki_fehler(self, msg: str):
+        if hasattr(self, "_ki_status_lbl"):
+            self._ki_status_lbl.config(text=f"❌ Fehler: {msg[:60]}", fg=DANGER)
+        if hasattr(self, "_ki_btn"):
+            self._ki_btn.config(state="normal")
+        messagebox.showerror("KI-Fehler", f"KI-Analyse fehlgeschlagen:\n{msg}", parent=self)
 
     def _on_save(self):
         v = self._get_values()
@@ -2997,9 +3300,12 @@ class WartungPage(tk.Frame):
         conn = get_db()
         s = self._status_var.get()
         q = "SELECT * FROM wartung"
-        if s != "Alle": q += f" WHERE status='{s}'"
+        params = []
+        if s != "Alle":
+            q += " WHERE status=?"  # parametrisiert (kein SQL-Injection-Risiko)
+            params.append(s)
         q += " ORDER BY CASE prioritaet WHEN 'Hoch' THEN 1 WHEN 'Mittel' THEN 2 ELSE 3 END, erstellt_am DESC"
-        for r in conn.execute(q):
+        for r in conn.execute(q, params):
             self.tree.insert("", "end", iid=r["id"], values=(
                 r["titel"], r["einheit"] or "–", r["prioritaet"],
                 r["status"], fmt_date(r["erstellt_am"]),
@@ -5816,49 +6122,64 @@ Antworte immer auf Deutsch.
         self._header_label = header.winfo_children()[1] if len(header.winfo_children()) > 1 else None
         self._provider_aktualisieren()  # Initial befüllen
 
-    def _provider_aktualisieren(self):
-        """Liest ki_anbieter aus Config und passt Dropdown + Statuslabel an."""
-        cfg = load_config()
-        anbieter = cfg.get("ki_anbieter", "anthropic")
+    # ── Hilfsmethoden Modell-Auswahl ─────────────────────────────────────────
 
-        if anbieter == "ollama":
-            ollama_modell = cfg.get("ollama_modell", "llama3.2").strip() or "llama3.2"
-            ollama_url    = cfg.get("ollama_url", "http://localhost:11434").strip()
-            modelle = [ollama_modell]
-            self._modell_var.set(ollama_modell)
-            self._modell_cb.configure(values=modelle)
-            self._modell_label.config(text="Ollama-Modell")
-            # Header-Text anpassen
-            try:
-                hdr_label = [w for w in self.winfo_children()[0].winfo_children()
-                             if isinstance(w, tk.Label)][1]
-                hdr_label.config(text=f"Powered by Ollama ({ollama_url})")
-            except Exception:
-                pass
-            # Verbindungstest im Hintergrund
-            self._api_status.config(text="⏳ Ollama-Verbindung wird geprüft …", fg=TEXT_LIGHT)
-            threading.Thread(target=self._ollama_ping, args=(ollama_url,), daemon=True).start()
+    @staticmethod
+    def _alle_ki_modelle(cfg: dict) -> list:
+        """Gibt alle konfigurierten KI-Modelle beider Anbieter zurück.
+        Format je Eintrag: "modellname  [Anbieter]" (#33 fix).
+        Nur Anbieter werden angeboten für die Konfigurationsdaten vorhanden sind."""
+        modelle = []
+        # Anthropic: verfügbar wenn API-Key gesetzt
+        if cfg.get("anthropic_api_key", "").strip():
+            for m in ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]:
+                modelle.append(f"{m}  [Anthropic]")
+        # Ollama: verfügbar wenn URL konfiguriert
+        if cfg.get("ollama_url", "").strip():
+            ollama_m = cfg.get("ollama_modell", "llama3.2").strip() or "llama3.2"
+            modelle.append(f"{ollama_m}  [Ollama]")
+        return modelle or ["claude-opus-4-6  [Anthropic]"]
+
+    @staticmethod
+    def _parse_modell_auswahl(auswahl: str) -> tuple:
+        """Zerlegt 'modellname  [Anbieter]' → (anbieter, modell).
+        Rückgabe z.B. ('anthropic', 'claude-opus-4-6') oder ('ollama', 'gemma3:4b')."""
+        if "  [Anthropic]" in auswahl:
+            return "anthropic", auswahl.replace("  [Anthropic]", "").strip()
+        if "  [Ollama]" in auswahl:
+            return "ollama", auswahl.replace("  [Ollama]", "").strip()
+        return "anthropic", auswahl.strip()
+
+    def _provider_aktualisieren(self):
+        """Befüllt Dropdown mit ALLEN konfigurierten KI-Modellen beider Anbieter (#33 fix)."""
+        cfg = load_config()
+        modelle = self._alle_ki_modelle(cfg)
+        self._modell_cb.configure(values=modelle)
+        self._modell_label.config(text="KI-Modell")
+
+        # Aktive Auswahl wiederherstellen
+        aktiv = cfg.get("ki_aktives_modell", "")
+        if aktiv and aktiv in modelle:
+            self._modell_var.set(aktiv)
+        elif modelle:
+            # Fallback: Ersten Eintrag wählen, der zum gespeicherten Anbieter passt
+            anbieter = cfg.get("ki_anbieter", "anthropic")
+            tag = "[Anthropic]" if anbieter == "anthropic" else "[Ollama]"
+            passend = [m for m in modelle if tag in m]
+            self._modell_var.set(passend[0] if passend else modelle[0])
+
+        # Statuszeile: Info über beide Anbieter
+        status_parts = []
+        key = cfg.get("anthropic_api_key", "").strip()
+        if key:
+            status_parts.append("✅ Anthropic: API-Key konfiguriert")
         else:
-            claude_modelle = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
-            current = cfg.get("ki_modell", "claude-opus-4-6")
-            if current not in claude_modelle:
-                current = "claude-opus-4-6"
-            self._modell_var.set(current)
-            self._modell_cb.configure(values=claude_modelle)
-            self._modell_label.config(text="KI-Modell (Claude)")
-            try:
-                hdr_label = [w for w in self.winfo_children()[0].winfo_children()
-                             if isinstance(w, tk.Label)][1]
-                hdr_label.config(text="Powered by Claude (Anthropic API)")
-            except Exception:
-                pass
-            key = cfg.get("anthropic_api_key", "").strip()
-            if key:
-                self._api_status.config(
-                    text=f"✅ API-Key gesetzt (…{key[-6:]})", fg=SUCCESS)
-            else:
-                self._api_status.config(
-                    text="⚠️ Kein API-Key!\nBitte in Einstellungen eintragen.", fg=DANGER)
+            status_parts.append("⚠️ Anthropic: kein API-Key")
+        ollama_url = cfg.get("ollama_url", "").strip()
+        if ollama_url:
+            status_parts.append(f"⏳ Ollama: {ollama_url} – wird geprüft …")
+            threading.Thread(target=self._ollama_ping, args=(ollama_url,), daemon=True).start()
+        self._api_status.config(text="\n".join(status_parts), fg=TEXT_LIGHT)
 
     def _ollama_ping(self, base_url: str):
         """Prüft ob Ollama erreichbar ist und aktualisiert Statuslabel."""
@@ -5874,13 +6195,16 @@ Antworte immer auf Deutsch.
             self.after(0, lambda: self._api_status.config(text=info, fg=DANGER))
 
     def _modell_geaendert(self, event=None):
-        """Gewähltes Modell in Konfiguration speichern."""
+        """Gewähltes Modell in Konfiguration speichern (#33 fix: provider:modell)."""
+        auswahl = self._modell_var.get()
         cfg = load_config()
-        anbieter = cfg.get("ki_anbieter", "anthropic")
+        cfg["ki_aktives_modell"] = auswahl
+        anbieter, modell = self._parse_modell_auswahl(auswahl)
+        cfg["ki_anbieter"] = anbieter
         if anbieter == "ollama":
-            cfg["ollama_modell"] = self._modell_var.get()
+            cfg["ollama_modell"] = modell
         else:
-            cfg["ki_modell"] = self._modell_var.get()
+            cfg["ki_modell"] = modell
         save_config(cfg)
 
     def _zu_einstellungen(self):
@@ -5908,7 +6232,9 @@ Antworte immer auf Deutsch.
         self._entry.delete(0, "end")
         self._append_chat("user_bubble", f"👤 Du: {frage}")
         self._messages.append({"role": "user", "content": frage})
-        anbieter = load_config().get("ki_anbieter", "anthropic")
+        # Anbieter aus aktiver Modell-Auswahl ableiten (#33 fix)
+        auswahl = self._modell_var.get()
+        anbieter, _ = self._parse_modell_auswahl(auswahl)
         warte_text = "⏳ Ollama denkt …" if anbieter == "ollama" else "⏳ Claude denkt …"
         self._append_chat("hint", warte_text)
         threading.Thread(target=self._api_call_thread,
@@ -5916,14 +6242,20 @@ Antworte immer auf Deutsch.
 
     def _api_call_thread(self, messages):
         cfg = load_config()
-        anbieter = cfg.get("ki_anbieter", "anthropic")
+        # Anbieter aus aktueller Dropdown-Auswahl ableiten (#33 fix)
+        auswahl = self._modell_var.get() if hasattr(self, "_modell_var") else ""
+        if auswahl:
+            anbieter, modell = self._parse_modell_auswahl(auswahl)
+        else:
+            anbieter = cfg.get("ki_anbieter", "anthropic")
+            modell = ""
 
         if anbieter == "ollama":
-            self._ollama_call_thread(messages, cfg)
+            self._ollama_call_thread(messages, cfg, modell or None)
         else:
-            self._anthropic_call_thread(messages, cfg)
+            self._anthropic_call_thread(messages, cfg, modell or None)
 
-    def _anthropic_call_thread(self, messages, cfg):
+    def _anthropic_call_thread(self, messages, cfg, modell_override=None):
         """API-Call an Anthropic Claude."""
         key = cfg.get("anthropic_api_key", "").strip()
         if not key:
@@ -5931,7 +6263,7 @@ Antworte immer auf Deutsch.
                 "❌ Kein Anthropic API-Key. Bitte in Einstellungen → KI-Administration eintragen."))
             return
         try:
-            modell = cfg.get("ki_modell", "claude-opus-4-6")
+            modell = modell_override or cfg.get("ki_modell", "claude-opus-4-6")
             payload = json.dumps({
                 "model": modell,
                 "max_tokens": 1024,
@@ -5961,10 +6293,10 @@ Antworte immer auf Deutsch.
         except Exception as ex:
             self.after(0, lambda x=str(ex): self._append_chat("error_msg", f"❌ Fehler: {x}"))
 
-    def _ollama_call_thread(self, messages, cfg):
+    def _ollama_call_thread(self, messages, cfg, modell_override=None):
         """API-Call an lokales Ollama (POST /api/chat)."""
         base_url = cfg.get("ollama_url", "http://localhost:11434").strip().rstrip("/")
-        modell   = cfg.get("ollama_modell", "llama3.2").strip() or "llama3.2"
+        modell   = modell_override or cfg.get("ollama_modell", "llama3.2").strip() or "llama3.2"
         # System-Nachricht als erstes Element in messages-Liste (Ollama-Format)
         ollama_msgs = [{"role": "system", "content": self._SCHEMA_KONTEXT}] + messages
         try:
@@ -6240,9 +6572,20 @@ class EinstellungenPage(tk.Frame):
         make_btn(btn_backup_row, "♻ Datenbank wiederherstellen", self._db_restore,
                  color=DANGER).pack(side="left")
 
-        # ── Tab 4: KI-Administration ──────────────────────────────────────────
+        # ── Tab 4: KI-Administration (nur für Berechtigte) ────────────────────
         t4_outer, t4 = self._scrollable_tab(nb)
         nb.add(t4_outer, text="🤖 KI-Administration")
+        if not hat_recht("KI-Administration", "lesen"):
+            tk.Label(t4,
+                     text="🔒  Kein Zugriff auf KI-Administration.\n"
+                          "Bitte unter Rollen & Rechte die Berechtigung erteilen.",
+                     bg=BG_CARD, fg=DANGER, font=FONT_BODY,
+                     justify="center").pack(expand=True)
+        else:
+            self._build_ki_admin_tab(t4)
+
+    def _build_ki_admin_tab(self, t4):
+        """Inhalt des KI-Administration Tabs (ausgelagert für Zugriffsschutz #34)."""
         self._section(t4, "KI-Anbieter")
 
         # Anbieter-Auswahl (Radio)
@@ -6275,11 +6618,13 @@ class EinstellungenPage(tk.Frame):
         self._path_field(self._ollama_frame, "Ollama Server-URL", "ollama_url", is_path=False)
         self._path_field(self._ollama_frame, "Ollama Modell (z.B. llama3.2)", "ollama_modell", is_path=False)
 
-        # Rollen-Zugriff
-        self._section(t4, "Zugriff nach Rolle")
-        tk.Label(t4, text="KI-Assistent verfügbar für folgende Rollen (kommagetrennt):",
-                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(0,4))
-        self._path_field(t4, "Erlaubte Rollen (z.B. Administrator, Verwalter)", "ki_rollen", is_path=False)
+        # Hinweis: Zugriffsrechte werden unter Rollen & Rechte verwaltet (#34)
+        self._section(t4, "Zugriffsverwaltung")
+        tk.Label(t4,
+                 text="Die Zugriffsrechte für KI-Assistent und KI-Administration werden\n"
+                      "unter  🔐 Rollen & Rechte  verwaltet – nicht hier.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 justify="left").pack(anchor="w", padx=20, pady=(0,8))
 
         # Provider-Sichtbarkeit initial setzen
         self._toggle_ki_provider()
@@ -6642,7 +6987,7 @@ class RollenverwaltungPage(tk.Frame):
     BEREICHE = ["Übersicht", "Eigentümer", "Wohnungen", "Mieter", "Kontoauszug",
                 "Buchhaltung", "Wartung", "Nebenkosten", "Aufteilungen",
                 "Nachrichten", "Dokumente", "Benutzer", "Rollen & Rechte",
-                "Einstellungen", "KI-Assistent"]
+                "Einstellungen", "KI-Assistent", "KI-Administration"]
 
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)

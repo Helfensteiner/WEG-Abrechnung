@@ -7,6 +7,32 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.14.0] — 2026-04-04
+
+### Neu
+
+- **#35 KI-Rechnungsanalyse in Buchungen**: Neuer Button „🤖 KI-Analyse starten" im ZahlungDialog öffnet eine automatische Extraktion aus der Beleg-Datei (PDF oder Bild); das KI-Modell extrahiert Rechnungsdatum, Belegnummer, Beschreibung, Kategorie, Rechnungssteller und Betrag und befüllt die Formularfelder; Dateiname wird automatisch als `YYYY-MM-DD_Rechnungssteller_N` generiert; Lernfunktion schreibt erkannte Buchungsregeln; Schaltfläche nur aktiviert wenn Berechtigung `KI-Assistent: Lesen` vorhanden; Dateigrößenprüfung max. 20 MB
+
+- **#35 Rechnungssteller-Feld**: Neues Datenbankfeld `zahlungen.rechnungssteller` und entsprechendes Eingabefeld im ZahlungDialog
+
+- **#33 KI-Modell-Dropdown zeigt alle konfigurierten Modelle**: Der KI-Assistent zeigt jetzt beide Anbieter gleichzeitig — Anthropic-Modelle (`[Anthropic]`) und Ollama-Modell (`[Ollama]`) — sofern konfiguriert; Auswahl bestimmt welche API aufgerufen wird; Config-Key `ki_aktives_modell` speichert die letzte Wahl
+
+- **#34 KI-Zugriffssteuerung in Rollen & Rechte**: Neuer Bereich „KI-Administration" in der Berechtigungsmatrix; steuert wer die KI-Einstellungen sehen und ändern darf; Standardrolle Benutzer hat keinen Zugriff
+
+### Geändert
+
+- **#34 „Zugriff nach Rollen"-Feld entfernt**: Der einfache Rollen-Text-Filter in Einstellungen → KI-Administration wurde entfernt; Zugriffssteuerung erfolgt jetzt über Rollen & Rechte (Bereich `KI-Administration`)
+
+- **#34 KI-Admin-Tab mit Zugriffsschutz**: Tab-Inhalt wird nur angezeigt wenn `hat_recht("KI-Administration", "lesen")` gilt
+
+### Behoben
+
+- **#36 Custom-Kategorien in Buchung-Dialog**: Benutzerdefinierte Kategorien aus dem Kostenarten-Tab erscheinen jetzt auch im Buchung-Dialog; `_sync_kategorien_from_config()` lädt `custom_kategorien` aus der Config beim App-Start
+
+- **SQL-Injection in WartungPage**: Status-Filter im Wartungsmodul verwendete f-String statt parametrisiertes Query — behoben
+
+---
+
 ## [0.13.1] — 2026-04-04
 
 ### Behoben
