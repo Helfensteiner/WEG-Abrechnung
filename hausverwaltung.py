@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.14.0"
+APP_VERSION = "0.14.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.13.1 — Bugfix KI-Assistent Ollama-Integration:
@@ -96,6 +96,10 @@ APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #                 custom_kategorien aus Config bei Init — Buchung-Dialog und Kostenarten-Tab
 #                 zeigen jetzt dieselben Kategorien;
 #             SQL-Injection WartungPage._load() behoben (parametrisiertes Query);
+#   0.14.1 — Issue #37:
+#             NameError KiAssistentPage → KIAssistentPage in _ki_analyse_starten behoben;
+#             Modell-Dropdown direkt im ZahlungDialog (Auswahl vor globalem Default);
+#             Beschreibungsfeld wird bei KI-Analyse nicht überschrieben wenn bereits gefüllt;
 #   0.13.0 — Issues #19, #20, #22, #30, #31, #32:
 #             #19 Wohngeld Soll/Ist: neuer Tab "💰 Wohngeld Soll/Ist" in BuchhaltungPage;
 #                 KPI-Zeile + Tabelle pro Eigentümer (MEA-Soll vs. gez. Hausgeld, Saldo, Status);
@@ -2989,6 +2993,17 @@ class ZahlungDialog(BaseDialog):
         self._ki_btn.pack(side="left")
         if not ki_hat_recht:
             self._ki_btn.config(state="disabled")
+        # Modell-Auswahl (#37): Dropdown für KI-Modell direkt im Dialog
+        _cfg_tmp = load_config()
+        _modelle = KIAssistentPage._alle_ki_modelle(_cfg_tmp)
+        _aktiv = _cfg_tmp.get("ki_aktives_modell", "")
+        self._ki_modell_var = tk.StringVar(value=_aktiv if _aktiv in _modelle else (_modelle[0] if _modelle else ""))
+        _modell_combo = ttk.Combobox(ki_row, textvariable=self._ki_modell_var,
+                                     values=_modelle, state="readonly", width=30,
+                                     font=FONT_SMALL)
+        _modell_combo.pack(side="left", padx=(8, 0))
+        if not ki_hat_recht:
+            _modell_combo.config(state="disabled")
         self._ki_status_lbl = tk.Label(ki_row,
             text="" if ki_hat_recht else "🔒 Kein Recht für KI-Assistent",
             bg=BG_CARD, fg=TEXT_LIGHT if ki_hat_recht else DANGER, font=FONT_SMALL)
@@ -3029,14 +3044,19 @@ class ZahlungDialog(BaseDialog):
                                    parent=self)
             return
         cfg = load_config()
-        # Modell ermitteln: ki_aktives_modell oder Fallback auf konfigurierten Anbieter
-        aktiv = cfg.get("ki_aktives_modell", "")
-        if aktiv:
-            anbieter, modell = KiAssistentPage._parse_modell_auswahl(aktiv)
+        # Modell ermitteln: zuerst aus Dialog-Dropdown (#37), dann ki_aktives_modell, dann Fallback
+        modell_auswahl = getattr(self, "_ki_modell_var", None)
+        modell_auswahl_str = modell_auswahl.get().strip() if modell_auswahl else ""
+        if modell_auswahl_str:
+            anbieter, modell = KIAssistentPage._parse_modell_auswahl(modell_auswahl_str)
         else:
-            anbieter = cfg.get("ki_anbieter", "anthropic")
-            modell = cfg.get("ki_modell", "claude-opus-4-6") if anbieter == "anthropic" \
-                     else cfg.get("ollama_modell", "llama3.2")
+            aktiv = cfg.get("ki_aktives_modell", "")
+            if aktiv:
+                anbieter, modell = KIAssistentPage._parse_modell_auswahl(aktiv)
+            else:
+                anbieter = cfg.get("ki_anbieter", "anthropic")
+                modell = cfg.get("ki_modell", "claude-opus-4-6") if anbieter == "anthropic" \
+                         else cfg.get("ollama_modell", "llama3.2")
 
         if hasattr(self, "_ki_status_lbl"):
             self._ki_status_lbl.config(text="⏳ KI analysiert …", fg=TEXT_LIGHT)
@@ -3189,8 +3209,15 @@ class ZahlungDialog(BaseDialog):
                 _set("datum", parse_datum(raw_datum) or raw_datum)
         if daten.get("belegnr"):
             _set("belegnr", daten["belegnr"])
+        # Beschreibung NUR befüllen wenn Feld leer (#37: nicht überschreiben)
         if daten.get("beschreibung"):
-            _set("beschreibung", daten["beschreibung"])
+            w_beschr = self._fields.get("beschreibung")
+            aktuell = ""
+            if w_beschr and hasattr(w_beschr, "get"):
+                aktuell = w_beschr.get().strip() if not hasattr(w_beschr, "index") \
+                          else w_beschr.get("1.0", "end-1c").strip()
+            if not aktuell:
+                _set("beschreibung", daten["beschreibung"])
         if daten.get("kategorie"):
             kat = str(daten["kategorie"])
             if kat in BuchhaltungPage.aktive_kategorien():

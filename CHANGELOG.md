@@ -7,6 +7,18 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.14.1] — 2026-04-04
+
+### Behoben
+
+- **#37 NameError `KiAssistentPage`**: `_ki_analyse_starten` referenzierte fälschlicherweise `KiAssistentPage._parse_modell_auswahl` statt `KIAssistentPage._parse_modell_auswahl`; der KI-Analyse-Button im Buchungsdialog war dadurch vollständig unbrauchbar
+
+- **#37 KI-Modell-Dropdown im Buchungsdialog**: Neues Combobox-Widget neben dem KI-Analyse-Button erlaubt die Modellauswahl direkt im Dialog (Anthropic-Modelle und Ollama); Auswahl hat Vorrang vor der globalen KI-Einstellung
+
+- **#37 Beschreibungsfeld nicht überschreiben**: `_ki_felder_befuellen` überschreibt das Feld „Beschreibung" jetzt nur noch wenn es leer ist; bereits eingetragene Beschreibungen bleiben erhalten
+
+---
+
 ## [0.14.0] — 2026-04-04
 
 ### Neu
