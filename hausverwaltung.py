@@ -72,9 +72,20 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.15.1"
+APP_VERSION = "0.16.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
+#   0.16.0 — Issues #38–#41:
+#             #38 Default Speicherpfade: get_pfad() anlegt Unterordner automatisch,
+#                 _get_default_import_dir, DokumentePage, EinstellungenPage.
+#             #39 Aufteilungstypen: Benutzerdefiniert kennzeichnen (ist_benutzerdefiniert),
+#                 aktiv/inaktiv Status, Typ "Ausgewählte Wohnungen" mit Multi-Select,
+#                 Super-Admin kann löschen (mit Verwendungs-Prüfung).
+#             #40 Buchungsregeln-Keywords: keywords-Spalte, vorschlag_kategorie nutzt Keywords,
+#                 Keyword-Suche mit 0.65 Konfidenz.
+#             #41 Wirtschaftsplan-Vorschläge: aus Vorjahres-Istdaten generieren,
+#                 WirtschaftsplanVorschlagDialog mit Preisanpassung pro Position + global.
+#   0.15.1 — Bugfix Buchhaltung Ordner-Struktur:
 #   0.13.1 — Bugfix KI-Assistent Ollama-Integration:
 #             _api_call_thread() liest ki_anbieter und routet zu _anthropic_call_thread()
 #             oder _ollama_call_thread() (POST /api/chat, stream=false);
@@ -175,6 +186,7 @@ DB_PATH = Path.home() / "hausverwaltung.db"
 # ── Konfiguration ───────────────────────────────────────────────────────────
 
 CONFIG_PATH = Path(__file__).parent / "einstellungen.json"
+APP_DIR = Path(__file__).parent  # Verzeichnis der Programmdatei (#38)
 
 def load_config():
     if CONFIG_PATH.exists():
@@ -188,6 +200,26 @@ def load_config():
 def save_config(cfg: dict):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+def get_pfad(schluessel: str, standard_unterordner: str) -> str:
+    """Gibt den konfigurierten Pfad zurück oder legt einen Standard-Unterordner an.
+
+    Wenn unter schluessel kein Pfad hinterlegt ist, wird automatisch ein Unterordner
+    im Programmverzeichnis angelegt, gespeichert und zurückgegeben (#38).
+    """
+    cfg = load_config()
+    pfad = cfg.get(schluessel, "")
+    if pfad and os.path.isdir(pfad):
+        return pfad
+    # Standard-Unterordner anlegen
+    standard = APP_DIR / standard_unterordner
+    try:
+        standard.mkdir(parents=True, exist_ok=True)
+        cfg[schluessel] = str(standard)
+        save_config(cfg)
+    except Exception:
+        pass
+    return str(standard)
 
 # ── Berechtigungen ──────────────────────────────────────────────────────────
 
@@ -422,6 +454,13 @@ CREATE TABLE IF NOT EXISTS aufteilungen (
     wert REAL,
     notizen TEXT
 );
+CREATE TABLE IF NOT EXISTS aufteilung_wohnungen (
+    id INTEGER PRIMARY KEY,
+    aufteilung_id INTEGER NOT NULL,
+    wohnung_id INTEGER NOT NULL,
+    UNIQUE(aufteilung_id, wohnung_id),
+    FOREIGN KEY (aufteilung_id) REFERENCES aufteilungen(id)
+);
 CREATE TABLE IF NOT EXISTS buchungsregeln (
     id INTEGER PRIMARY KEY,
     muster TEXT NOT NULL,
@@ -648,6 +687,9 @@ CREATE INDEX IF NOT EXISTS idx_ista_positionen_wohnung ON ista_positionen(wohnun
         "ALTER TABLE wohnungen ADD COLUMN bewohner_anzahl INTEGER DEFAULT 1",
         "ALTER TABLE ista_positionen ADD COLUMN abrechnungszeitraum_von DATE",
         "ALTER TABLE ista_positionen ADD COLUMN abrechnungszeitraum_bis DATE",
+        "ALTER TABLE aufteilungen ADD COLUMN aktiv INTEGER DEFAULT 1",  # #39
+        "ALTER TABLE aufteilungen ADD COLUMN ist_benutzerdefiniert INTEGER DEFAULT 0",  # #39
+        "ALTER TABLE buchungsregeln ADD COLUMN keywords TEXT",  # #40
     ]:
         try:
             c.execute(sql)
@@ -967,6 +1009,12 @@ def vorschlag_kategorie(buchungstext: str, betrag: float = None) -> tuple:
         muster = regel["muster"].lower() if regel["muster"] else ""
         if muster and muster in text_lower:
             return _treffer(regel, 0.85)
+
+    # Stufe 1b: Keyword-Suche in Buchungsregeln (#40)
+    for regel in regeln:
+        kws = [k.strip().lower() for k in (regel.get("keywords") or "").split(",") if k.strip()]
+        if any(kw and kw in text_lower for kw in kws):
+            return _treffer(regel, 0.65)  # Etwas unter direktem Muster-Match
 
     # Stufe 2: Auftraggeber-Match (bereinigt)
     if auftraggeber:
@@ -3887,7 +3935,8 @@ class DokumentDialog(BaseDialog):
         make_btn(row, "…", self._browse, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(4, 0))
 
     def _browse(self):
-        path = filedialog.askopenfilename(title="Datei auswählen")
+        initial_dir = get_pfad("pfad_dokumente", "Dokumente")  # #38
+        path = filedialog.askopenfilename(title="Datei auswählen", initialdir=initial_dir)
         if path:
             self._path_var.set(path)
 
@@ -4036,6 +4085,8 @@ class NebenkostenPage(tk.Frame):
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(8, 0))
         if hat_recht("Nebenkosten", "schreiben"):
             make_btn(wp_top, "＋ Eintrag", self._wp_new).pack(side="right")
+            make_btn(wp_top, "📊 Vorschlag aus Vorjahr", self._wp_vorschlag_erstellen,  # #41
+                     color=ACCENT2).pack(side="right", padx=(0, 8))
 
         cols_wp = ("Kategorie", "Gruppe", "Soll-Betrag", "Notizen")
         fw, self._tree_wp = make_table(self._view_wp, cols_wp, height=16)
@@ -4498,6 +4549,60 @@ class NebenkostenPage(tk.Frame):
             finally:
                 conn.close()
             self._load_wp()
+
+    def _wp_vorschlag_erstellen(self):  # #41
+        """Erstellt Wirtschaftsplan-Vorschläge aus Vorjahres-Ist-Daten."""
+        try:
+            aktuelles_jahr = int(self._wp_jahr.get())
+        except ValueError:
+            messagebox.showwarning("Eingabe", "Ungültige Jahreszahl.", parent=self); return
+        vorjahr = aktuelles_jahr - 1
+
+        # Vorjahres-Istdaten aus Buchungen laden
+        conn = get_db()
+        try:
+            ist_daten = {}
+            for r in conn.execute(
+                "SELECT kategorie, SUM(betrag) as summe FROM zahlungen "
+                "WHERE strftime('%Y', datum)=? AND typ='Ausgabe' "
+                "GROUP BY kategorie ORDER BY kategorie",
+                (str(vorjahr),)):
+                ist_daten[r["kategorie"]] = r["summe"] or 0.0
+
+            # Vorjahres-Soll-Daten
+            soll_daten = {}
+            for r in conn.execute(
+                "SELECT kategorie, betrag_soll FROM wirtschaftsplan WHERE jahr=?", (vorjahr,)):
+                soll_daten[r["kategorie"]] = r["betrag_soll"] or 0.0
+
+            # Bereits vorhandene Einträge für Zieljahr
+            ziel_vorhanden = {r["kategorie"] for r in
+                              conn.execute("SELECT kategorie FROM wirtschaftsplan WHERE jahr=?", (aktuelles_jahr,))}
+        finally:
+            conn.close()
+
+        if not ist_daten and not soll_daten:
+            messagebox.showinfo("Keine Daten",
+                f"Für {vorjahr} wurden keine Buchungen oder Wirtschaftsplan-Daten gefunden.",
+                parent=self); return
+
+        # Dialog öffnen
+        dlg = WirtschaftsplanVorschlagDialog(self, vorjahr, aktuelles_jahr, ist_daten, soll_daten, ziel_vorhanden)
+        self.wait_window(dlg)
+        if dlg.result:
+            conn = get_db()
+            try:
+                for kat, betrag in dlg.result.items():
+                    conn.execute(
+                        "INSERT OR REPLACE INTO wirtschaftsplan (jahr, kategorie, betrag_soll) VALUES (?,?,?)",
+                        (aktuelles_jahr, kat, betrag))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load_wp()
+            messagebox.showinfo("Fertig",
+                f"✅ {len(dlg.result)} Wirtschaftsplan-Positionen für {aktuelles_jahr} erstellt.",
+                parent=self)
 
     def _wp_soll_ist(self):
         try:
@@ -5289,6 +5394,166 @@ class WirtschaftsplanDialog(BaseDialog):
         self.result = v; self.destroy()
 
 
+class WirtschaftsplanVorschlagDialog(tk.Toplevel):  # #41
+    """Dialog zum Erstellen von Wirtschaftsplan-Vorschlägen aus Vorjahres-Ist-Daten."""
+
+    PREISANPASSBARE = ["Heizung", "Warmwasser", "Wasser/Abwasser", "Allgemeinstrom",
+                       "Fernwärme", "Gaskosten", "Stromkosten", "Wasserkosten"]
+
+    def __init__(self, parent, vorjahr: int, zieljahr: int, ist_daten: dict,
+                 soll_daten: dict, bereits_vorhanden: set):
+        super().__init__(parent)
+        self.title(f"Wirtschaftsplan {zieljahr} – Vorschlag aus {vorjahr}")
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(True, True)
+        self.configure(bg=BG_CARD)
+        self.geometry("780x620")
+        self.result = None
+
+        self._vorjahr = vorjahr
+        self._zieljahr = zieljahr
+        self._ist_daten = ist_daten
+        self._soll_daten = soll_daten
+        self._bereits_vorhanden = bereits_vorhanden
+        self._anpassung_vars = {}  # kategorie → prozent-StringVar
+        self._uebernehmen_vars = {}  # kategorie → BooleanVar
+
+        self._build()
+
+    def _build(self):
+        # Kopfzeile
+        hdr = tk.Frame(self, bg=BG_CARD)
+        hdr.pack(fill="x", padx=20, pady=(16, 8))
+        tk.Label(hdr, text=f"📊 Wirtschaftsplan {self._zieljahr} – Vorschlag",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(side="left")
+        tk.Label(hdr, text=f"Basis: Ist-Ausgaben {self._vorjahr}",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="right", padx=(0,4))
+
+        # Hinweis
+        tk.Label(self, text="✏ Passen Sie die Prozentwerte an (positiv = Erhöhung, negativ = Senkung).\n"
+                            "Deaktivieren Sie Positionen, die nicht übernommen werden sollen.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL, justify="left"
+                 ).pack(anchor="w", padx=20, pady=(0, 8))
+
+        # Tabellen-Bereich
+        frame_outer = tk.Frame(self, bg=BG_CARD, relief="sunken", bd=1)
+        frame_outer.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        canvas = tk.Canvas(frame_outer, bg=BG_CARD, highlightthickness=0)
+        vsb = ttk.Scrollbar(frame_outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=BG_CARD)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
+
+        # Spaltenköpfe
+        hdr_f = tk.Frame(inner, bg=BG_INPUT)
+        hdr_f.pack(fill="x")
+        for txt, w in [("✓", 30), ("Kategorie", 200), (f"Ist {self._vorjahr} (€)", 120),
+                       (f"Soll {self._vorjahr} (€)", 120), ("Anpassung %", 90), (f"Vorschlag {self._zieljahr} (€)", 130)]:
+            tk.Label(hdr_f, text=txt, bg=BG_INPUT, fg=TEXT, font=FONT_SMALL,
+                     width=max(len(txt), 8), anchor="w", padx=4).pack(side="left")
+
+        # Alle Kategorien aus Ist + Soll
+        alle_kats = sorted(set(list(self._ist_daten.keys()) + list(self._soll_daten.keys())))
+
+        for kat in alle_kats:
+            ist = self._ist_daten.get(kat, 0.0)
+            soll = self._soll_daten.get(kat, 0.0)
+            basis = ist if ist > 0 else soll  # Ist bevorzugen, Soll als Fallback
+
+            row_f = tk.Frame(inner, bg=BG_CARD)
+            row_f.pack(fill="x", pady=1)
+
+            # Checkbox
+            uebVar = tk.BooleanVar(value=kat not in self._bereits_vorhanden)
+            self._uebernehmen_vars[kat] = uebVar
+            tk.Checkbutton(row_f, variable=uebVar, bg=BG_CARD, activebackground=BG_CARD).pack(side="left", padx=4)
+
+            # Kategorie
+            farbe = SUCCESS if kat in self._bereits_vorhanden else TEXT
+            tk.Label(row_f, text=kat, bg=BG_CARD, fg=farbe, font=FONT_BODY,
+                     width=22, anchor="w").pack(side="left")
+
+            # Ist
+            tk.Label(row_f, text=fmt_euro(ist), bg=BG_CARD, fg=TEXT, font=FONT_SMALL,
+                     width=14, anchor="e").pack(side="left")
+            # Soll Vorjahr
+            tk.Label(row_f, text=fmt_euro(soll), bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     width=14, anchor="e").pack(side="left")
+
+            # Anpassung %
+            prozVar = tk.StringVar(value="0")
+            self._anpassung_vars[kat] = (prozVar, basis)
+            e = tk.Entry(row_f, textvariable=prozVar, width=6, bg=BG_INPUT, fg=TEXT, font=FONT_BODY, relief="flat")
+            e.pack(side="left", padx=4)
+
+            # Vorschau-Label
+            vorschau_lbl = tk.Label(row_f, text=fmt_euro(basis), bg=BG_CARD, fg=ACCENT2,
+                                    font=FONT_SMALL, width=15, anchor="e")
+            vorschau_lbl.pack(side="left", padx=4)
+
+            # Live-Update der Vorschau
+            def _update(_, v=prozVar, b=basis, lbl=vorschau_lbl):
+                try:
+                    pct = float(v.get().replace(",", "."))
+                    neu = b * (1 + pct / 100)
+                    lbl.config(text=fmt_euro(max(0, neu)))
+                except Exception:
+                    lbl.config(text="–")
+            prozVar.trace_add("write", _update)
+
+        # Hinweis für bereits vorhandene
+        if self._bereits_vorhanden:
+            tk.Label(self, text=f"🟢 Grün = bereits in {self._zieljahr} vorhanden (Checkbox deaktiviert)",
+                     bg=BG_CARD, fg=SUCCESS, font=FONT_SMALL).pack(anchor="w", padx=20)
+
+        # Globale Anpassung
+        glob_f = tk.Frame(self, bg=BG_CARD)
+        glob_f.pack(fill="x", padx=20, pady=(4, 12))
+        tk.Label(glob_f, text="Alle um % anpassen:", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(side="left", padx=(0, 8))
+        self._glob_var = tk.StringVar(value="0")
+        tk.Entry(glob_f, textvariable=self._glob_var, width=6, bg=BG_INPUT, fg=TEXT, font=FONT_BODY, relief="flat").pack(side="left")
+        make_btn(glob_f, "Anwenden", self._glob_anwenden, color=ACCENT2).pack(side="left", padx=8)
+
+        # Buttons
+        btn_f = tk.Frame(self, bg=BG_CARD)
+        btn_f.pack(fill="x", padx=20, pady=(0, 16))
+        make_btn(btn_f, "✅ Übernehmen", self._on_save, color=SUCCESS).pack(side="right")
+        make_btn(btn_f, "Abbrechen", self.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
+
+    def _glob_anwenden(self):
+        """Wendet globale Preisanpassung auf alle aktivierten Kategorien an."""
+        try:
+            pct = float(self._glob_var.get().replace(",", "."))
+        except Exception:
+            messagebox.showwarning("Eingabe", "Ungültiger Prozentwert.", parent=self); return
+        for kat, (var, _) in self._anpassung_vars.items():
+            if self._uebernehmen_vars[kat].get():
+                var.set(str(round(pct, 2)))
+
+    def _on_save(self):
+        result = {}
+        for kat, (prozVar, basis) in self._anpassung_vars.items():
+            if not self._uebernehmen_vars[kat].get():
+                continue
+            try:
+                pct = float(prozVar.get().replace(",", "."))
+                betrag = basis * (1 + pct / 100)
+                betrag = max(0, round(betrag, 2))
+            except Exception:
+                betrag = basis
+            result[kat] = betrag
+        if not result:
+            messagebox.showwarning("Keine Auswahl", "Bitte mindestens eine Kategorie auswählen.", parent=self); return
+        self.result = result
+        self.destroy()
+
+
 class NebenkostenDialog(BaseDialog):
     """Legacy-Dialog für manuelle Nebenkosteneinträge (Rückwärtskompatibilität)."""
     def __init__(self, parent, row=None):
@@ -5319,7 +5584,7 @@ class NebenkostenDialog(BaseDialog):
 
 
 
-class AufteilungenPage(tk.Frame):
+class AufteilungenPage(tk.Frame):  # #39
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)
         self._build()
@@ -5328,16 +5593,17 @@ class AufteilungenPage(tk.Frame):
         section_header(self, "Aufteilungen", "＋ Aufteilung", self._new)
         tk.Label(self, text="Umlageschlüssel und Verteilungsregeln für Nebenkosten",
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(0,8))
-        cols = ("Name", "Typ", "Bezug / Einheit", "Wert", "Notizen")
+        cols = ("Name", "Typ", "Wohnungen", "Aktiv", "Notizen")  # #39: Spalten geändert
         f, self.tree = make_table(self, cols, height=16)
         f.pack(fill="both", expand=True, padx=20, pady=8)
-        for c, w in zip(cols, [180, 140, 160, 100, 220]):
+        for c, w in zip(cols, [180, 160, 200, 60, 200]):  # #39: Breiten angepasst
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
         self.tree.bind("<Double-1>", self._edit)
         btn_row = tk.Frame(self, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0,10))
         if hat_recht("Aufteilungen", "schreiben"):
             make_btn(btn_row, "✏ Bearbeiten", self._edit, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,8))
+            make_btn(btn_row, "⏸ De/Aktivieren", self._toggle_aktiv, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,8))  # #39
         if hat_recht("Aufteilungen", "loeschen"):
             make_btn(btn_row, "🗑 Löschen", self._delete, color=DANGER).pack(side="left")
         self._load()
@@ -5346,9 +5612,19 @@ class AufteilungenPage(tk.Frame):
         for i in self.tree.get_children(): self.tree.delete(i)
         conn = get_db()
         for r in conn.execute("SELECT * FROM aufteilungen ORDER BY name"):
+            # Zugeordnete Wohnungen ermitteln (#39)
+            wohn_names = []
+            try:
+                for wh in conn.execute(
+                    "SELECT w.bezeichnung FROM aufteilung_wohnungen aw "
+                    "JOIN wohnungen w ON w.id=aw.wohnung_id WHERE aw.aufteilung_id=?", (r["id"],)):
+                    wohn_names.append(wh["bezeichnung"])
+            except Exception:
+                pass
+            aktiv_str = "✅" if r.get("aktiv", 1) else "❌"  # #39
+            wohn_str = ", ".join(wohn_names) if wohn_names else (r.get("bezug") or "–")  # #39
             self.tree.insert("", "end", iid=r["id"], values=(
-                r["name"], r["typ"] or "–", r["bezug"] or "–",
-                r["wert"] or "–", r["notizen"] or "–"))
+                r["name"], r["typ"] or "–", wohn_str, aktiv_str, r["notizen"] or "–"))
         conn.close()
         tree_empty_hint(self.tree)
 
@@ -5360,9 +5636,17 @@ class AufteilungenPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("INSERT INTO aufteilungen (name,beschreibung,typ,bezug,wert,notizen) VALUES (?,?,?,?,?,?)",
-                (v["name"], v["beschreibung"], v["typ"], v["bezug"], v["wert"] or None, v["notizen"]))
-            conn.commit(); conn.close(); self._load()
+            try:
+                cur = conn.execute(
+                    "INSERT INTO aufteilungen (name,beschreibung,typ,bezug,wert,notizen,ist_benutzerdefiniert) VALUES (?,?,?,?,?,?,1)",  # #39
+                    (v["name"], v["beschreibung"], v["typ"], v["bezug"], v["wert"] or None, v["notizen"]))
+                aid = cur.lastrowid
+                for wid in v.get("wohnung_ids", []):  # #39
+                    conn.execute("INSERT OR IGNORE INTO aufteilung_wohnungen (aufteilung_id, wohnung_id) VALUES (?,?)", (aid, wid))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load()
 
     def _edit(self, event=None):
         if not hat_recht("Aufteilungen", "schreiben"):
@@ -5377,28 +5661,80 @@ class AufteilungenPage(tk.Frame):
         if d.result:
             v = d.result
             conn = get_db()
-            conn.execute("UPDATE aufteilungen SET name=?,beschreibung=?,typ=?,bezug=?,wert=?,notizen=? WHERE id=?",
-                (v["name"], v["beschreibung"], v["typ"], v["bezug"], v["wert"] or None, v["notizen"], int(sel[0])))
-            conn.commit(); conn.close(); self._load()
+            try:
+                conn.execute(
+                    "UPDATE aufteilungen SET name=?,beschreibung=?,typ=?,bezug=?,wert=?,notizen=? WHERE id=?",
+                    (v["name"], v["beschreibung"], v["typ"], v["bezug"], v["wert"] or None, v["notizen"], int(sel[0])))
+                conn.execute("DELETE FROM aufteilung_wohnungen WHERE aufteilung_id=?", (int(sel[0]),))  # #39
+                for wid in v.get("wohnung_ids", []):  # #39
+                    conn.execute("INSERT OR IGNORE INTO aufteilung_wohnungen (aufteilung_id, wohnung_id) VALUES (?,?)",
+                                 (int(sel[0]), wid))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load()
+
+    def _toggle_aktiv(self):  # #39
+        """Aktiviert/deaktiviert eine Aufteilung."""
+        if not hat_recht("Aufteilungen", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
+        sel = self.tree.selection()
+        if not sel: return
+        conn = get_db()
+        try:
+            r = conn.execute("SELECT aktiv FROM aufteilungen WHERE id=?", (int(sel[0]),)).fetchone()
+            if not r: return
+            neu = 0 if r["aktiv"] else 1
+            conn.execute("UPDATE aufteilungen SET aktiv=? WHERE id=?", (neu, int(sel[0])))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load()
 
     def _delete(self):
         if not hat_recht("Aufteilungen", "loeschen"):
             messagebox.showwarning("Berechtigung", "Keine Löschberechtigung.", parent=self); return
         sel = self.tree.selection()
         if not sel: return
+        aid = int(sel[0])
+        # Prüfen ob SuperAdmin (nur SuperAdmin darf löschen) #39
+        conn = get_db()
+        try:
+            benutzer = conn.execute(
+                "SELECT r.ist_superadmin FROM benutzer b JOIN rollen r ON r.id=b.rolle_id WHERE b.id=?",
+                (_CURRENT_USER["id"],)).fetchone() if _CURRENT_USER else None
+            ist_admin = benutzer and benutzer["ist_superadmin"]
+            # Prüfen ob verwendet (in aufteilung_wohnungen) #39
+            verwendet = conn.execute(
+                "SELECT COUNT(*) FROM aufteilung_wohnungen WHERE aufteilung_id=?", (aid,)).fetchone()[0]
+        finally:
+            conn.close()
+        if not ist_admin:  # #39
+            messagebox.showwarning("Berechtigung",
+                "Nur Super-Admins können Aufteilungstypen löschen.\n"
+                "Nutzen Sie 'De/Aktivieren' um den Typ zu deaktivieren.", parent=self); return
+        if verwendet:  # #39
+            messagebox.showwarning("Verwendet",
+                "Dieser Aufteilungstyp ist noch Wohnungen zugeordnet und kann nicht gelöscht werden.\n"
+                "Bitte zuerst die Wohnungszuordnungen entfernen.", parent=self); return
         if messagebox.askyesno("Löschen", "Aufteilung löschen?"):
             conn = get_db()
-            conn.execute("DELETE FROM aufteilungen WHERE id=?", (int(sel[0]),))
-            conn.commit(); conn.close(); self._load()
+            try:
+                conn.execute("DELETE FROM aufteilungen WHERE id=?", (aid,))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load()
 
 
 class AufteilungDialog(BaseDialog):
     TYPEN = ["Wohnfläche", "Personenanzahl", "Einheiten gleich", "Verbrauch",
-             "MEA", "Wasserkosten nach Punkten", "Sonstiges"]
+             "MEA", "Wasserkosten nach Punkten", "Ausgewählte Wohnungen", "Sonstiges"]  # #39
 
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Aufteilung " + ("bearbeiten" if row else "hinzufügen"), 480, 580)
+        super().__init__(parent, "Aufteilung " + ("bearbeiten" if row else "hinzufügen"), 520, 640)  # #39
         r = dict(row) if row else {}
+        self._row_id = r.get("id")
         self._add_field("Name *", "name", r.get("name",""))
         # Widgetreferenzen direkt speichern – _fields enthält nur StringVar, nicht das Widget selbst
         self._typ_combo   = self._add_field("Typ", "typ", r.get("typ","Wohnfläche"),
@@ -5407,6 +5743,32 @@ class AufteilungDialog(BaseDialog):
         self._add_field("Wert", "wert", r.get("wert",""))
         self._add_field("Beschreibung", "beschreibung", r.get("beschreibung",""))
         self._add_field("Notizen", "notizen", r.get("notizen",""), widget_type="text")
+
+        # Wohnungsauswahl (für Typ "Ausgewählte Wohnungen") #39
+        self._wohn_frame = tk.LabelFrame(self._body, text="Wohnungen auswählen",
+                                          bg=BG_CARD, fg=TEXT, font=FONT_SMALL)
+        self._wohn_listbox = tk.Listbox(self._wohn_frame, selectmode="multiple",
+                                         height=5, font=FONT_BODY, bg=BG_INPUT, fg=TEXT,
+                                         selectbackground=ACCENT2, selectforeground="white")
+        sb = ttk.Scrollbar(self._wohn_frame, orient="vertical", command=self._wohn_listbox.yview)
+        self._wohn_listbox.configure(yscrollcommand=sb.set)
+        self._wohn_listbox.pack(side="left", fill="both", expand=True, padx=(8,0), pady=6)
+        sb.pack(side="right", fill="y", pady=6, padx=(0,8))
+        # Wohnungen laden
+        conn = get_db()
+        self._wohn_ids = []
+        for wh in conn.execute("SELECT id, bezeichnung FROM wohnungen ORDER BY bezeichnung"):
+            self._wohn_ids.append(wh["id"])
+            self._wohn_listbox.insert("end", wh["bezeichnung"])
+        # Bereits zugeordnete Wohnungen vorauswählen
+        if self._row_id:
+            sel_ids = {r2["wohnung_id"] for r2 in
+                       conn.execute("SELECT wohnung_id FROM aufteilung_wohnungen WHERE aufteilung_id=?",
+                                    (self._row_id,)).fetchall()}
+            for i, wid in enumerate(self._wohn_ids):
+                if wid in sel_ids:
+                    self._wohn_listbox.selection_set(i)
+        conn.close()
 
         # Hinweis-Label: wird bei Typ "Wasserkosten nach Punkten" eingeblendet
         self._wk_hinweis = tk.Label(self._body, bg=BG_CARD, fg=ACCENT2, font=FONT_SMALL,
@@ -5419,18 +5781,24 @@ class AufteilungDialog(BaseDialog):
         self._on_typ_change()  # Initialzustand setzen
 
     def _on_typ_change(self, event=None):
-        """Zeigt/versteckt den Wasserkosten-Hinweis je nach gewähltem Typ."""
+        """Zeigt/versteckt den Wasserkosten-Hinweis und Wohnungsauswahl je nach gewähltem Typ."""
         typ = self._fields["typ"].get()
         if typ == "Wasserkosten nach Punkten":
             self._wk_hinweis.pack(fill="x", padx=20, pady=(0, 6))
+            self._wohn_frame.pack_forget()
             self._bezug_entry.configure(state="disabled")
             if not self._fields["bezug"].get():
                 self._bezug_entry.configure(state="normal")
                 self._bezug_entry.delete(0, "end")
                 self._bezug_entry.insert(0, "Aus Wasserkosten-Berechnung")
                 self._bezug_entry.configure(state="disabled")
+        elif typ == "Ausgewählte Wohnungen":  # #39
+            self._wk_hinweis.pack_forget()
+            self._wohn_frame.pack(fill="x", padx=20, pady=(0, 8))
+            self._bezug_entry.configure(state="normal")
         else:
             self._wk_hinweis.pack_forget()
+            self._wohn_frame.pack_forget()
             self._bezug_entry.configure(state="normal")
 
     def _on_save(self):
@@ -5440,6 +5808,14 @@ class AufteilungDialog(BaseDialog):
         # Bezug automatisch setzen bei Wasserkosten-Typ
         if v.get("typ") == "Wasserkosten nach Punkten":
             v["bezug"] = "Wasserkosten nach Punkten"
+        # Wohnungsauswahl speichern (#39)
+        if v.get("typ") == "Ausgewählte Wohnungen":
+            sel_indices = self._wohn_listbox.curselection()
+            v["wohnung_ids"] = [self._wohn_ids[i] for i in sel_indices]
+            if not v["wohnung_ids"]:
+                messagebox.showwarning("Pflichtfeld", "Bitte mindestens eine Wohnung auswählen.", parent=self); return
+        else:
+            v["wohnung_ids"] = []
         self.result = v; self.destroy()
 
 # ── Kontoauszug-Seite ──────────────────────────────────────────────────────
@@ -5680,12 +6056,8 @@ class KontoauszugPage(tk.Frame):
     # ── CAMT.052 XML Import ───────────────────────────────────────────────────
 
     def _get_default_import_dir(self):
-        """Gibt den Standard-Importpfad aus den Einstellungen zurück."""
-        cfg = load_config()
-        d = cfg.get("pfad_kontoauszug_import", "")
-        if d and os.path.isdir(d):
-            return d
-        return None
+        """Gibt den Standard-Importpfad zurück, legt ihn ggf. an (#38)."""
+        return get_pfad("pfad_kontoauszug_import", "Kontoauszüge")
 
     def _import_xml(self):
         """CAMT.052 XML-Dateien oder -Ordner (Sparkasse Bodensee / ISO 20022) importieren."""
@@ -7432,6 +7804,15 @@ class EinstellungenPage(tk.Frame):
         if hasattr(self, "_ki_anbieter_var"):
             self._cfg["ki_anbieter"] = self._ki_anbieter_var.get()
         save_config(self._cfg)
+        # Verzeichnisse für Speicherpfade automatisch anlegen (#38)
+        for pk, sd in [("pfad_kontoauszug_import", "Kontoauszüge"),
+                       ("pfad_belege", "Belege"),
+                       ("pfad_dokumente", "Dokumente"),
+                       ("pfad_backup", "Backup")]:
+            p = self._cfg.get(pk, "")
+            if p:
+                try: Path(p).mkdir(parents=True, exist_ok=True)
+                except Exception: pass
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.\n" + str(CONFIG_PATH))
 
     def _db_backup(self):

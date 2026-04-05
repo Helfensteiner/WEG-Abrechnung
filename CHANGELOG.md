@@ -7,6 +7,29 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.16.0] — 2026-04-05
+
+### Default-Pfade, Aufteilungstypen, Keywords, Wirtschaftsplan-Vorschläge
+
+#### Neue Features
+
+- **#38 Default Speicherpfade**: Neue Funktion `get_pfad(schluessel, standard_unterordner)` legt automatisch Unterordner im Programmverzeichnis an, wenn kein Pfad konfiguriert ist; wird in den Einstellungen gespeichert; angewendet auf Kontoauszüge, Dokumente, Belege, Backup
+
+- **#39 Benutzerdefinierte Aufteilungstypen**: Neue Spalten `aktiv` und `ist_benutzerdefiniert` in `aufteilungen`; neue Tabelle `aufteilung_wohnungen` für Typ „Ausgewählte Wohnungen"; AufteilungDialog zeigt Listbox mit Multi-Select; nur Super-Admin kann löschen (mit Verwendungs-Prüfung); De/Aktivieren-Button für alle
+
+- **#40 Buchungsregeln-Keywords**: Neue Spalte `keywords` in `buchungsregeln`; `vorschlag_kategorie()` durchsucht Keywords mit 0.65 Konfidenz (zwischen Muster 0.85 und Auftraggeber 0.70); Keyword-Suche als Stufe 1b eingefügt
+
+- **#41 Wirtschaftsplan-Vorschläge**: Neuer Button „📊 Vorschlag aus Vorjahr" in Wirtschaftsplan-Tab; WirtschaftsplanVorschlagDialog generiert Vorschläge aus Vorjahres-Istdaten; Preisanpassung pro Position + globale Anpassung möglich; bereits vorhandene Kategorien werden gekennzeichnet (grün deaktiviert)
+
+#### Neue DB-Tabellen
+- `aufteilung_wohnungen` — Wohnungen-Zuordnung für Typ „Ausgewählte Wohnungen" (#39)
+
+#### Neue DB-Spalten
+- `aufteilungen.aktiv` (DEFAULT 1), `aufteilungen.ist_benutzerdefiniert` (DEFAULT 0) — #39
+- `buchungsregeln.keywords` — #40
+
+---
+
 ## [0.15.0] — 2026-04-05
 
 ### Smart Workflow: Kontoauszug → Buchung → Nebenkosten (Komplettimplementierung)
