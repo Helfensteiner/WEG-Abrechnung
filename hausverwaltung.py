@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.15.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.13.1 — Bugfix KI-Assistent Ollama-Integration:
@@ -537,6 +537,44 @@ CREATE TABLE IF NOT EXISTS abrechnung_anteile (
     vorauszahlung REAL DEFAULT 0,
     FOREIGN KEY (abrechnung_id) REFERENCES abrechnungen(id)
 );
+CREATE TABLE IF NOT EXISTS ista_abrechnungen (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    import_datum DATETIME DEFAULT CURRENT_TIMESTAMP,
+    abrechnungsjahr INTEGER NOT NULL,
+    abrechnungszeitraum_von DATE,
+    abrechnungszeitraum_bis DATE,
+    pdf_pfad TEXT,
+    gesamtkosten_heizung REAL DEFAULT 0,
+    gesamtkosten_warmwasser REAL DEFAULT 0,
+    gesamtkosten_gesamt REAL DEFAULT 0,
+    objekt_adresse TEXT,
+    ista_auftragsnummer TEXT,
+    notizen TEXT,
+    erstellt_am DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS ista_positionen (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    abrechnung_id INTEGER NOT NULL,
+    wohnung_id INTEGER,
+    ista_einheit_nr TEXT,
+    ista_einheit_bezeichnung TEXT,
+    mieter_name TEXT,
+    hke REAL DEFAULT 0,
+    hke_anteil_pct REAL DEFAULT 0,
+    warmwasser_m3 REAL DEFAULT 0,
+    warmwasser_anteil_pct REAL DEFAULT 0,
+    heizkosten_grundkosten REAL DEFAULT 0,
+    heizkosten_verbrauchskosten REAL DEFAULT 0,
+    heizkosten_gesamt REAL DEFAULT 0,
+    warmwasserkosten_gesamt REAL DEFAULT 0,
+    gesamtkosten REAL DEFAULT 0,
+    vorauszahlung REAL DEFAULT 0,
+    nachzahlung_guthaben REAL DEFAULT 0,
+    als_zahlung_uebernommen INTEGER DEFAULT 0,
+    FOREIGN KEY (abrechnung_id) REFERENCES ista_abrechnungen(id)
+);
+CREATE INDEX IF NOT EXISTS idx_ista_positionen_abr ON ista_positionen(abrechnung_id);
+CREATE INDEX IF NOT EXISTS idx_ista_positionen_wohnung ON ista_positionen(wohnung_id);
 """)
     conn.commit()
     # Indizes für häufig abgefragte Spalten (IF NOT EXISTS = idempotent)
@@ -608,6 +646,8 @@ CREATE TABLE IF NOT EXISTS abrechnung_anteile (
         "ALTER TABLE buchungsregeln ADD COLUMN konfidenz REAL DEFAULT 0.5",
         "ALTER TABLE kontoauszug ADD COLUMN buchung_status TEXT DEFAULT 'importiert'",
         "ALTER TABLE wohnungen ADD COLUMN bewohner_anzahl INTEGER DEFAULT 1",
+        "ALTER TABLE ista_positionen ADD COLUMN abrechnungszeitraum_von DATE",
+        "ALTER TABLE ista_positionen ADD COLUMN abrechnungszeitraum_bis DATE",
     ]:
         try:
             c.execute(sql)
@@ -647,7 +687,7 @@ CREATE TABLE IF NOT EXISTS abrechnung_anteile (
         benutzer_id = c.execute("SELECT id FROM rollen WHERE name='Benutzer'").fetchone()[0]
         bereiche = ["Übersicht","Eigentümer","Wohnungen","Mieter","Kontoauszug","Buchhaltung",
                     "Wartung","Nebenkosten","Aufteilungen","Nachrichten","Dokumente",
-                    "Benutzer","Rollen & Rechte","Einstellungen","KI-Assistent","KI-Administration"]
+                    "Benutzer","Rollen & Rechte","Einstellungen","KI-Assistent","KI-Administration","Ista-Wärme"]
         for b in bereiche:
             c.execute("INSERT INTO rechte (rolle_id,bereich,lesen,schreiben,loeschen) VALUES (?,?,1,1,1)", (admin_id, b))
             c.execute("INSERT INTO rechte (rolle_id,bereich,lesen,schreiben,loeschen) VALUES (?,?,1,1,0)", (benutzer_id, b))
@@ -659,6 +699,41 @@ CREATE TABLE IF NOT EXISTS abrechnung_anteile (
     if sa_role:
         c.execute("UPDATE benutzer SET rolle_id=? WHERE benutzername='admin' AND (rolle_id IS NULL OR rolle_id=0)", (sa_role[0],))
         conn.commit()
+
+    # Ista-Spezialist-Rolle anlegen (idempotent)
+    if not c.execute("SELECT id FROM rollen WHERE name='Ista-Spezialist'").fetchone():
+        c.execute(
+            "INSERT INTO rollen (name, beschreibung) VALUES (?,?)",
+            ("Ista-Spezialist",
+             "Profi für Ista-Wärmeabrechnung: Importiert und verwaltet Heizkostenabrechnungen von Ista. "
+             "Vollzugriff auf Ista-Wärme, Nebenkosten und Verbrauchsdaten.")
+        )
+        ista_id = c.execute("SELECT id FROM rollen WHERE name='Ista-Spezialist'").fetchone()[0]
+        ista_bereiche = {
+            "Übersicht":         (1, 0, 0),
+            "Wohnungen":         (1, 0, 0),
+            "Mieter":            (1, 0, 0),
+            "Nebenkosten":       (1, 1, 1),
+            "Ista-Wärme":        (1, 1, 1),
+            "Buchhaltung":       (1, 1, 0),
+            "Dokumente":         (1, 1, 0),
+        }
+        for bereich, (l, s, d) in ista_bereiche.items():
+            c.execute(
+                "INSERT OR IGNORE INTO rechte (rolle_id,bereich,lesen,schreiben,loeschen) VALUES (?,?,?,?,?)",
+                (ista_id, bereich, l, s, d)
+            )
+        conn.commit()
+    # Ista-Wärme-Recht zu allen bestehenden Rollen hinzufügen (idempotent)
+    for rolle_row in c.execute("SELECT id, ist_superadmin FROM rollen").fetchall():
+        if not c.execute("SELECT 1 FROM rechte WHERE rolle_id=? AND bereich='Ista-Wärme'",
+                         (rolle_row[0],)).fetchone():
+            ist_super = bool(rolle_row[1])
+            c.execute(
+                "INSERT INTO rechte (rolle_id,bereich,lesen,schreiben,loeschen) VALUES (?,?,?,?,?)",
+                (rolle_row[0], "Ista-Wärme", 1, 1 if ist_super else 0, 0)
+            )
+    conn.commit()
 
     if not c.execute("SELECT COUNT(*) FROM eigentuemer").fetchone()[0]:
         _insert_demo(c)
@@ -7630,7 +7705,7 @@ class RollenverwaltungPage(tk.Frame):
     BEREICHE = ["Übersicht", "Eigentümer", "Wohnungen", "Mieter", "Kontoauszug",
                 "Buchhaltung", "Wartung", "Nebenkosten", "Aufteilungen",
                 "Nachrichten", "Dokumente", "Benutzer", "Rollen & Rechte",
-                "Einstellungen", "KI-Assistent", "KI-Administration"]
+                "Einstellungen", "KI-Assistent", "KI-Administration", "Ista-Wärme"]
 
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)
@@ -7972,6 +8047,881 @@ class LoginDialog(tk.Toplevel):
             messagebox.showerror("Fehler", "Benutzername oder Passwort falsch.", parent=self)
             self._pw_var.set("")
 
+# ── Ista-Wärmeabrechnung ───────────────────────────────────────────────────────
+
+class IstaPage(tk.Frame):
+    """Ista-Wärmeabrechnung: Import von Ista-PDFs, Zuordnung zu Wohnungen,
+    Übernahme in Buchhaltung und Nebenkosten. Unterstützt die Heizkostenverordnung (HeizKV)."""
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG_CARD)
+        if not hat_recht("Ista-Wärme", "lesen"):
+            tk.Label(self, text="🔒 Kein Zugriff auf Ista-Wärme.\nBitte Administrator kontaktieren.",
+                     bg=BG_CARD, fg=DANGER, font=FONT_H2).pack(expand=True)
+            return
+        self._build()
+
+    def _build(self):
+        # Header
+        section_header(self, "🔥 Ista-Wärmeabrechnung",
+                        "📥 Ista-PDF importieren", self._import_pdf)
+
+        # Info-Banner
+        info = tk.Frame(self, bg="#EBF5FB", bd=0)
+        info.pack(fill="x", padx=20, pady=(8, 4))
+        tk.Label(info,
+                 text="ℹ  Ista liefert Heizkostenabrechnungen als PDF. "
+                      "Importieren Sie das PDF und ordnen Sie die Wohnungseinheiten zu. "
+                      "Die Kosten werden automatisch in die Nebenkosten-Abrechnung übernommen.",
+                 bg="#EBF5FB", fg="#1A5276", font=FONT_SMALL,
+                 wraplength=900, justify="left").pack(padx=12, pady=8, anchor="w")
+
+        # Tabs
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=20, pady=8)
+
+        t1 = ttk.Frame(nb); nb.add(t1, text="📋 Abrechnungen")
+        t2 = ttk.Frame(nb); nb.add(t2, text="🏠 Positionen & Zuordnung")
+        t3 = ttk.Frame(nb); nb.add(t3, text="💰 Übernahme in Buchhaltung")
+        t4 = ttk.Frame(nb); nb.add(t4, text="📖 Ista-Leitfaden")
+
+        self._build_tab_abrechnungen(t1)
+        self._build_tab_positionen(t2)
+        self._build_tab_uebernahme(t3)
+        self._build_tab_leitfaden(t4)
+
+    # ── Tab 1: Abrechnungs-Übersicht ──────────────────────────────────────────
+
+    def _build_tab_abrechnungen(self, parent):
+        ctrl = tk.Frame(parent, bg=BG_CARD)
+        ctrl.pack(fill="x", padx=0, pady=(8, 4))
+        make_btn(ctrl, "📥 Ista-PDF importieren", self._import_pdf).pack(side="left", padx=(8, 6))
+        make_btn(ctrl, "🗑 Löschen", self._delete_abrechnung, color=DANGER).pack(side="left")
+        make_btn(ctrl, "🔄 Aktualisieren", self._load_abrechnungen, color=BG_INPUT, fg=TEXT).pack(side="right", padx=8)
+
+        frame, self._tree_abr = make_table(parent,
+            ("Jahr", "Zeitraum", "Heizkosten", "Warmwasser", "Gesamt", "Einheiten", "Objekt"))
+        for col, w in [("Jahr", 55), ("Zeitraum", 140), ("Heizkosten", 100),
+                        ("Warmwasser", 100), ("Gesamt", 100), ("Einheiten", 70), ("Objekt", 200)]:
+            self._tree_abr.column(col, width=w, anchor="e" if col in ("Heizkosten","Warmwasser","Gesamt","Einheiten") else "w")
+            self._tree_abr.heading(col, text=col)
+        frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._tree_abr.bind("<<TreeviewSelect>>", lambda e: self._load_positionen())
+
+        self._load_abrechnungen()
+
+    def _load_abrechnungen(self):
+        for i in self._tree_abr.get_children():
+            self._tree_abr.delete(i)
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT a.*, COUNT(p.id) as n_pos FROM ista_abrechnungen a "
+                "LEFT JOIN ista_positionen p ON p.abrechnung_id=a.id "
+                "GROUP BY a.id ORDER BY a.abrechnungsjahr DESC, a.import_datum DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            zeitraum = ""
+            if r["abrechnungszeitraum_von"] and r["abrechnungszeitraum_bis"]:
+                zeitraum = f"{fmt_date(r['abrechnungszeitraum_von'])} – {fmt_date(r['abrechnungszeitraum_bis'])}"
+            self._tree_abr.insert("", "end", iid=str(r["id"]), values=(
+                r["abrechnungsjahr"] or "–",
+                zeitraum or "–",
+                fmt_euro(r["gesamtkosten_heizung"] or 0),
+                fmt_euro(r["gesamtkosten_warmwasser"] or 0),
+                fmt_euro(r["gesamtkosten_gesamt"] or 0),
+                str(r["n_pos"]),
+                r["objekt_adresse"] or "–",
+            ))
+        tree_empty_hint(self._tree_abr, "(Keine Ista-Abrechnungen – PDF importieren)")
+
+    # ── Tab 2: Positionen & Wohnungs-Zuordnung ────────────────────────────────
+
+    def _build_tab_positionen(self, parent):
+        ctrl = tk.Frame(parent, bg=BG_CARD)
+        ctrl.pack(fill="x", padx=8, pady=(8, 4))
+        tk.Label(ctrl, text="Wohnung zuordnen:", bg=BG_CARD, fg=TEXT, font=FONT_BODY).pack(side="left")
+        self._zuordnung_wohnung_var = tk.StringVar()
+        self._zuordnung_combo = ttk.Combobox(ctrl, textvariable=self._zuordnung_wohnung_var,
+                                              state="readonly", width=30)
+        self._zuordnung_combo.pack(side="left", padx=6)
+        make_btn(ctrl, "✅ Zuordnung speichern", self._save_zuordnung).pack(side="left", padx=4)
+        make_btn(ctrl, "🤖 Auto-Zuordnung", self._auto_zuordnung, color=ACCENT).pack(side="left", padx=4)
+
+        # Erklärung
+        tk.Label(parent,
+                 text="Wählen Sie links eine Abrechnung → rechts erscheinen die Ista-Einheiten. "
+                      "Klicken Sie auf eine Einheit und ordnen Sie rechts die Wohnung zu.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=8)
+
+        frame, self._tree_pos = make_table(parent,
+            ("Ista-Einheit", "Mieter (Ista)", "Zugeordnete Wohnung",
+             "Heizkosten", "Warmwasser", "Gesamt", "Vorauszahlung", "Saldo"))
+        for col, w in [
+            ("Ista-Einheit", 120), ("Mieter (Ista)", 160), ("Zugeordnete Wohnung", 150),
+            ("Heizkosten", 90), ("Warmwasser", 90), ("Gesamt", 90),
+            ("Vorauszahlung", 100), ("Saldo", 90)
+        ]:
+            self._tree_pos.column(col, width=w,
+                anchor="e" if col in ("Heizkosten","Warmwasser","Gesamt","Vorauszahlung","Saldo") else "w")
+            self._tree_pos.heading(col, text=col)
+        frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        self._tree_pos.bind("<<TreeviewSelect>>", self._on_pos_select)
+
+        # Wohnungs-Combo befüllen
+        self._refresh_wohnungen_combo()
+
+    def _refresh_wohnungen_combo(self):
+        conn = get_db()
+        try:
+            wohnungen = conn.execute(
+                "SELECT id, bezeichnung FROM wohnungen ORDER BY bezeichnung"
+            ).fetchall()
+        finally:
+            conn.close()
+        self._wohnungen_map = {w["bezeichnung"]: w["id"] for w in wohnungen}
+        self._wohnungen_map_r = {w["id"]: w["bezeichnung"] for w in wohnungen}
+        werte = ["(keine Zuordnung)"] + [w["bezeichnung"] for w in wohnungen]
+        self._zuordnung_combo["values"] = werte
+
+    def _load_positionen(self):
+        for i in self._tree_pos.get_children():
+            self._tree_pos.delete(i)
+        sel = self._tree_abr.selection()
+        if not sel:
+            return
+        abr_id = int(sel[0])
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT p.*, w.bezeichnung as wohnung_bez "
+                "FROM ista_positionen p "
+                "LEFT JOIN wohnungen w ON w.id=p.wohnung_id "
+                "WHERE p.abrechnung_id=? ORDER BY p.ista_einheit_nr",
+                (abr_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            saldo = (r["nachzahlung_guthaben"] or 0)
+            tag = "plus" if saldo >= 0 else "minus"
+            self._tree_pos.insert("", "end", iid=str(r["id"]), values=(
+                r["ista_einheit_nr"] or r["ista_einheit_bezeichnung"] or "–",
+                r["mieter_name"] or "–",
+                r["wohnung_bez"] or "⚠ nicht zugeordnet",
+                fmt_euro(r["heizkosten_gesamt"] or 0),
+                fmt_euro(r["warmwasserkosten_gesamt"] or 0),
+                fmt_euro(r["gesamtkosten"] or 0),
+                fmt_euro(r["vorauszahlung"] or 0),
+                fmt_euro(saldo),
+            ), tags=(tag,))
+        self._tree_pos.tag_configure("plus",  foreground=SUCCESS)
+        self._tree_pos.tag_configure("minus", foreground=DANGER)
+        tree_empty_hint(self._tree_pos)
+
+    def _on_pos_select(self, event=None):
+        sel = self._tree_pos.selection()
+        if not sel:
+            return
+        pos_id = int(sel[0])
+        conn = get_db()
+        try:
+            p = conn.execute("SELECT wohnung_id FROM ista_positionen WHERE id=?", (pos_id,)).fetchone()
+        finally:
+            conn.close()
+        if p and p["wohnung_id"]:
+            bez = self._wohnungen_map_r.get(p["wohnung_id"], "")
+            self._zuordnung_wohnung_var.set(bez)
+        else:
+            self._zuordnung_wohnung_var.set("(keine Zuordnung)")
+
+    def _save_zuordnung(self):
+        if not hat_recht("Ista-Wärme", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
+        sel = self._tree_pos.selection()
+        if not sel:
+            messagebox.showinfo("Hinweis", "Bitte zuerst eine Ista-Position auswählen.", parent=self); return
+        pos_id = int(sel[0])
+        bez = self._zuordnung_wohnung_var.get()
+        wohnung_id = self._wohnungen_map.get(bez) if bez != "(keine Zuordnung)" else None
+        conn = get_db()
+        try:
+            conn.execute("UPDATE ista_positionen SET wohnung_id=? WHERE id=?", (wohnung_id, pos_id))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load_positionen()
+        messagebox.showinfo("Gespeichert", f"Wohnung '{bez}' zugeordnet.", parent=self)
+
+    def _auto_zuordnung(self):
+        """Versucht automatische Zuordnung nach ähnlichem Namen."""
+        sel = self._tree_abr.selection()
+        if not sel:
+            messagebox.showinfo("Hinweis", "Bitte zuerst eine Abrechnung auswählen.", parent=self)
+            return
+        abr_id = int(sel[0])
+        conn = get_db()
+        try:
+            positionen = conn.execute(
+                "SELECT id, ista_einheit_bezeichnung, mieter_name FROM ista_positionen "
+                "WHERE abrechnung_id=? AND wohnung_id IS NULL", (abr_id,)
+            ).fetchall()
+            wohnungen = conn.execute("SELECT id, bezeichnung FROM wohnungen").fetchall()
+        finally:
+            conn.close()
+
+        zugeordnet = 0
+        for pos in positionen:
+            ista_bez = (pos["ista_einheit_bezeichnung"] or "").lower().strip()
+            best_id = None
+            best_score = 0
+            for w in wohnungen:
+                w_bez = w["bezeichnung"].lower().strip()
+                # Einfaches Substring-Matching
+                if ista_bez in w_bez or w_bez in ista_bez:
+                    score = max(len(ista_bez), len(w_bez))
+                    if score > best_score:
+                        best_score = score
+                        best_id = w["id"]
+            if best_id:
+                conn2 = get_db()
+                try:
+                    conn2.execute("UPDATE ista_positionen SET wohnung_id=? WHERE id=?", (best_id, pos["id"]))
+                    conn2.commit()
+                finally:
+                    conn2.close()
+                zugeordnet += 1
+
+        self._load_positionen()
+        messagebox.showinfo("Auto-Zuordnung",
+            f"{zugeordnet} von {len(positionen)} Einheiten automatisch zugeordnet.\n"
+            "Bitte restliche Zuordnungen manuell durchführen.", parent=self)
+
+    # ── Tab 3: Übernahme in Buchhaltung ───────────────────────────────────────
+
+    def _build_tab_uebernahme(self, parent):
+        tk.Label(parent,
+                 text="Übernehmen Sie die Ista-Kosten als Buchungen in die Buchhaltung "
+                      "und als Verbrauchsdaten in die Nebenkostenabrechnung.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 wraplength=800).pack(padx=12, pady=(12, 4), anchor="w")
+
+        ctrl = tk.Frame(parent, bg=BG_CARD)
+        ctrl.pack(fill="x", padx=8, pady=8)
+        make_btn(ctrl, "💰 Als Buchungen übernehmen",
+                 self._uebernehmen_als_buchungen).pack(side="left", padx=(0, 8))
+        make_btn(ctrl, "🔢 Verbrauchsdaten übernehmen",
+                 self._uebernehmen_verbrauch, color=SUCCESS).pack(side="left", padx=(0, 8))
+        make_btn(ctrl, "📊 Alles übernehmen",
+                 self._uebernehmen_alles, color=ACCENT).pack(side="left")
+
+        tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", padx=8, pady=8)
+
+        # Status-Anzeige
+        self._uebernahme_status = tk.Text(parent, bg=BG_INPUT, fg=TEXT, font=FONT_SMALL,
+                                           height=14, relief="flat", state="disabled")
+        self._uebernahme_status.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _log_uebernahme(self, text: str):
+        self._uebernahme_status.config(state="normal")
+        self._uebernahme_status.insert("end", text + "\n")
+        self._uebernahme_status.see("end")
+        self._uebernahme_status.config(state="disabled")
+
+    def _get_selected_abrechnung(self):
+        sel = self._tree_abr.selection()
+        if not sel:
+            messagebox.showinfo("Hinweis", "Bitte zuerst eine Abrechnung auswählen.", parent=self)
+            return None
+        return int(sel[0])
+
+    def _uebernehmen_als_buchungen(self):
+        if not hat_recht("Ista-Wärme", "schreiben"): return
+        abr_id = self._get_selected_abrechnung()
+        if abr_id is None: return
+
+        conn = get_db()
+        try:
+            abr = conn.execute("SELECT * FROM ista_abrechnungen WHERE id=?", (abr_id,)).fetchone()
+            positionen = conn.execute(
+                "SELECT * FROM ista_positionen WHERE abrechnung_id=? AND wohnung_id IS NOT NULL",
+                (abr_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not positionen:
+            messagebox.showwarning("Keine Positionen",
+                "Keine zugeordneten Positionen gefunden.\n"
+                "Bitte zuerst Wohnungen im Tab 'Positionen & Zuordnung' zuordnen.", parent=self)
+            return
+
+        if not messagebox.askyesno("Buchungen erstellen",
+            f"Für {len(positionen)} Wohnungen Buchungen erstellen?\n"
+            "Pro Wohnung werden Heizkosten und Warmwasserkosten als Ausgaben erfasst.", parent=self):
+            return
+
+        self._uebernahme_status.config(state="normal")
+        self._uebernahme_status.delete("1.0", "end")
+        self._uebernahme_status.config(state="disabled")
+
+        erstellt = 0
+        for pos in positionen:
+            conn2 = get_db()
+            try:
+                # Heizkosten-Buchung
+                if (pos["heizkosten_gesamt"] or 0) > 0:
+                    conn2.execute(
+                        "INSERT INTO zahlungen (datum, betrag, typ, kategorie, beschreibung, "
+                        "konto_typ, status, eigentuemer_id, abrechnungsrelevant, abrechnungsjahr, "
+                        "rechnungssteller) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            abr["abrechnungszeitraum_bis"] or f"{abr['abrechnungsjahr']}-12-31",
+                            -abs(pos["heizkosten_gesamt"]),
+                            "Ausgabe", "Heizung",
+                            f"Ista Heizkosten {abr['abrechnungsjahr']} – {pos['ista_einheit_bezeichnung'] or pos['ista_einheit_nr'] or ''}",
+                            "Wohngeldkonto", "Geprüft",
+                            None, 1, abr["abrechnungsjahr"], "Ista GmbH"
+                        )
+                    )
+                    conn2.commit()
+                    erstellt += 1
+
+                # Warmwasser-Buchung
+                if (pos["warmwasserkosten_gesamt"] or 0) > 0:
+                    conn2.execute(
+                        "INSERT INTO zahlungen (datum, betrag, typ, kategorie, beschreibung, "
+                        "konto_typ, status, eigentuemer_id, abrechnungsrelevant, abrechnungsjahr, "
+                        "rechnungssteller) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            abr["abrechnungszeitraum_bis"] or f"{abr['abrechnungsjahr']}-12-31",
+                            -abs(pos["warmwasserkosten_gesamt"]),
+                            "Ausgabe", "Warmwasser",
+                            f"Ista Warmwasserkosten {abr['abrechnungsjahr']} – {pos['ista_einheit_bezeichnung'] or pos['ista_einheit_nr'] or ''}",
+                            "Wohngeldkonto", "Geprüft",
+                            None, 1, abr["abrechnungsjahr"], "Ista GmbH"
+                        )
+                    )
+                    conn2.commit()
+                    erstellt += 1
+
+                conn2.execute(
+                    "UPDATE ista_positionen SET als_zahlung_uebernommen=1 WHERE id=?",
+                    (pos["id"],)
+                )
+                conn2.commit()
+            finally:
+                conn2.close()
+            self._log_uebernahme(f"✅ {pos['ista_einheit_bezeichnung'] or pos['ista_einheit_nr']}: "
+                                  f"Heizung {fmt_euro(pos['heizkosten_gesamt'] or 0)}, "
+                                  f"Warmwasser {fmt_euro(pos['warmwasserkosten_gesamt'] or 0)}")
+
+        self._log_uebernahme(f"\n✅ Fertig: {erstellt} Buchungen erstellt.")
+        messagebox.showinfo("Buchungen erstellt", f"{erstellt} Buchungen in die Buchhaltung übertragen.", parent=self)
+
+    def _uebernehmen_verbrauch(self):
+        """Überträgt Ista-HKE-Werte als Verbrauchsdaten (für HeizKV-Berechnung)."""
+        if not hat_recht("Ista-Wärme", "schreiben"): return
+        abr_id = self._get_selected_abrechnung()
+        if abr_id is None: return
+
+        conn = get_db()
+        try:
+            abr = conn.execute("SELECT * FROM ista_abrechnungen WHERE id=?", (abr_id,)).fetchone()
+            positionen = conn.execute(
+                "SELECT * FROM ista_positionen WHERE abrechnung_id=? AND wohnung_id IS NOT NULL",
+                (abr_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not positionen:
+            messagebox.showwarning("Keine Positionen", "Keine zugeordneten Positionen.", parent=self)
+            return
+
+        jahr = abr["abrechnungsjahr"]
+        uebernommen = 0
+        for pos in positionen:
+            if not (pos["hke"] or 0) > 0:
+                continue
+            conn2 = get_db()
+            try:
+                conn2.execute(
+                    "INSERT INTO verbrauchsdaten (wohnung_id, kategorie, jahr, "
+                    "zaehlerstand_anfang, zaehlerstand_ende, einheit, notizen) "
+                    "VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT(wohnung_id,kategorie,jahr) DO UPDATE SET "
+                    "zaehlerstand_ende=excluded.zaehlerstand_ende, "
+                    "notizen=excluded.notizen",
+                    (pos["wohnung_id"], "Heizung", jahr,
+                     0, pos["hke"], "HKE",
+                     f"Ista-Import: {pos['hke_anteil_pct'] or 0:.1f}% Anteil")
+                )
+                conn2.commit()
+                uebernommen += 1
+            finally:
+                conn2.close()
+            self._log_uebernahme(f"🔢 {pos['ista_einheit_bezeichnung'] or pos['ista_einheit_nr']}: "
+                                  f"{pos['hke'] or 0:.2f} HKE = {pos['hke_anteil_pct'] or 0:.1f}%")
+
+        self._log_uebernahme(f"\n✅ {uebernommen} Verbrauchsdatensätze übertragen.")
+        messagebox.showinfo("Verbrauch übertragen",
+            f"{uebernommen} Verbrauchsdatensätze (HKE) für HeizKV-Berechnung gespeichert.", parent=self)
+
+    def _uebernehmen_alles(self):
+        self._uebernehmen_als_buchungen()
+        self._uebernehmen_verbrauch()
+
+    # ── Tab 4: Leitfaden ──────────────────────────────────────────────────────
+
+    def _build_tab_leitfaden(self, parent):
+        text = tk.Text(parent, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                       relief="flat", wrap="word", state="normal",
+                       padx=20, pady=12)
+        text.pack(fill="both", expand=True)
+
+        leitfaden = """📖 ISTA-WÄRMEABRECHNUNG – LEITFADEN
+
+═══════════════════════════════════════════════════════════
+
+1️⃣  PDF VON ISTA HERUNTERLADEN
+────────────────────────────────
+• Gehen Sie auf das Ista-Kundenportal (www.ista.com/de)
+• Laden Sie die Jahresabrechnung als PDF herunter
+• Ista liefert üblicherweise eine Gesamtabrechnung sowie
+  individuelle Einzelabrechnungen pro Wohnung
+
+2️⃣  PDF IN DIE APP IMPORTIEREN
+────────────────────────────────
+• Klicken Sie auf "📥 Ista-PDF importieren"
+• Wählen Sie das heruntergeladene Ista-PDF
+• Die App versucht, die Daten automatisch zu extrahieren
+• Falls der automatische Import nicht vollständig ist,
+  können Sie Daten manuell ergänzen
+
+3️⃣  WOHNUNGEN ZUORDNEN (Tab "Positionen & Zuordnung")
+──────────────────────────────────────────────────────
+• Ista verwendet interne Einheitenbezeichnungen
+  (z.B. "WE 01", "EG links")
+• Ordnen Sie jede Ista-Einheit der entsprechenden
+  Wohnung in der App zu
+• "🤖 Auto-Zuordnung" versucht eine automatische
+  Zuordnung anhand der Bezeichnung
+
+4️⃣  KOSTEN ÜBERNEHMEN (Tab "Übernahme in Buchhaltung")
+────────────────────────────────────────────────────────
+• "💰 Als Buchungen übernehmen": Erstellt Ausgabe-
+  Buchungen für Heizung und Warmwasser in der Buchhaltung
+• "🔢 Verbrauchsdaten übernehmen": Speichert die
+  Heizkosteneinheiten (HKE) für die HeizKV-Berechnung
+  in der Nebenkostenabrechnung
+• "📊 Alles übernehmen": Führt beide Schritte aus
+
+5️⃣  NEBENKOSTENABRECHNUNG ERSTELLEN
+─────────────────────────────────────
+• Gehen Sie zur Seite "Nebenkosten"
+• Die Ista-Kosten sind jetzt in der Buchhaltung
+• Im Tab "§556 BGB Mieter" werden die Kosten mit dem
+  Umlageschlüssel "HeizKV" (70% Verbrauch / 30% Fläche)
+  automatisch auf die Mieter verteilt
+
+═══════════════════════════════════════════════════════════
+
+📌 WICHTIGE HINWEISE ZUR HEIZKOSTENVERORDNUNG (HeizKV)
+
+• §7 HeizKV: Mindestens 50%, maximal 70% der Kosten
+  nach Verbrauch abrechnen (Standard: 70%)
+• Die restlichen 30% nach Wohnfläche
+• Ausnahme: Bei Wärmepumpen oder bestimmten Anlagen
+  gelten andere Regelungen
+• Ista übernimmt die HKV-konforme Abrechnung und
+  liefert die Anteile pro Wohnung
+
+📌 ISTA-ABRECHNUNG vs. EIGENE ABRECHNUNG
+
+• Die Ista-Abrechnung ist bereits HKV-konform und
+  enthält die endgültigen Kosten pro Wohnung
+• Diese Werte werden direkt übernommen – keine
+  erneute Berechnung notwendig
+• Die HKE-Werte dienen nur als Verbrauchsnachweis
+
+═══════════════════════════════════════════════════════════
+
+📞 KONTAKT ISTA
+• Kundenservice: 0800 100 64 64 (kostenlos)
+• Online-Portal: www.ista.com/de
+• E-Mail: service.de@ista.com
+"""
+        text.insert("1.0", leitfaden)
+        text.config(state="disabled")
+
+    # ── PDF-Import ────────────────────────────────────────────────────────────
+
+    def _import_pdf(self):
+        if not hat_recht("Ista-Wärme", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
+
+        from tkinter import filedialog
+        pdf_pfad = filedialog.askopenfilename(
+            parent=self,
+            title="Ista-Abrechnung (PDF) auswählen",
+            filetypes=[("PDF-Dateien", "*.pdf"), ("Alle Dateien", "*.*")]
+        )
+        if not pdf_pfad:
+            return
+
+        import os
+        if not os.path.isfile(pdf_pfad):
+            messagebox.showerror("Fehler", f"Datei nicht gefunden:\n{pdf_pfad}", parent=self)
+            return
+
+        # Extraktion-Dialog anzeigen
+        dlg = tk.Toplevel(self)
+        dlg.title("Ista-PDF wird verarbeitet …")
+        dlg.geometry("560x420")
+        dlg.configure(bg=BG_CARD)
+        dlg.transient(self.winfo_toplevel())
+        dlg.grab_set()
+
+        tk.Label(dlg, text="📥 Ista-PDF Import",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 4), anchor="w")
+        tk.Label(dlg, text=f"Datei: {os.path.basename(pdf_pfad)}",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, anchor="w")
+
+        status_lbl = tk.Label(dlg, text="⏳ Text wird extrahiert …",
+                               bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_BODY)
+        status_lbl.pack(padx=20, pady=8, anchor="w")
+
+        log_txt = tk.Text(dlg, bg=BG_INPUT, fg=TEXT, font=FONT_SMALL,
+                           height=12, relief="flat", state="disabled")
+        log_txt.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+
+        def _log(msg):
+            log_txt.config(state="normal")
+            log_txt.insert("end", msg + "\n")
+            log_txt.see("end")
+            log_txt.config(state="disabled")
+            dlg.update()
+
+        def _update_status(msg):
+            status_lbl.config(text=msg)
+            dlg.update()
+
+        self._parsed_daten = None
+
+        def _do_import():
+            try:
+                _update_status("⏳ PDF-Text extrahieren …")
+                _log(f"📄 Lese PDF: {os.path.basename(pdf_pfad)}")
+
+                # PDF-Text extrahieren
+                pdf_text = ""
+                try:
+                    import pypdf
+                    with open(pdf_pfad, "rb") as fh:
+                        reader = pypdf.PdfReader(fh)
+                        for i, page in enumerate(reader.pages):
+                            txt = page.extract_text() or ""
+                            pdf_text += txt
+                            _log(f"   Seite {i+1}: {len(txt)} Zeichen extrahiert")
+                except ImportError:
+                    _log("⚠ pypdf nicht installiert – KI-basierte Extraktion wird versucht")
+
+                _log(f"\n📝 Gesamt: {len(pdf_text)} Zeichen")
+
+                if not pdf_text.strip():
+                    _log("⚠ Kein Text extrahiert – PDF evtl. gescannt (Bild-PDF)")
+                    _log("  Manuelle Eingabe erforderlich")
+
+                _update_status("🤖 KI analysiert Ista-Daten …")
+                _log("\n🤖 Starte KI-Analyse …")
+
+                # KI-Extraktion versuchen
+                cfg = load_config()
+                ki_daten = None
+
+                if pdf_text.strip():
+                    ki_daten = self._ki_extrahieren(pdf_text[:8000], cfg, _log)
+
+                if ki_daten:
+                    self._parsed_daten = ki_daten
+                    _update_status("✅ Extraktion erfolgreich – bitte prüfen")
+                    _log(f"\n✅ KI-Extraktion: {len(ki_daten.get('positionen', []))} Einheiten erkannt")
+                    _log(f"   Jahr: {ki_daten.get('abrechnungsjahr', '?')}")
+                    _log(f"   Objekt: {ki_daten.get('objekt_adresse', '?')}")
+                    _log(f"   Gesamtkosten: {ki_daten.get('gesamtkosten_gesamt', '?')}")
+                else:
+                    _update_status("⚠ Automatische Extraktion unvollständig")
+                    _log("\n⚠ KI-Extraktion nicht möglich – manuelle Eingabe erforderlich")
+                    self._parsed_daten = {
+                        "abrechnungsjahr": date.today().year - 1,
+                        "gesamtkosten_heizung": 0,
+                        "gesamtkosten_warmwasser": 0,
+                        "gesamtkosten_gesamt": 0,
+                        "objekt_adresse": "",
+                        "positionen": [],
+                    }
+
+                _log("\n─────────────────────────────")
+                _log("Klicken Sie auf 'Speichern & Importieren' um fortzufahren.")
+
+                btn_row = tk.Frame(dlg, bg=BG_CARD)
+                btn_row.pack(fill="x", padx=20, pady=(0, 12))
+                make_btn(btn_row, "💾 Speichern & Importieren",
+                          lambda: self._save_import(dlg, pdf_pfad, self._parsed_daten)).pack(side="left", padx=(0, 8))
+                make_btn(btn_row, "✏️ Manuell eingeben",
+                          lambda: self._manuell_eingeben(dlg, pdf_pfad)).pack(side="left", padx=(0, 8))
+                make_btn(btn_row, "Abbrechen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(side="left")
+
+            except Exception as ex:
+                _update_status(f"❌ Fehler: {ex}")
+                _log(f"\n❌ Fehler: {ex}")
+
+        # Import in Thread damit UI nicht einfriert
+        import threading
+        threading.Thread(target=_do_import, daemon=True).start()
+
+    def _ki_extrahieren(self, pdf_text: str, cfg: dict, _log) -> dict:
+        """Versucht KI-basierte Extraktion der Ista-Daten."""
+        prompt = (
+            "Analysiere diese Ista-Heizkostenabrechnung und extrahiere die Daten als JSON.\n"
+            "Antworte NUR mit einem JSON-Objekt.\n\n"
+            "Felder:\n"
+            '  "abrechnungsjahr": Abrechnungsjahr (Integer, z.B. 2025)\n'
+            '  "abrechnungszeitraum_von": Startdatum YYYY-MM-DD\n'
+            '  "abrechnungszeitraum_bis": Enddatum YYYY-MM-DD\n'
+            '  "objekt_adresse": Objektadresse\n'
+            '  "ista_auftragsnummer": Auftragsnummer falls vorhanden\n'
+            '  "gesamtkosten_heizung": Gesamte Heizkosten als Zahl\n'
+            '  "gesamtkosten_warmwasser": Gesamte Warmwasserkosten als Zahl\n'
+            '  "gesamtkosten_gesamt": Gesamtkosten als Zahl\n'
+            '  "positionen": Array mit einem Objekt pro Wohneinheit:\n'
+            '    [\n'
+            '      {\n'
+            '        "ista_einheit_nr": "WE01",\n'
+            '        "ista_einheit_bezeichnung": "EG links",\n'
+            '        "mieter_name": "Name des Mieters",\n'
+            '        "hke": Heizkosteneinheiten als Zahl,\n'
+            '        "hke_anteil_pct": prozentualer HKE-Anteil,\n'
+            '        "warmwasser_m3": Warmwasserverbrauch in m³,\n'
+            '        "warmwasser_anteil_pct": prozentualer WW-Anteil,\n'
+            '        "heizkosten_grundkosten": Grundkostenanteil Heizung,\n'
+            '        "heizkosten_verbrauchskosten": Verbrauchskostenanteil,\n'
+            '        "heizkosten_gesamt": Heizkosten gesamt,\n'
+            '        "warmwasserkosten_gesamt": Warmwasserkosten gesamt,\n'
+            '        "gesamtkosten": Gesamtkosten dieser Einheit,\n'
+            '        "vorauszahlung": Geleistete Vorauszahlungen,\n'
+            '        "nachzahlung_guthaben": Nachzahlung (positiv) oder Guthaben (negativ)\n'
+            '      }\n'
+            '    ]\n\n'
+            f"Ista-Abrechnungstext:\n{pdf_text}"
+        )
+
+        try:
+            aktiv = cfg.get("ki_aktives_modell", "")
+            if aktiv:
+                anbieter, modell = KIAssistentPage._parse_modell_auswahl(aktiv)
+            else:
+                anbieter = cfg.get("ki_anbieter", "anthropic")
+                modell = cfg.get("ki_modell", "claude-opus-4-6")
+
+            _log(f"   Anbieter: {anbieter}, Modell: {modell}")
+
+            import urllib.request, json as _json
+            if anbieter == "anthropic":
+                key = cfg.get("anthropic_api_key", "").strip()
+                if not key:
+                    _log("   ⚠ Kein Anthropic API-Key – KI-Analyse übersprungen")
+                    return None
+                payload = _json.dumps({
+                    "model": modell,
+                    "max_tokens": 2048,
+                    "messages": [{"role": "user", "content": prompt}]
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    "https://api.anthropic.com/v1/messages", data=payload,
+                    headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"})
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = _json.loads(resp.read().decode())
+                antwort = data["content"][0]["text"]
+            else:
+                base_url = cfg.get("ollama_url", "http://localhost:11434").strip().rstrip("/")
+                payload = _json.dumps({
+                    "model": modell,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False
+                }).encode("utf-8")
+                req = urllib.request.Request(f"{base_url}/api/chat", data=payload,
+                    headers={"content-type": "application/json"})
+                with urllib.request.urlopen(req, timeout=90) as resp:
+                    data = _json.loads(resp.read().decode())
+                antwort = data["message"]["content"]
+
+            # JSON parsen
+            import re
+            try:
+                ki_daten = _json.loads(antwort.strip())
+            except Exception:
+                m = re.search(r'\{.*\}', antwort, re.DOTALL)
+                if not m:
+                    return None
+                ki_daten = _json.loads(m.group())
+
+            ki_daten = {k.lower(): v for k, v in ki_daten.items()}
+            return ki_daten
+
+        except Exception as ex:
+            _log(f"   ⚠ KI-Fehler: {ex}")
+            return None
+
+    def _save_import(self, dlg, pdf_pfad, daten: dict):
+        """Speichert die importierten Ista-Daten in die DB."""
+        if not daten:
+            return
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO ista_abrechnungen (abrechnungsjahr, abrechnungszeitraum_von, "
+                "abrechnungszeitraum_bis, pdf_pfad, gesamtkosten_heizung, gesamtkosten_warmwasser, "
+                "gesamtkosten_gesamt, objekt_adresse, ista_auftragsnummer) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    daten.get("abrechnungsjahr") or date.today().year - 1,
+                    daten.get("abrechnungszeitraum_von"),
+                    daten.get("abrechnungszeitraum_bis"),
+                    pdf_pfad,
+                    daten.get("gesamtkosten_heizung") or 0,
+                    daten.get("gesamtkosten_warmwasser") or 0,
+                    daten.get("gesamtkosten_gesamt") or 0,
+                    daten.get("objekt_adresse") or "",
+                    daten.get("ista_auftragsnummer") or "",
+                )
+            )
+            abr_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            for pos in (daten.get("positionen") or []):
+                pos = {k.lower(): v for k, v in pos.items()}
+                conn.execute(
+                    "INSERT INTO ista_positionen (abrechnung_id, ista_einheit_nr, "
+                    "ista_einheit_bezeichnung, mieter_name, hke, hke_anteil_pct, "
+                    "warmwasser_m3, warmwasser_anteil_pct, heizkosten_grundkosten, "
+                    "heizkosten_verbrauchskosten, heizkosten_gesamt, warmwasserkosten_gesamt, "
+                    "gesamtkosten, vorauszahlung, nachzahlung_guthaben) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        abr_id,
+                        str(pos.get("ista_einheit_nr") or ""),
+                        str(pos.get("ista_einheit_bezeichnung") or ""),
+                        str(pos.get("mieter_name") or ""),
+                        float(pos.get("hke") or 0),
+                        float(pos.get("hke_anteil_pct") or 0),
+                        float(pos.get("warmwasser_m3") or 0),
+                        float(pos.get("warmwasser_anteil_pct") or 0),
+                        float(pos.get("heizkosten_grundkosten") or 0),
+                        float(pos.get("heizkosten_verbrauchskosten") or 0),
+                        float(pos.get("heizkosten_gesamt") or 0),
+                        float(pos.get("warmwasserkosten_gesamt") or 0),
+                        float(pos.get("gesamtkosten") or 0),
+                        float(pos.get("vorauszahlung") or 0),
+                        float(pos.get("nachzahlung_guthaben") or 0),
+                    )
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        dlg.destroy()
+        self._load_abrechnungen()
+        messagebox.showinfo("✅ Import erfolgreich",
+            f"Ista-Abrechnung {daten.get('abrechnungsjahr')} importiert.\n"
+            f"{len(daten.get('positionen') or [])} Einheiten gespeichert.\n\n"
+            "Bitte jetzt im Tab 'Positionen & Zuordnung' die Wohnungen zuordnen.",
+            parent=self)
+
+    def _manuell_eingeben(self, dlg, pdf_pfad):
+        """Manuelle Eingabe der Ista-Daten wenn automatische Extraktion fehlschlägt."""
+        dlg.destroy()
+        dlg2 = tk.Toplevel(self)
+        dlg2.title("Ista-Daten manuell eingeben")
+        dlg2.geometry("560x500")
+        dlg2.configure(bg=BG_CARD)
+        dlg2.transient(self.winfo_toplevel())
+
+        tk.Label(dlg2, text="Ista-Abrechnung manuell erfassen",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 4), anchor="w")
+
+        felder = {}
+        for label, key, default in [
+            ("Abrechnungsjahr *", "abrechnungsjahr", str(date.today().year - 1)),
+            ("Zeitraum von (JJJJ-MM-TT)", "abrechnungszeitraum_von", f"{date.today().year-1}-01-01"),
+            ("Zeitraum bis (JJJJ-MM-TT)", "abrechnungszeitraum_bis", f"{date.today().year-1}-12-31"),
+            ("Objekt-Adresse", "objekt_adresse", ""),
+            ("Ista-Auftragsnummer", "ista_auftragsnummer", ""),
+            ("Gesamtkosten Heizung (€)", "gesamtkosten_heizung", "0"),
+            ("Gesamtkosten Warmwasser (€)", "gesamtkosten_warmwasser", "0"),
+            ("Gesamtkosten Gesamt (€)", "gesamtkosten_gesamt", "0"),
+        ]:
+            row = tk.Frame(dlg2, bg=BG_CARD)
+            row.pack(fill="x", padx=20, pady=3)
+            tk.Label(row, text=label, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     width=28, anchor="w").pack(side="left")
+            var = tk.StringVar(value=default)
+            tk.Entry(row, textvariable=var, bg=BG_INPUT, fg=TEXT, font=FONT_BODY,
+                     relief="flat", bd=0).pack(side="left", fill="x", expand=True, ipady=4)
+            felder[key] = var
+
+        tk.Label(dlg2, text="💡 Tipp: Nach dem Speichern können Sie Einzel-Positionen\n"
+                             "im Tab 'Positionen & Zuordnung' manuell ergänzen.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, pady=(8, 4), anchor="w")
+
+        def _save():
+            try:
+                daten = {
+                    "abrechnungsjahr": int(felder["abrechnungsjahr"].get() or date.today().year - 1),
+                    "abrechnungszeitraum_von": felder["abrechnungszeitraum_von"].get() or None,
+                    "abrechnungszeitraum_bis": felder["abrechnungszeitraum_bis"].get() or None,
+                    "objekt_adresse": felder["objekt_adresse"].get(),
+                    "ista_auftragsnummer": felder["ista_auftragsnummer"].get(),
+                    "gesamtkosten_heizung": float(felder["gesamtkosten_heizung"].get().replace(",", ".") or 0),
+                    "gesamtkosten_warmwasser": float(felder["gesamtkosten_warmwasser"].get().replace(",", ".") or 0),
+                    "gesamtkosten_gesamt": float(felder["gesamtkosten_gesamt"].get().replace(",", ".") or 0),
+                    "positionen": [],
+                }
+                self._save_import(dlg2, pdf_pfad, daten)
+            except ValueError as e:
+                messagebox.showerror("Eingabefehler", f"Ungültige Eingabe: {e}", parent=dlg2)
+
+        btn_row = tk.Frame(dlg2, bg=BG_CARD)
+        btn_row.pack(pady=12)
+        make_btn(btn_row, "💾 Speichern", _save).pack(side="left", padx=6)
+        make_btn(btn_row, "Abbrechen", dlg2.destroy, color=BG_INPUT, fg=TEXT).pack(side="left", padx=6)
+
+    def _delete_abrechnung(self):
+        if not hat_recht("Ista-Wärme", "loeschen"):
+            messagebox.showwarning("Berechtigung", "Keine Lösch-Berechtigung.", parent=self); return
+        sel = self._tree_abr.selection()
+        if not sel:
+            messagebox.showinfo("Kein Eintrag", "Bitte eine Abrechnung auswählen.", parent=self); return
+        abr_id = int(sel[0])
+        if not messagebox.askyesno("Löschen",
+            "Abrechnung und alle zugehörigen Positionen löschen?\nDies kann nicht rückgängig gemacht werden.",
+            parent=self):
+            return
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM ista_positionen WHERE abrechnung_id=?", (abr_id,))
+            conn.execute("DELETE FROM ista_abrechnungen WHERE id=?", (abr_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load_abrechnungen()
+        for i in self._tree_pos.get_children():
+            self._tree_pos.delete(i)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # HAUSVERWALTUNG-APP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7986,6 +8936,7 @@ class HausverwaltungApp(tk.Tk):
         ("💰", "Buchhaltung",    BuchhaltungPage),
         ("🔧", "Wartung",        WartungPage),
         ("📋", "Nebenkosten",    NebenkostenPage),
+        ("🔥", "Ista-Wärme",     IstaPage),
         ("💧", "Wasserkosten",   WasserkostenPage),
         ("⚖",  "Aufteilungen",   AufteilungenPage),
         ("✉️",  "Nachrichten",    NachrichtenPage),
