@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.16.0"
+APP_VERSION = "0.16.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.16.0 — Issues #38–#41:
@@ -9518,6 +9518,151 @@ class HausverwaltungApp(tk.Tk):
         win.geometry(f"+{x}+{y}")
 
 
+# ── Abhängigkeits-Prüfung beim Start ────────────────────────────────────────
+
+OPTIONALE_PAKETE = [
+    {
+        "name": "pypdf",
+        "pip": "pypdf",
+        "beschreibung": "PDF-Textextraktion",
+        "verwendet_fuer": "Ista-Wärme PDF-Import, Dokumente (PDF lesen)",
+        "install_cmd": ["pip", "install", "pypdf", "--break-system-packages"],
+    },
+    {
+        "name": "reportlab",
+        "pip": "reportlab",
+        "beschreibung": "PDF-Export",
+        "verwendet_fuer": "Jahresabrechnung, Wirtschaftsplan, Nebenkosten PDF",
+        "install_cmd": ["pip", "install", "reportlab", "--break-system-packages"],
+    },
+]
+
+def _prüfe_pakete() -> list:
+    """Gibt Liste der fehlenden optionalen Pakete zurück."""
+    fehlend = []
+    for pkg in OPTIONALE_PAKETE:
+        try:
+            __import__(pkg["name"])
+        except ImportError:
+            fehlend.append(pkg)
+    return fehlend
+
+
+class AbhängigkeitenDialog(tk.Toplevel):
+    """Zeigt fehlende optionale Pakete und bietet automatische Installation an."""
+
+    def __init__(self, parent, fehlende_pakete: list):
+        super().__init__(parent)
+        self.title("Fehlende Komponenten")
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(False, False)
+        self.configure(bg=BG_CARD)
+        self.geometry("580x420")
+        self._pakete = fehlende_pakete
+        self._status_vars = {}
+        self._build()
+        # Zentrieren
+        self.update_idletasks()
+        pw = parent.winfo_width(); ph = parent.winfo_height()
+        px = parent.winfo_x();    py = parent.winfo_y()
+        self.geometry(f"+{px + (pw - 580) // 2}+{py + (ph - 420) // 2}")
+
+    def _build(self):
+        # Kopf
+        hdr = tk.Frame(self, bg=ACCENT2, padx=20, pady=14)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="⚠  Fehlende Komponenten gefunden",
+                 bg=ACCENT2, fg="white", font=FONT_H2).pack(anchor="w")
+        tk.Label(hdr,
+                 text="Einige optionale Funktionen sind nicht verfügbar, "
+                      "weil folgende Python-Pakete fehlen.",
+                 bg=ACCENT2, fg="white", font=FONT_SMALL, wraplength=520,
+                 justify="left").pack(anchor="w", pady=(4, 0))
+
+        # Paket-Liste
+        for pkg in self._pakete:
+            f = tk.Frame(self, bg=BG_CARD, pady=6)
+            f.pack(fill="x", padx=20)
+            tk.Frame(f, bg=BORDER, height=1).pack(fill="x", pady=(0, 8))
+            top = tk.Frame(f, bg=BG_CARD)
+            top.pack(fill="x")
+            tk.Label(top, text=f"📦 {pkg['name']}",
+                     bg=BG_CARD, fg=TEXT, font=("Segoe UI Semibold", 11)).pack(side="left")
+            status_var = tk.StringVar(value="")
+            self._status_vars[pkg["name"]] = status_var
+            tk.Label(top, textvariable=status_var, bg=BG_CARD, fg=SUCCESS,
+                     font=FONT_SMALL).pack(side="right")
+            tk.Label(f, text=f"Funktion: {pkg['beschreibung']}  |  Wird benötigt für: {pkg['verwendet_fuer']}",
+                     bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     wraplength=520, justify="left").pack(anchor="w", pady=(2, 4))
+            install_cmd_str = " ".join(pkg["install_cmd"])
+            tk.Label(f, text=f"$ {install_cmd_str}",
+                     bg=BG_INPUT, fg=TEXT, font=("Courier New", 9),
+                     padx=8, pady=4).pack(anchor="w", fill="x")
+
+        # Buttons
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(12, 0))
+        btn_f = tk.Frame(self, bg=BG_CARD)
+        btn_f.pack(fill="x", padx=20, pady=12)
+
+        make_btn(btn_f, "⬇  Alle jetzt installieren",
+                 self._alle_installieren, color=SUCCESS).pack(side="left")
+        make_btn(btn_f, "Später",
+                 self.destroy, color=BG_INPUT, fg=TEXT).pack(side="right")
+
+        tk.Label(self, text="Die App startet auch ohne diese Pakete – betroffene Funktionen zeigen dann Hinweise.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 wraplength=540, justify="center").pack(pady=(0, 12))
+
+    def _alle_installieren(self):
+        """Installiert alle fehlenden Pakete via pip."""
+        import subprocess, sys
+        for pkg in self._pakete:
+            sv = self._status_vars.get(pkg["name"])
+            if sv:
+                sv.set("⏳ Installiere…")
+            self.update()
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install",
+                     pkg["pip"], "--break-system-packages"],
+                    capture_output=True, text=True, timeout=120)
+                if result.returncode == 0:
+                    if sv: sv.set("✅ Installiert")
+                else:
+                    if sv: sv.set(f"❌ Fehler: {result.stderr[:60]}")
+            except subprocess.TimeoutExpired:
+                if sv: sv.set("❌ Timeout")
+            except Exception as exc:
+                if sv: sv.set(f"❌ {exc}")
+            self.update()
+
+        # Prüfen ob alle installiert
+        noch_fehlend = _prüfe_pakete()
+        if not noch_fehlend:
+            messagebox.showinfo("Installation abgeschlossen",
+                "✅ Alle Pakete erfolgreich installiert!\n\n"
+                "Bitte starten Sie die App neu, damit die Änderungen wirksam werden.",
+                parent=self)
+            self.destroy()
+        else:
+            namen = ", ".join(p["name"] for p in noch_fehlend)
+            messagebox.showwarning("Teilweise fehlgeschlagen",
+                f"Folgende Pakete konnten nicht installiert werden:\n{namen}\n\n"
+                "Bitte installieren Sie diese manuell in der Kommandozeile.",
+                parent=self)
+
+
 if __name__ == "__main__":
+    # Vor dem Start: optionale Pakete prüfen und Hinweis anzeigen
+    _root_check = tk.Tk()
+    _root_check.withdraw()
+    _fehlend = _prüfe_pakete()
+    if _fehlend:
+        _dlg = AbhängigkeitenDialog(_root_check, _fehlend)
+        _root_check.wait_window(_dlg)
+    _root_check.destroy()
+
     app = HausverwaltungApp()
     app.mainloop()

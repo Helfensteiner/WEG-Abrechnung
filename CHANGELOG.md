@@ -7,6 +7,18 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.16.1] — 2026-04-05
+
+### Abhängigkeits-Prüfung beim App-Start
+
+- Beim Start wird automatisch geprüft ob optionale Python-Pakete fehlen (`pypdf`, `reportlab`)
+- Dialog `AbhängigkeitenDialog` zeigt fehlende Pakete mit Beschreibung, betroffenem Feature und Install-Befehl
+- Button „Alle jetzt installieren" führt `pip install` automatisch aus und zeigt Status pro Paket
+- App startet auch ohne optionale Pakete – betroffene Funktionen zeigen weiterhin inline-Hinweise
+- Funktion `_prüfe_pakete()` und Konstante `OPTIONALE_PAKETE` als zentrale Stelle für künftige Erweiterungen
+
+---
+
 ## [0.16.0] — 2026-04-05
 
 ### Default-Pfade, Aufteilungstypen, Keywords, Wirtschaftsplan-Vorschläge
