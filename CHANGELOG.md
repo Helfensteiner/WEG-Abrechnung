@@ -7,6 +7,36 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.15.0] — 2026-04-05
+
+### Smart Workflow: Kontoauszug → Buchung → Nebenkosten (Komplettimplementierung)
+
+#### Neue Features
+
+- **Konfidenz-Scoring**: `vorschlag_kategorie()` gibt jetzt einen Konfidenz-Score 0.0–1.0 zurück; 5 Stufen (95%=Exakt+Betrag, 85%=Exakter Text, 70%=Auftraggeber, 50%=Keyword, 0%=kein Treffer); Betrag-Min/Max-Filter in Buchungsregeln
+- **Status-Pipeline Kontoauszug**: Neues Feld `buchung_status` mit den Werten `importiert → vorschlag → uebernommen → abgerechnet`; farbkodierte Legende (grau/orange/grün/blau) in KontoauszugPage
+- **Abrechnungsrelevanz-Flag**: Neue Checkbox "Abrechnungsrelevant" im ZahlungDialog; Buchungen können explizit aus der Nebenkostenabrechnung ausgeschlossen werden; Nebenkosten-SQL-Queries filtern danach
+- **Drill-Down Einzelbuchungen**: Doppelklick auf Kategorie im §28-WEG-Tab öffnet Dialog mit allen Einzelbuchungen inkl. Abrechnungsrelevanz-Status
+- **Echte Umlageschlüssel**: `_berechne_umlageanteil()` berechnet Anteile nach Wohnfläche, MEA (Miteigentumsanteil in ‰), Kopfanzahl, Verbrauch oder HeizKV (70/30 §7 HeizKV); §556 BGB-Abrechnung nutzt jetzt den richtigen Schlüssel pro Kategorie aus `KOSTENARTEN`
+- **Verbrauchsdaten-Tab**: Neuer Tab "🔢 Verbrauch" in NebenkostenPage; Zählerstände (Anfang/Ende) pro Wohnung, Kategorie und Jahr eintragbar; Basis für verbrauchsabhängige Umlageschlüssel und HeizKV
+- **Pro-Rata-Temporis**: `pro_rata_temporis(einzug, auszug, jahr)` berechnet den zeitanteiligen Mieteranteil; §556-BGB-Abrechnung multipliziert Kosten- und Vorauszahlungsanteil mit dem Zeitfaktor
+- **Abrechnungs-Snapshot**: Button "🔒 Abrechnung feststellen" friert alle relevanten Buchungen in `abrechnung_positionen` ein; festgestellte Abrechnungen können nicht mehr geändert werden; Buchungen im Kontoauszug werden auf `abgerechnet` gesetzt; Übersicht aller Abrechnungen via "📋 Festgestellte Abrechnungen"
+- **Dashboard KPI Buchungs-Status**: Neue Kacheln zeigen Zugeordnet/Vorschläge offen/Ungeklärt/Abrechnung-Status in Echtzeit
+
+#### Neue DB-Tabellen
+- `verbrauchsdaten` — Zählerstände für verbrauchsabhängige Umlageschlüssel
+- `abrechnungen` — Festgestellte Jahresabrechnungs-Snapshots (WEG/BGB)
+- `abrechnung_positionen` — Eingefrorene Buchungspositionen pro Abrechnung
+- `abrechnung_anteile` — Berechnete Eigentümer-/Mieter-Anteile
+
+#### Neue DB-Spalten
+- `zahlungen.abrechnungsrelevant` (DEFAULT 1), `zahlungen.abrechnungsjahr`, `zahlungen.kommentar_abrechnung`
+- `buchungsregeln.betrag_min`, `buchungsregeln.betrag_max`, `buchungsregeln.konfidenz`
+- `kontoauszug.buchung_status` (importiert/vorschlag/uebernommen/abgerechnet)
+- `wohnungen.bewohner_anzahl` (für Kopfanzahl-Umlageschlüssel)
+
+---
+
 ## [0.14.1] — 2026-04-04
 
 ### Behoben

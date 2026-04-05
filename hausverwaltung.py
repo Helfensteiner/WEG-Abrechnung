@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.14.1"
+APP_VERSION = "0.15.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.13.1 — Bugfix KI-Assistent Ollama-Integration:
@@ -100,6 +100,15 @@ APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #             NameError KiAssistentPage → KIAssistentPage in _ki_analyse_starten behoben;
 #             Modell-Dropdown direkt im ZahlungDialog (Auswahl vor globalem Default);
 #             Beschreibungsfeld wird bei KI-Analyse nicht überschrieben wenn bereits gefüllt;
+#   0.15.0 — Smart-Workflow Komplettimplementierung (Phase 1-9):
+#             Phase 1: DB-Schema (verbrauchsdaten, abrechnungen, abrechnung_positionen, abrechnung_anteile)
+#             Phase 2: Konfidenz-Scoring in vorschlag_kategorie (4. Rückgabewert)
+#             Phase 3: Status-Pipeline im Kontoauszug (importiert/vorschlag/uebernommen/abgerechnet)
+#             Phase 4: Abrechnungsrelevanz in ZahlungDialog (Checkbox + abrechnungsjahr-Feld)
+#             Phase 5: Verbrauchsdaten-Tab in NebenkostenPage (HeizKV-Unterstützung)
+#             Phase 6: pro_rata_temporis-Funktion für zeitanteilige Mieterabrechnung
+#             Phase 7: Abrechnungs-Snapshot (_abrechnung_feststellen, _show_abrechnungen)
+#             Phase 8: Dashboard-KPIs für Buchungs-/Abrechnungsstatus
 #   0.13.0 — Issues #19, #20, #22, #30, #31, #32:
 #             #19 Wohngeld Soll/Ist: neuer Tab "💰 Wohngeld Soll/Ist" in BuchhaltungPage;
 #                 KPI-Zeile + Tabelle pro Eigentümer (MEA-Soll vs. gez. Hausgeld, Saldo, Status);
@@ -482,6 +491,53 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
     wasserkosten_eur REAL    DEFAULT 0
 );
 """)
+    # Neue Tabellen für Smart Workflow
+    c.executescript("""
+CREATE TABLE IF NOT EXISTS verbrauchsdaten (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wohnung_id INTEGER NOT NULL,
+    kategorie TEXT NOT NULL,
+    jahr INTEGER NOT NULL,
+    zaehlerstand_anfang REAL DEFAULT 0,
+    zaehlerstand_ende REAL DEFAULT 0,
+    einheit TEXT DEFAULT 'kWh',
+    ablesedatum DATE,
+    notizen TEXT,
+    UNIQUE(wohnung_id, kategorie, jahr)
+);
+CREATE TABLE IF NOT EXISTS abrechnungen (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    jahr INTEGER NOT NULL,
+    typ TEXT NOT NULL,
+    status TEXT DEFAULT 'Entwurf',
+    erstellt_am DATETIME DEFAULT CURRENT_TIMESTAMP,
+    festgestellt_am DATETIME,
+    festgestellt_von INTEGER,
+    pdf_pfad TEXT,
+    notizen TEXT,
+    UNIQUE(jahr, typ)
+);
+CREATE TABLE IF NOT EXISTS abrechnung_positionen (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    abrechnung_id INTEGER NOT NULL,
+    zahlung_id INTEGER NOT NULL,
+    kategorie TEXT NOT NULL,
+    betrag REAL NOT NULL,
+    umlageschluessel TEXT DEFAULT 'Wohnflaeche',
+    FOREIGN KEY (abrechnung_id) REFERENCES abrechnungen(id)
+);
+CREATE TABLE IF NOT EXISTS abrechnung_anteile (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    abrechnung_id INTEGER NOT NULL,
+    eigentuemer_id INTEGER,
+    mieter_id INTEGER,
+    kategorie TEXT NOT NULL,
+    anteil_faktor REAL DEFAULT 0,
+    betrag_anteil REAL DEFAULT 0,
+    vorauszahlung REAL DEFAULT 0,
+    FOREIGN KEY (abrechnung_id) REFERENCES abrechnungen(id)
+);
+""")
     conn.commit()
     # Indizes für häufig abgefragte Spalten (IF NOT EXISTS = idempotent)
     for idx_sql in [
@@ -494,6 +550,10 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
         "CREATE INDEX IF NOT EXISTS idx_wohnungen_eigentuemer ON wohnungen(eigentuemer_id)",
         "CREATE INDEX IF NOT EXISTS idx_mieter_wohnung ON mieter(wohnung_id)",
         "CREATE INDEX IF NOT EXISTS idx_wirtschaftsplan_jahr ON wirtschaftsplan(jahr)",
+        "CREATE INDEX IF NOT EXISTS idx_zahlungen_abrechnung ON zahlungen(abrechnungsrelevant, abrechnungsjahr)",
+        "CREATE INDEX IF NOT EXISTS idx_kontoauszug_status ON kontoauszug(buchung_status)",
+        "CREATE INDEX IF NOT EXISTS idx_abrechnung_positionen ON abrechnung_positionen(abrechnung_id)",
+        "CREATE INDEX IF NOT EXISTS idx_verbrauchsdaten ON verbrauchsdaten(wohnung_id, kategorie, jahr)",
     ]:
         try:
             c.execute(idx_sql)
@@ -540,6 +600,14 @@ CREATE TABLE IF NOT EXISTS wasserkosten_vorjahr (
         "ALTER TABLE mieter ADD COLUMN trockner_wasserkuehlung INTEGER DEFAULT 0",
         "ALTER TABLE zahlungen ADD COLUMN beleg_dateipfad TEXT",
         "ALTER TABLE zahlungen ADD COLUMN rechnungssteller TEXT",  # #35 KI-Erkennung
+        "ALTER TABLE zahlungen ADD COLUMN abrechnungsrelevant INTEGER DEFAULT 1",
+        "ALTER TABLE zahlungen ADD COLUMN abrechnungsjahr INTEGER",
+        "ALTER TABLE zahlungen ADD COLUMN kommentar_abrechnung TEXT",
+        "ALTER TABLE buchungsregeln ADD COLUMN betrag_min REAL",
+        "ALTER TABLE buchungsregeln ADD COLUMN betrag_max REAL",
+        "ALTER TABLE buchungsregeln ADD COLUMN konfidenz REAL DEFAULT 0.5",
+        "ALTER TABLE kontoauszug ADD COLUMN buchung_status TEXT DEFAULT 'importiert'",
+        "ALTER TABLE wohnungen ADD COLUMN bewohner_anzahl INTEGER DEFAULT 1",
     ]:
         try:
             c.execute(sql)
@@ -775,23 +843,27 @@ def _bereinige_text(text: str) -> str:
     words = text.lower().split()
     return " ".join(w for w in words if w not in FUELLWOERTER and len(w) > 2)
 
-def vorschlag_kategorie(buchungstext: str) -> tuple:
-    """Gibt (kategorie, typ, konto_typ) als Vorschlag zurück, basierend auf gelernten Regeln.
+def vorschlag_kategorie(buchungstext: str, betrag: float = None) -> tuple:
+    """Gibt (kategorie, typ, konto_typ, konfidenz) zurück basierend auf gelernten Regeln.
 
-    Matching-Strategie:
-    1. Exaktes Muster-Match im Buchungstext (höchste Priorität)
-    2. Auftraggeber/Empfänger-Match (vor dem ||)
-    3. Keyword-Match im Verwendungszweck (nach dem ||)
+    Konfidenz-Stufen:
+    - 0.95: Exakter Treffer + Betrag im erlaubten Bereich
+    - 0.85: Exakter Text-Treffer, kein Betragsfilter
+    - 0.70: Auftraggeber-Treffer (bereinigt)
+    - 0.50: Keyword-Treffer im Verwendungszweck
+    - 0.00: Kein Treffer
     """
     if not buchungstext:
-        return "", "Einnahme", "Wohngeldkonto"
+        return "", "Einnahme", "Wohngeldkonto", 0.0
     conn = get_db()
-    regeln = conn.execute(
-        "SELECT * FROM buchungsregeln ORDER BY treffer DESC, ist_korrektur DESC"
-    ).fetchall()
-    conn.close()
+    try:
+        regeln = conn.execute(
+            "SELECT * FROM buchungsregeln ORDER BY ist_korrektur DESC, treffer DESC, konfidenz DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+
     text_lower = buchungstext.lower()
-    # Auftraggeber/Empfänger und Verwendungszweck trennen
     if "||" in buchungstext:
         auftraggeber, vzweck = buchungstext.split("||", 1)
         auftraggeber = auftraggeber.strip().lower()
@@ -800,28 +872,79 @@ def vorschlag_kategorie(buchungstext: str) -> tuple:
         auftraggeber = ""
         vzweck = text_lower
 
-    # 1. Exaktes Muster-Match im gesamten Text (Priorität 1)
-    for regel in regeln:
-        muster = regel["muster"].lower()
-        if muster in text_lower:
-            return regel["kategorie"] or "", regel["typ"] or "Einnahme", regel["konto_typ"] or "Wohngeldkonto"
+    def _treffer(regel, basis_konfidenz):
+        k = regel["kategorie"] or ""
+        t = regel["typ"] or "Einnahme"
+        kt = regel["konto_typ"] or "Wohngeldkonto"
+        # Betragsfilter erhöht Konfidenz
+        if betrag is not None:
+            bmin = regel.get("betrag_min")
+            bmax = regel.get("betrag_max")
+            if bmin is not None and bmax is not None:
+                if bmin <= abs(betrag) <= bmax:
+                    return k, t, kt, min(basis_konfidenz + 0.10, 1.0)
+                else:
+                    return k, t, kt, max(basis_konfidenz - 0.15, 0.0)
+        return k, t, kt, basis_konfidenz
 
-    # 2. Auftraggeber-Match (Priorität 2)
+    # Stufe 1: Exakter Muster-Match im gesamten Text
+    for regel in regeln:
+        muster = regel["muster"].lower() if regel["muster"] else ""
+        if muster and muster in text_lower:
+            return _treffer(regel, 0.85)
+
+    # Stufe 2: Auftraggeber-Match (bereinigt)
     if auftraggeber:
         auftr_bereinigt = _bereinige_text(auftraggeber)
         for regel in regeln:
-            muster = _bereinige_text(regel["muster"])
+            muster = _bereinige_text(regel["muster"] if regel["muster"] else "")
             if muster and muster in auftr_bereinigt:
-                return regel["kategorie"] or "", regel["typ"] or "Einnahme", regel["konto_typ"] or "Wohngeldkonto"
+                return _treffer(regel, 0.70)
 
-    # 3. Keyword-Match im Verwendungszweck (Priorität 3)
+    # Stufe 3: Keyword-Match im Verwendungszweck
     vzweck_bereinigt = _bereinige_text(vzweck)
     for regel in regeln:
-        muster = _bereinige_text(regel["muster"])
+        muster = _bereinige_text(regel["muster"] if regel["muster"] else "")
         if muster and muster in vzweck_bereinigt:
-            return regel["kategorie"] or "", regel["typ"] or "Einnahme", regel["konto_typ"] or "Wohngeldkonto"
+            return _treffer(regel, 0.50)
 
-    return "", "Einnahme", "Wohngeldkonto"
+    return "", "Einnahme", "Wohngeldkonto", 0.0
+
+def pro_rata_temporis(einzug, auszug, jahr: int) -> float:
+    """Berechnet den zeitanteiligen Anteil eines Mieters im Jahr.
+    Gibt einen Faktor 0.0–1.0 zurück (z.B. 0.5 wenn 6 Monate bewohnt).
+
+    Args:
+        einzug: str ISO-Datum oder date-Objekt
+        auszug: str ISO-Datum, date-Objekt oder None (noch aktiv)
+        jahr: Abrechnungsjahr
+    """
+    from datetime import date as _date
+    def _to_date(v):
+        if v is None:
+            return None
+        if isinstance(v, _date):
+            return v
+        try:
+            return _date.fromisoformat(str(v)[:10])
+        except Exception:
+            return None
+
+    j_start = _date(jahr, 1, 1)
+    j_ende  = _date(jahr, 12, 31)
+    jahrestage = (j_ende - j_start).days + 1
+
+    einzug_d = _to_date(einzug) or j_start
+    auszug_d = _to_date(auszug) or j_ende
+
+    start = max(einzug_d, j_start)
+    ende  = min(auszug_d, j_ende)
+
+    if ende < start:
+        return 0.0
+
+    tage = (ende - start).days + 1
+    return max(0.0, min(1.0, tage / jahrestage))
 
 def lerne_buchung(buchungstext: str, kategorie: str, typ: str, konto_typ: str, ist_korrektur: bool = False):
     """Speichert oder aktualisiert eine Buchungsregel.
@@ -1110,6 +1233,42 @@ class DashboardPage(tk.Frame):
             tk.Label(info, text=f"{row['einheit'] or '–'}  ·  {row['prioritaet']}",
                      bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL, anchor="w").pack(fill="x")
         conn.close()
+
+        # Buchungs-Status KPIs
+        self._build_buchungsstatus_kpis(bottom)
+
+    def _build_buchungsstatus_kpis(self, parent):
+        """KPI-Kacheln für Buchungs-/Abrechnungsstatus."""
+        conn = get_db()
+        try:
+            total   = conn.execute("SELECT COUNT(*) FROM kontoauszug").fetchone()[0]
+            zugeord = conn.execute("SELECT COUNT(*) FROM kontoauszug WHERE buchung_status='uebernommen' OR buchung_status='abgerechnet'").fetchone()[0]
+            offen   = conn.execute("SELECT COUNT(*) FROM kontoauszug WHERE als_buchung_uebernommen=0 AND kategorie_vorschlag IS NOT NULL AND kategorie_vorschlag!=''").fetchone()[0]
+            ungekl  = conn.execute("SELECT COUNT(*) FROM kontoauszug WHERE als_buchung_uebernommen=0 AND (kategorie_vorschlag IS NULL OR kategorie_vorschlag='')").fetchone()[0]
+            abr_status = conn.execute("SELECT status, jahr FROM abrechnungen WHERE typ='WEG' ORDER BY jahr DESC LIMIT 1").fetchone()
+        finally:
+            conn.close()
+
+        abr_text = "Keine Abrechnung" if not abr_status else f"{abr_status['status']} {abr_status['jahr']}"
+        abr_farbe = SUCCESS if (abr_status and abr_status["status"] == "Festgestellt") else ACCENT
+
+        frame = tk.Frame(parent, bg=BG_CARD)
+        frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 8), pady=(8, 0), ipady=6)
+        tk.Label(frame, text="Buchungs-Status", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=12)
+
+        kpis_frame = tk.Frame(frame, bg=BG_CARD)
+        kpis_frame.pack(fill="x", padx=12)
+
+        for text, wert, farbe in [
+            ("✅ Zugeordnet", f"{zugeord}/{total}", SUCCESS),
+            ("🟡 Vorschläge offen", str(offen), ACCENT),
+            ("🔴 Ungeklärt", str(ungekl), DANGER if ungekl > 0 else TEXT_LIGHT),
+            ("📋 Abrechnung", abr_text, abr_farbe),
+        ]:
+            card = tk.Frame(kpis_frame, bg=BG_INPUT, bd=0, relief="flat")
+            card.pack(side="left", padx=(0, 8), pady=4, ipadx=12, ipady=8)
+            tk.Label(card, text=wert, bg=BG_INPUT, fg=farbe, font=FONT_H2).pack()
+            tk.Label(card, text=text, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack()
 
 # ── Mieter-Seite ──────────────────────────────────────────────────────────────
 
@@ -2040,11 +2199,12 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
                  v.get("status", "Geprüft"), v.get("beleg_dateipfad"),
-                 v.get("rechnungssteller") or None))
+                 v.get("rechnungssteller") or None, v.get("abrechnungsrelevant", 1),
+                 v.get("abrechnungsjahr") or None))
             conn.commit(); conn.close()
             if self._active_tab == "buchungen": self._load_buchungen()
 
@@ -2064,11 +2224,12 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
                  v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"),
-                 v.get("beleg_dateipfad"), v.get("rechnungssteller") or None, int(sel[0])))
+                 v.get("beleg_dateipfad"), v.get("rechnungssteller") or None,
+                 v.get("abrechnungsrelevant", 1), v.get("abrechnungsjahr") or None, int(sel[0])))
             conn.commit(); conn.close()
             self._load_buchungen()
 
@@ -2390,7 +2551,7 @@ class BuchhaltungPage(tk.Frame):
             raw = r["buchungstext"] or ""
             gegenkonto = raw.split("||")[0] if "||" in raw else ""
             vzweck     = raw.split("||")[1] if "||" in raw else raw
-            vorschlag  = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
+            vorschlag  = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]  # 4. Rückgabewert ignoriert
             tag = "mit_vorschlag" if vorschlag else ""
             iban_kurz = f"···{r['iban'][-8:]}" if r.get("iban") else r.get("konto_typ") or "–"
             self.tree_v.insert("", "end", iid=r["id"], values=(
@@ -2421,7 +2582,7 @@ class BuchhaltungPage(tk.Frame):
         raw = row["buchungstext"] or ""
         gegenkonto = raw.split("||")[0] if "||" in raw else ""
         vzweck     = raw.split("||")[1] if "||" in raw else raw
-        kat_v, typ_v, kto_v = vorschlag_kategorie(raw)
+        kat_v, typ_v, kto_v, _ = vorschlag_kategorie(raw)  # Konfidenz ignoriert
         # Vorhandenen Kategorie-Vorschlag bevorzugen
         kat_v = row.get("kategorie_vorschlag") or kat_v
         kt = row.get("konto_typ") or kto_v or "Wohngeldkonto"
@@ -2504,7 +2665,7 @@ class BuchhaltungPage(tk.Frame):
         for row_raw in rows:
             row = dict(row_raw)
             raw = row["buchungstext"] or ""
-            kat = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
+            kat = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]  # Konfidenz ignoriert
             if not kat:
                 skipped += 1
                 continue
@@ -2555,7 +2716,7 @@ class BuchhaltungPage(tk.Frame):
         if not row_raw: return
         row = dict(row_raw)
         raw = row["buchungstext"] or ""
-        kat_v = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
+        kat_v = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]  # Konfidenz ignoriert
         # Auswahldialog für Kategorie
         win = tk.Toplevel(self)
         win.title("Kategorie korrigieren")
@@ -2965,6 +3126,16 @@ class ZahlungDialog(BaseDialog):
         self._add_field("Belegnummer",  "belegnr",      r.get("belegnr", ""))
         self._add_field("Status", "status", r.get("status", "Neu"),
                         widget_type="combo", options=["Neu", "Geprüft", "Freigegeben"])
+        self._add_field("Abrechnungsjahr", "abrechnungsjahr",
+                        r.get("abrechnungsjahr", "") or "")
+
+        # Abrechnungsrelevanz-Checkbox
+        abr_frame = tk.Frame(self._body, bg=BG_CARD)
+        abr_frame.pack(fill="x", padx=20, pady=(2, 4))
+        self._abr_var = tk.BooleanVar(value=bool(r.get("abrechnungsrelevant", 1)))
+        tk.Checkbutton(abr_frame, text="✅ Abrechnungsrelevant (in Nebenkostenabrechnung einbeziehen)",
+                       variable=self._abr_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                       activebackground=BG_CARD, selectcolor=BG_CARD).pack(anchor="w")
 
         # ── Beleg-Datei + KI-Analyse (#35) ───────────────────────────────────
         tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
@@ -3285,6 +3456,8 @@ class ZahlungDialog(BaseDialog):
         if v.get("datum"):
             v["datum"] = parse_datum(v["datum"])
         v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
+        # Abrechnungsrelevanz speichern
+        v["abrechnungsrelevant"] = 1 if self._abr_var.get() else 0
         self.result = v; self.destroy()
 
 # ── Wartung-Seite ─────────────────────────────────────────────────────────────
@@ -3678,7 +3851,8 @@ class NebenkostenPage(tk.Frame):
         tab_bar.pack(fill="x", padx=20, pady=(8, 0))
         for tid, label in [("weg",  "🏛 §28 WEG – Eigentümer"),
                             ("bgb", "👤 §556 BGB – Mieter"),
-                            ("wp",  "📋 Wirtschaftsplan")]:
+                            ("wp",  "📋 Wirtschaftsplan"),
+                            ("verbrauch", "🔢 Verbrauch")]:
             btn = tk.Button(tab_bar, text=label, font=FONT_NAV, relief="flat", bd=0,
                             padx=14, pady=7, cursor="hand2",
                             command=lambda t=tid: self._switch_tab(t))
@@ -3703,6 +3877,9 @@ class NebenkostenPage(tk.Frame):
         make_btn(yr_row, "🔄 Auswertung", self._load_weg).pack(side="left")
         make_btn(yr_row, "📄 PDF Export", self._export_pdf_weg,
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(8, 0))
+        make_btn(yr_row, "🔒 Abrechnung feststellen", self._abrechnung_feststellen).pack(side="left", padx=(6, 0))
+        make_btn(yr_row, "📋 Festgestellte Abrechnungen", self._show_abrechnungen,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(6, 0))
 
         # KPI-Zeile
         self._weg_kpi = tk.Frame(self._view_weg, bg=BG_CARD)
@@ -3717,6 +3894,10 @@ class NebenkostenPage(tk.Frame):
         for c, w in zip(cols_kat, [200, 160, 100, 90, 110]):
             self._tree_weg_kat.heading(c, text=c)
             self._tree_weg_kat.column(c, width=w, anchor="w")
+        # Drill-Down: Doppelklick zeigt Einzelbuchungen der Kategorie
+        self._tree_weg_kat.bind("<Double-1>", self._show_kategorie_detail)
+        tk.Label(self._view_weg, text="💡 Doppelklick auf Kategorie → Einzelbuchungen anzeigen",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
 
         # Eigentümer-Anteil-Tabelle
         tk.Label(self._view_weg, text="Anteil pro Eigentümer (nach MEA)", bg=BG_CARD,
@@ -3797,6 +3978,32 @@ class NebenkostenPage(tk.Frame):
         if hat_recht("Nebenkosten", "loeschen"):
             make_btn(wp_btn, "🗑 Löschen", self._wp_delete, color=DANGER).pack(side="left")
 
+        # ── Tab Verbrauch ──────────────────────────────────────────────────────
+        self._view_verbrauch = tk.Frame(self._content, bg=BG_CARD)
+        ctrl = tk.Frame(self._view_verbrauch, bg=BG_CARD)
+        ctrl.pack(fill="x", padx=20, pady=10)
+        tk.Label(ctrl, text="Jahr:", bg=BG_CARD, fg=TEXT, font=FONT_BODY).pack(side="left")
+        self._vd_jahr_var = tk.StringVar(value=str(date.today().year - 1))
+        ttk.Combobox(ctrl, textvariable=self._vd_jahr_var,
+                     values=[str(y) for y in range(date.today().year, date.today().year - 5, -1)],
+                     width=6, state="readonly").pack(side="left", padx=6)
+        tk.Label(ctrl, text="Kategorie:", bg=BG_CARD, fg=TEXT, font=FONT_BODY).pack(side="left", padx=(12, 0))
+        self._vd_kat_var = tk.StringVar(value="Heizung")
+        ttk.Combobox(ctrl, textvariable=self._vd_kat_var,
+                     values=["Heizung", "Wasser/Abwasser", "Strom (Allgemein)"],
+                     width=20, state="readonly").pack(side="left", padx=6)
+        make_btn(ctrl, "🔄 Laden", self._load_verbrauch_tab).pack(side="left", padx=6)
+        tk.Frame(self._view_verbrauch, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(0, 8))
+        frame, tree = make_table(self._view_verbrauch, ("Wohnung", "Anfang", "Ende", "Verbrauch", "Einheit", "Ablesedatum"))
+        for col, w in [("Wohnung", 160), ("Anfang", 80), ("Ende", 80), ("Verbrauch", 80), ("Einheit", 60), ("Ablesedatum", 100)]:
+            tree.column(col, width=w)
+            tree.heading(col, text=col)
+        frame.pack(fill="both", expand=True, padx=20)
+        self._vd_tree = tree
+        btn_row = tk.Frame(self._view_verbrauch, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=8)
+        make_btn(btn_row, "✏️ Bearbeiten", self._edit_verbrauch).pack(side="left", padx=(0, 6))
+
         self._switch_tab("weg")
 
     # ── Tab-Wechsel ────────────────────────────────────────────────────────────
@@ -3806,11 +4013,117 @@ class NebenkostenPage(tk.Frame):
         for t, btn in self._tab_btns.items():
             btn.configure(bg=ACCENT if t == tid else BG_CARD,
                           fg=TEXT_WHITE if t == tid else TEXT)
-        for frame in (self._view_weg, self._view_bgb, self._view_wp):
+        for frame in (self._view_weg, self._view_bgb, self._view_wp, self._view_verbrauch):
             frame.pack_forget()
-        {"weg": self._view_weg, "bgb": self._view_bgb, "wp": self._view_wp}[tid].pack(
+        {"weg": self._view_weg, "bgb": self._view_bgb, "wp": self._view_wp, "verbrauch": self._view_verbrauch}[tid].pack(
             fill="both", expand=True)
-        {"weg": self._load_weg, "bgb": self._load_bgb, "wp": self._load_wp}[tid]()
+        {"weg": self._load_weg, "bgb": self._load_bgb, "wp": self._load_wp, "verbrauch": self._load_verbrauch_tab}[tid]()
+
+    # ── Verbrauchsdaten-Tab ────────────────────────────────────────────────────
+
+    def _load_verbrauch_tab(self):
+        """Ladet Verbrauchsdaten aus der DB und zeigt sie in der Tabelle."""
+        if not hasattr(self, "_vd_tree"):
+            return
+        for i in self._vd_tree.get_children():
+            self._vd_tree.delete(i)
+        jahr = self._vd_jahr_var.get() if hasattr(self, "_vd_jahr_var") else str(date.today().year - 1)
+        kat = self._vd_kat_var.get() if hasattr(self, "_vd_kat_var") else "Heizung"
+        conn = get_db()
+        try:
+            wohnungen = conn.execute("SELECT id, bezeichnung FROM wohnungen ORDER BY bezeichnung").fetchall()
+            vd_map = {}
+            for vd in conn.execute(
+                "SELECT * FROM verbrauchsdaten WHERE jahr=? AND kategorie=?", (int(jahr), kat)
+            ).fetchall():
+                vd_map[vd["wohnung_id"]] = vd
+        finally:
+            conn.close()
+        for w in wohnungen:
+            vd = vd_map.get(w["id"])
+            if vd:
+                anfang = vd["zaehlerstand_anfang"] or 0
+                ende = vd["zaehlerstand_ende"] or 0
+                verbrauch = max(0, ende - anfang)
+                self._vd_tree.insert("", "end", iid=f"w{w['id']}",
+                    values=(w["bezeichnung"], f"{anfang:.1f}", f"{ende:.1f}",
+                            f"{verbrauch:.1f}", vd["einheit"] or "kWh",
+                            fmt_date(vd["ablesedatum"])))
+            else:
+                self._vd_tree.insert("", "end", iid=f"w{w['id']}",
+                    values=(w["bezeichnung"], "–", "–", "–", "kWh", "–"),
+                    tags=("leer",))
+        self._vd_tree.tag_configure("leer", foreground=TEXT_LIGHT)
+        tree_empty_hint(self._vd_tree)
+
+    def _edit_verbrauch(self):
+        """Dialog zum Bearbeiten von Verbrauchsdaten einer Wohnung."""
+        if not hasattr(self, "_vd_tree"):
+            return
+        sel = self._vd_tree.selection()
+        if not sel:
+            messagebox.showinfo("Kein Eintrag", "Bitte eine Wohnung auswählen.", parent=self)
+            return
+        iid = sel[0]
+        wohnung_id = int(iid.replace("w", ""))
+        jahr = int(self._vd_jahr_var.get() if hasattr(self, "_vd_jahr_var") else date.today().year - 1)
+        kat = self._vd_kat_var.get() if hasattr(self, "_vd_kat_var") else "Heizung"
+        conn = get_db()
+        try:
+            vd = conn.execute("SELECT * FROM verbrauchsdaten WHERE wohnung_id=? AND jahr=? AND kategorie=?",
+                              (wohnung_id, jahr, kat)).fetchone()
+            wh_name = conn.execute("SELECT bezeichnung FROM wohnungen WHERE id=?", (wohnung_id,)).fetchone()
+        finally:
+            conn.close()
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Verbrauch: {wh_name['bezeichnung'] if wh_name else ''} – {kat} – {jahr}")
+        dlg.geometry("420x320")
+        dlg.configure(bg=BG_CARD)
+        dlg.transient(self.winfo_toplevel())
+        felder = {}
+        for label, key, default in [
+            ("Zählerstand Anfang", "anfang", str(vd["zaehlerstand_anfang"] or 0) if vd else "0"),
+            ("Zählerstand Ende", "ende", str(vd["zaehlerstand_ende"] or 0) if vd else "0"),
+            ("Einheit (kWh / m³)", "einheit", vd["einheit"] if vd else "kWh"),
+            ("Ablesedatum", "ablesedatum", vd["ablesedatum"] or "" if vd else ""),
+            ("Notizen", "notizen", vd["notizen"] or "" if vd else ""),
+        ]:
+            row = tk.Frame(dlg, bg=BG_CARD)
+            row.pack(fill="x", padx=20, pady=4)
+            tk.Label(row, text=label, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL, width=22, anchor="w").pack(side="left")
+            var = tk.StringVar(value=default)
+            tk.Entry(row, textvariable=var, bg=BG_INPUT, fg=TEXT, font=FONT_BODY, relief="flat").pack(side="left", fill="x", expand=True)
+            felder[key] = var
+        def _speichern():
+            try:
+                anfang = float(felder["anfang"].get().replace(",", ".") or 0)
+                ende = float(felder["ende"].get().replace(",", ".") or 0)
+            except ValueError:
+                messagebox.showerror("Eingabefehler", "Zählerstände müssen Zahlen sein.", parent=dlg)
+                return
+            conn2 = get_db()
+            try:
+                conn2.execute(
+                    "INSERT INTO verbrauchsdaten (wohnung_id, kategorie, jahr, zaehlerstand_anfang, "
+                    "zaehlerstand_ende, einheit, ablesedatum, notizen) VALUES (?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(wohnung_id,kategorie,jahr) DO UPDATE SET "
+                    "zaehlerstand_anfang=excluded.zaehlerstand_anfang, "
+                    "zaehlerstand_ende=excluded.zaehlerstand_ende, "
+                    "einheit=excluded.einheit, ablesedatum=excluded.ablesedatum, "
+                    "notizen=excluded.notizen",
+                    (wohnung_id, kat, jahr, anfang, ende,
+                     felder["einheit"].get(), felder["ablesedatum"].get() or None,
+                     felder["notizen"].get() or None)
+                )
+                conn2.commit()
+            finally:
+                conn2.close()
+            dlg.destroy()
+            self._load_verbrauch_tab()
+        btn_row = tk.Frame(dlg, bg=BG_CARD)
+        btn_row.pack(pady=12)
+        make_btn(btn_row, "💾 Speichern", _speichern).pack(side="left", padx=6)
+        make_btn(btn_row, "Abbrechen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(side="left", padx=6)
 
     # ── §28 WEG Eigentümer ─────────────────────────────────────────────────────
 
@@ -3928,7 +4241,14 @@ class NebenkostenPage(tk.Frame):
             (jahr_ende, jahr_start)).fetchall()
         conn.close()
 
-        total_flaeche = sum(parse_float(w["flaeche_qm"]) or 0 for w in wohnungen)
+        # Alle Wohnungen für Umlageschlüssel-Berechnung laden
+        conn2 = get_db()
+        try:
+            alle_wohnungen_raw = conn2.execute("SELECT * FROM wohnungen").fetchall()
+        finally:
+            conn2.close()
+        alle_wohnungen = [dict(w) for w in alle_wohnungen_raw]
+        total_flaeche = sum(parse_float(w.get("flaeche_qm") or 0) for w in alle_wohnungen)
 
         # KPI – inkl. Leerstand-Info (#24)
         leerstand_count = sum(1 for w in wohnungen if w["mieter_id"] is None)
@@ -3955,22 +4275,66 @@ class NebenkostenPage(tk.Frame):
             self._tree_bgb_kat.insert("", "end", values=(
                 kat, fmt_euro(r["s"] or 0), schluessel))
 
-        # Mieter-Tabelle – Leerstand-Wohnungen separat kennzeichnen (#24)
+        # Kosten-Dict: Kategorie → Betrag
+        kosten_dict = {r["kategorie"]: abs(r["s"] or 0) for r in umlage_rows}
+
+        # Mieter-Tabelle – Pro-Rata-Temporis + echte Umlageschlüssel (#smart-workflow)
         for i in self._tree_bgb_mi.get_children():
             self._tree_bgb_mi.delete(i)
         for w in wohnungen:
+            ist_leerstand = w["mieter_id"] is None
+            # Zeitanteil (Pro-Rata-Temporis) – nur wenn Mieter vorhanden
+            einzug = None
+            auszug = None
+            if not ist_leerstand:
+                # Mieter-Daten laden um Einzug/Auszug zu erhalten
+                conn3 = get_db()
+                try:
+                    mi = conn3.execute("SELECT einzug, auszug FROM mieter WHERE id=?",
+                                       (w["mieter_id"],)).fetchone()
+                    if mi:
+                        einzug = mi["einzug"]
+                        auszug = mi["auszug"]
+                finally:
+                    conn3.close()
+            zeitfaktor = pro_rata_temporis(einzug, auszug, int(jahr)) if not ist_leerstand else 1.0
+
+            # Kosten summieren nach Umlageschlüssel pro Kategorie
+            kosten = 0.0
+            wh_id = None
+            conn4 = get_db()
+            try:
+                wh = conn4.execute("SELECT id FROM wohnungen WHERE bezeichnung=?",
+                                   (w["bezeichnung"],)).fetchone()
+                if wh:
+                    wh_id = wh["id"]
+            finally:
+                conn4.close()
+            if wh_id:
+                for kat, kat_kosten in kosten_dict.items():
+                    kat_info = BuchhaltungPage.KOSTENARTEN.get(kat, {})
+                    schluessel = kat_info.get("schluessel", "Wohnflaeche")
+                    if not schluessel or schluessel in ("–", "-"):
+                        schluessel = "Wohnflaeche"
+                    anteil = self._berechne_umlageanteil(wh_id, schluessel, int(jahr), alle_wohnungen)
+                    kosten += kat_kosten * anteil * zeitfaktor
+            else:
+                # Fallback: Wohnfläche
+                flaeche = parse_float(w["flaeche_qm"]) or 0
+                anteil_pct = (flaeche / total_flaeche) if total_flaeche else 0
+                kosten = total_umlage * anteil_pct * zeitfaktor
+
             flaeche = parse_float(w["flaeche_qm"]) or 0
             anteil_pct = (flaeche / total_flaeche * 100) if total_flaeche else 0
-            kosten = total_umlage * anteil_pct / 100
-            ist_leerstand = w["mieter_id"] is None
+
             if ist_leerstand:
                 mieter_name   = "⚠ Leerstand (Eigentümer)"
                 vorauszahlung = 0.0
-                saldo         = -kosten   # Kosten trägt Eigentümer, keine Vorauszahlung
+                saldo         = -kosten
                 color_tag     = "leerstand"
             else:
                 mieter_name   = f"{w['vorname'] or ''} {w['name']}".strip()
-                vorauszahlung = (parse_float(w["nebenkosten_vorauszahlung"]) or 0) * 12
+                vorauszahlung = (parse_float(w["nebenkosten_vorauszahlung"]) or 0) * 12 * zeitfaktor
                 saldo         = vorauszahlung - kosten
                 color_tag     = "plus" if saldo >= 0 else "minus"
             self._tree_bgb_mi.insert("", "end", values=(
@@ -4174,6 +4538,239 @@ class NebenkostenPage(tk.Frame):
                 subprocess.Popen(["xdg-open", pfad])
         except Exception:
             pass
+
+    def _abrechnung_feststellen(self):
+        """Erstellt einen unveränderlichen Snapshot der aktuellen Abrechnung."""
+        jahr = int(self._weg_jahr.get() if hasattr(self, "_weg_jahr") else date.today().year - 1)
+
+        # Prüfen ob bereits festgestellt
+        conn = get_db()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM abrechnungen WHERE jahr=? AND typ='WEG'", (jahr,)
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if existing and existing["status"] == "Festgestellt":
+            messagebox.showinfo("Bereits festgestellt",
+                f"Die WEG-Abrechnung {jahr} wurde bereits am "
+                f"{fmt_date(existing['festgestellt_am'])} festgestellt.\n"
+                "Sie kann nicht erneut festgestellt werden.", parent=self)
+            return
+
+        if not messagebox.askyesno("Abrechnung feststellen",
+            f"WEG-Jahresabrechnung {jahr} jetzt feststellen?\n\n"
+            "Nach der Feststellung können keine Buchungen mehr hinzugefügt "
+            "oder geändert werden, ohne eine neue Abrechnung zu erstellen.\n\n"
+            "Fortfahren?", parent=self):
+            return
+
+        # Positionen einfrieren
+        conn = get_db()
+        try:
+            # Abrechnung anlegen oder Status setzen
+            if existing:
+                conn.execute("DELETE FROM abrechnung_positionen WHERE abrechnung_id=?", (existing["id"],))
+                conn.execute("DELETE FROM abrechnung_anteile WHERE abrechnung_id=?", (existing["id"],))
+                abr_id = existing["id"]
+                conn.execute(
+                    "UPDATE abrechnungen SET status='Festgestellt', festgestellt_am=CURRENT_TIMESTAMP WHERE id=?",
+                    (abr_id,)
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO abrechnungen (jahr, typ, status, festgestellt_am) VALUES (?,?,?,CURRENT_TIMESTAMP)",
+                    (jahr, "WEG", "Festgestellt")
+                )
+                abr_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            # Alle relevanten Buchungen einfrieren
+            buchungen = conn.execute(
+                "SELECT id, kategorie, betrag FROM zahlungen "
+                "WHERE typ='Ausgabe' AND strftime('%Y',datum)=? "
+                "AND (abrechnungsrelevant IS NULL OR abrechnungsrelevant=1)",
+                (str(jahr),)
+            ).fetchall()
+
+            for b in buchungen:
+                kat_info = BuchhaltungPage.KOSTENARTEN.get(b["kategorie"], {})
+                schluessel = kat_info.get("schluessel", "Wohnflaeche")
+                conn.execute(
+                    "INSERT INTO abrechnung_positionen (abrechnung_id, zahlung_id, kategorie, betrag, umlageschluessel) "
+                    "VALUES (?,?,?,?,?)",
+                    (abr_id, b["id"], b["kategorie"], abs(b["betrag"]), schluessel)
+                )
+                # Buchungen als 'abgerechnet' markieren
+                conn.execute(
+                    "UPDATE kontoauszug SET buchung_status='abgerechnet' WHERE zahlung_id=?",
+                    (b["id"],)
+                )
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        messagebox.showinfo("✅ Festgestellt",
+            f"WEG-Abrechnung {jahr} wurde festgestellt.\n"
+            f"{len(buchungen)} Buchungen eingefroren.", parent=self)
+
+    def _show_abrechnungen(self):
+        """Zeigt alle festgestellten Abrechnungen."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Festgestellte Abrechnungen")
+        dlg.geometry("600x400")
+        dlg.configure(bg=BG_CARD)
+        dlg.transient(self.winfo_toplevel())
+
+        tk.Label(dlg, text="Festgestellte Abrechnungen",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 8), anchor="w")
+
+        frame, tree = make_table(dlg, ("Jahr", "Typ", "Status", "Festgestellt am", "Positionen"))
+        for col, w in [("Jahr", 60), ("Typ", 60), ("Status", 100), ("Festgestellt am", 140), ("Positionen", 80)]:
+            tree.column(col, width=w)
+            tree.heading(col, text=col)
+        frame.pack(fill="both", expand=True, padx=16, pady=8)
+
+        conn = get_db()
+        try:
+            for a in conn.execute("SELECT * FROM abrechnungen ORDER BY jahr DESC, typ").fetchall():
+                n = conn.execute("SELECT COUNT(*) FROM abrechnung_positionen WHERE abrechnung_id=?",
+                                 (a["id"],)).fetchone()[0]
+                tree.insert("", "end", values=(
+                    a["jahr"], a["typ"], a["status"],
+                    fmt_date(a["festgestellt_am"]) if a["festgestellt_am"] else "–",
+                    str(n)
+                ))
+        finally:
+            conn.close()
+
+        tree_empty_hint(tree)
+        make_btn(dlg, "Schließen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(pady=12)
+
+    # ── Drill-Down: Einzelbuchungen pro Kategorie ─────────────────────────────
+
+    def _show_kategorie_detail(self, event=None):
+        """Drill-Down: Doppelklick auf Kategorie zeigt Einzelbuchungen."""
+        tree = event.widget if event else None
+        if not tree:
+            return
+        sel = tree.selection()
+        if not sel:
+            return
+        vals = tree.item(sel[0], "values")
+        if not vals or vals[0] in ("", "(Keine Einträge vorhanden)"):
+            return
+        kategorie = vals[0]
+        try:
+            jahr = int(self._weg_jahr.get() if hasattr(self, "_weg_jahr") else date.today().year - 1)
+        except ValueError:
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Buchungen: {kategorie} ({jahr})")
+        dlg.geometry("720x420")
+        dlg.configure(bg=BG_CARD)
+        dlg.transient(self.winfo_toplevel())
+
+        tk.Label(dlg, text=f"Einzelbuchungen – {kategorie} – {jahr}",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 8), anchor="w")
+
+        frame, tree2 = make_table(dlg, ("Datum", "Beschreibung", "Rechnungssteller", "Betrag", "Relevant"))
+        for col, w in [("Datum", 90), ("Beschreibung", 230), ("Rechnungssteller", 150), ("Betrag", 100), ("Relevant", 70)]:
+            tree2.column(col, width=w, anchor="w" if col != "Betrag" else "e")
+            tree2.heading(col, text=col)
+        frame.pack(fill="both", expand=True, padx=16, pady=8)
+
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT datum, beschreibung, rechnungssteller, betrag, abrechnungsrelevant "
+                "FROM zahlungen WHERE typ='Ausgabe' AND kategorie=? AND strftime('%Y',datum)=? "
+                "ORDER BY datum",
+                (kategorie, str(jahr))
+            ).fetchall()
+        finally:
+            conn.close()
+
+        summe = 0.0
+        for row in rows:
+            relevant = "✅" if (row["abrechnungsrelevant"] is None or row["abrechnungsrelevant"] != 0) else "❌"
+            betrag_abs = abs(row["betrag"] or 0)
+            tree2.insert("", "end", values=(
+                fmt_date(row["datum"]),
+                row["beschreibung"] or "",
+                row["rechnungssteller"] or "",
+                fmt_euro(betrag_abs),
+                relevant
+            ))
+            if row["abrechnungsrelevant"] is None or row["abrechnungsrelevant"] != 0:
+                summe += betrag_abs
+
+        tree_empty_hint(tree2)
+        tk.Label(dlg, text=f"Summe (abrechnungsrelevant): {fmt_euro(summe)}",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H3).pack(padx=16, pady=(0, 4), anchor="e")
+        make_btn(dlg, "Schließen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(pady=(0, 12))
+
+    # ── Echte Umlageschlüssel-Berechnung ─────────────────────────────────────
+
+    def _berechne_umlageanteil(self, wohnung_id: int, schluessel: str, jahr: int,
+                               alle_wohnungen: list) -> float:
+        """Berechnet den Umlageanteil (0.0–1.0) einer Wohnung nach dem angegebenen Schlüssel.
+
+        Unterstützte Schlüssel: Wohnflaeche, MEA, Kopfanzahl, Verbrauch, HeizKV
+        """
+        conn = get_db()
+        try:
+            w = conn.execute("SELECT * FROM wohnungen WHERE id=?", (wohnung_id,)).fetchone()
+            if not w:
+                return 0.0
+
+            if schluessel in ("Wohnflaeche", "Wohnfläche", "–", "-", ""):
+                gesamt = sum(parse_float(wh.get("flaeche_qm") or 0) for wh in alle_wohnungen)
+                eigene = parse_float(w["flaeche_qm"] or 0)
+                return eigene / gesamt if gesamt > 0 else 0.0
+
+            elif schluessel == "MEA":
+                gesamt = sum(parse_float(wh.get("mea_tausendstel") or 0) for wh in alle_wohnungen)
+                eigene = parse_float(w["mea_tausendstel"] or 0)
+                return eigene / gesamt if gesamt > 0 else 0.0
+
+            elif schluessel == "Kopfanzahl":
+                gesamt = sum(max(1, wh.get("bewohner_anzahl") or 1) for wh in alle_wohnungen)
+                eigene = max(1, w["bewohner_anzahl"] or 1)
+                return eigene / gesamt if gesamt > 0 else 0.0
+
+            elif schluessel == "Verbrauch":
+                vd = conn.execute(
+                    "SELECT zaehlerstand_anfang, zaehlerstand_ende FROM verbrauchsdaten "
+                    "WHERE wohnung_id=? AND jahr=?", (wohnung_id, jahr)
+                ).fetchone()
+                eigene = max(0.0, (parse_float(vd["zaehlerstand_ende"] or 0) -
+                                   parse_float(vd["zaehlerstand_anfang"] or 0))) if vd else 0.0
+                wh_ids = [wh["id"] for wh in alle_wohnungen if wh.get("id")]
+                if wh_ids:
+                    ph = ",".join("?" * len(wh_ids))
+                    gesamt_v = conn.execute(
+                        f"SELECT COALESCE(SUM(zaehlerstand_ende - zaehlerstand_anfang), 0) "
+                        f"FROM verbrauchsdaten WHERE jahr=? AND wohnung_id IN ({ph})",
+                        [jahr] + wh_ids
+                    ).fetchone()[0] or 0.0
+                else:
+                    gesamt_v = 0.0
+                return eigene / gesamt_v if gesamt_v > 0 else 0.0
+
+            elif schluessel == "HeizKV":
+                # §7 HeizKV: 70% Verbrauch, 30% Wohnfläche
+                v_anteil = self._berechne_umlageanteil(wohnung_id, "Verbrauch", jahr, alle_wohnungen)
+                f_anteil = self._berechne_umlageanteil(wohnung_id, "Wohnflaeche", jahr, alle_wohnungen)
+                return 0.70 * v_anteil + 0.30 * f_anteil
+
+            else:
+                # Fallback: Wohnfläche
+                return self._berechne_umlageanteil(wohnung_id, "Wohnflaeche", jahr, alle_wohnungen)
+        finally:
+            conn.close()
 
     def _export_pdf_weg(self):
         """PDF-Export §28 WEG Eigentümer-Jahresabrechnung."""
@@ -4813,6 +5410,17 @@ class KontoauszugPage(tk.Frame):
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(
                  anchor="w", padx=20, pady=(4, 0))
 
+        # Status-Legende
+        legende_frame = tk.Frame(self, bg=BG_CARD)
+        legende_frame.pack(fill="x", padx=20, pady=(4, 0))
+        for text, farbe in [
+            ("● Importiert", TEXT_LIGHT),
+            ("● Vorschlag", "#E67E22"),
+            ("● Übernommen", SUCCESS),
+            ("● Abgerechnet", ACCENT2),
+        ]:
+            tk.Label(legende_frame, text=text, bg=BG_CARD, fg=farbe, font=FONT_SMALL).pack(side="left", padx=6)
+
         # Saldo-Kacheln (pro Konto)
         self._saldo_frame = tk.Frame(self, bg=BG_CARD)
         self._saldo_frame.pack(fill="x", padx=20, pady=(4, 0))
@@ -4829,6 +5437,11 @@ class KontoauszugPage(tk.Frame):
         self.tree.tag_configure("crdt", foreground=SUCCESS)
         self.tree.tag_configure("dbit", foreground=DANGER)
         self.tree.tag_configure("neu", font=("Segoe UI Semibold", 10))
+        # Status-Tags (Buchungs-Pipeline)
+        self.tree.tag_configure("status_importiert", foreground=TEXT_LIGHT)
+        self.tree.tag_configure("status_vorschlag",  foreground="#E67E22")  # Orange
+        self.tree.tag_configure("status_uebernommen", foreground=SUCCESS)
+        self.tree.tag_configure("status_abgerechnet", foreground=ACCENT2)
         # Klick auf Zeile: "Neu"-Markierung entfernen
         self.tree.bind("<<TreeviewSelect>>", self._on_row_click)
 
@@ -4879,6 +5492,9 @@ class KontoauszugPage(tk.Frame):
             # Neue Buchungen fett markieren
             if rd.get("ist_neu"):
                 tags_list.append("neu")
+            # Status-Tag hinzufügen
+            status_val = rd.get("buchung_status") or "importiert"
+            tags_list.append(f"status_{status_val}")
             raw = rd["buchungstext"] or ""
             if "||" in raw:
                 gegenkonto, vzweck = raw.split("||", 1)
@@ -5073,7 +5689,7 @@ class KontoauszugPage(tk.Frame):
                         continue
 
                     # Kategorie-Vorschlag ermitteln
-                    kat, typ, kt = vorschlag_kategorie(buchungstext)
+                    kat, typ, kt, _ = vorschlag_kategorie(buchungstext)  # Konfidenz ignoriert
                     if not kt or kt in ("Girokonto", "Wohngeldkonto"):
                         kt = konto_typ
                     conn.execute(
