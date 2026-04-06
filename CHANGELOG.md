@@ -7,6 +7,33 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.18.0] — 2026-04-06
+
+### KI-Protokoll, KI-Training und Speicherpfade
+
+#### fix #45 – KI-Protokolle werden jetzt tatsächlich erstellt
+- Neue Hilfsfunktion `_lade_ki_training(bereich)` für einheitlichen DB-Zugriff auf ki_training
+- `ki_log()` wird jetzt in allen KI-Operationen aufgerufen:
+  - `ZahlungDialog._ki_analyse_thread()` → Bereich "Beleg-Analyse"
+  - `KIAssistentPage._anthropic_call_thread()` → Bereich "KI-Assistent"
+  - `KIAssistentPage._ollama_call_thread()` → Bereich "KI-Assistent"
+  - `IstaImportPage._ki_extrahieren()` → Bereich "Ista-Extraktion"
+- Protokoll-Tab: Bereich-Filter aktualisiert (Beleg-Analyse, Ista-Extraktion, KI-Assistent)
+
+#### fix #46 – KI-Training-Daten werden in KI-Prompts verwendet
+- `_lade_ki_training()` wird vor jedem API-Call aufgerufen
+- `system_zusatz` wird dem System-Prompt vorangestellt
+- `feld_hinweise` werden als "Zusätzliche Hinweise" an den Benutzer-Prompt angehängt
+- Training-Tab: Bereiche auf tatsächlich genutzte Werte aktualisiert (KI-Assistent, Beleg-Analyse, Ista-Extraktion)
+- Beschreibungstext erklärt welcher Bereich wo verwendet wird
+
+#### feat #47 – Belege & Dokumente Speicherpfad-Logik
+- `ZahlungDialog._browse_beleg()`: öffnet File-Dialog mit `pfad_belege` als Startordner, kopiert Datei dorthin wenn sie von außen stammt
+- `ZahlungDialog._beleg_dateiname_generieren()`: Zielordner ist jetzt `pfad_belege` statt Quelldatei-Verzeichnis
+- `DokumentDialog._browse()`: öffnet File-Dialog mit `pfad_dokumente` als Startordner, kopiert Datei dorthin
+
+---
+
 ## [0.17.1] — 2026-04-06
 
 ### Bugfix

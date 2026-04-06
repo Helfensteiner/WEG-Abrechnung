@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.17.1"
+APP_VERSION = "0.18.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.16.0 — Issues #38–#41:
@@ -239,6 +239,20 @@ def ki_log(bereich: str, aktion: str, eingabe: str = "", ergebnis: str = "",
         conn.close()
     except Exception:
         pass  # Protokollierung darf nie die App blockieren
+
+def _lade_ki_training(bereich: str) -> tuple:
+    """Gibt (feld_hinweise, system_zusatz) aus der ki_training-Tabelle zurück (#46)."""
+    try:
+        conn = get_db()
+        r = conn.execute(
+            "SELECT feld_hinweise, system_zusatz FROM ki_training WHERE bereich=?",
+            (bereich,)).fetchone()
+        conn.close()
+        if r:
+            return r["feld_hinweise"] or "", r["system_zusatz"] or ""
+    except Exception:
+        pass
+    return "", ""
 
 # ── Berechtigungen ──────────────────────────────────────────────────────────
 
@@ -3347,9 +3361,13 @@ class ZahlungDialog(BaseDialog):
 
     def _browse_beleg(self):
         from tkinter import filedialog
+        import shutil, os
+        # Startordner = konfigurierter Rechnungsbeleg-Ordner (#47)
+        init_dir = get_pfad("pfad_belege", "Belege")
         path = filedialog.askopenfilename(
             parent=self,
             title="Beleg-Datei auswählen",
+            initialdir=str(init_dir),
             filetypes=[
                 ("PDF-Dateien", "*.pdf"),
                 ("Bilder", "*.png *.jpg *.jpeg *.tif *.tiff"),
@@ -3357,6 +3375,16 @@ class ZahlungDialog(BaseDialog):
             ]
         )
         if path:
+            # Datei in den Beleg-Ordner kopieren, falls sie nicht schon dort liegt (#47)
+            beleg_ordner = str(get_pfad("pfad_belege", "Belege"))
+            if os.path.normpath(os.path.dirname(path)) != os.path.normpath(beleg_ordner):
+                ziel = os.path.join(beleg_ordner, os.path.basename(path))
+                try:
+                    if not os.path.exists(ziel):
+                        shutil.copy2(path, ziel)
+                    path = ziel
+                except Exception:
+                    pass  # Original-Pfad beibehalten wenn Kopieren fehlschlägt
             self._beleg_var.set(path)
 
     # ── KI-Analyse (#35) ──────────────────────────────────────────────────────
@@ -3404,7 +3432,10 @@ class ZahlungDialog(BaseDialog):
 
     def _ki_analyse_thread(self, pfad: str, anbieter: str, modell: str, cfg: dict):
         """Hintergrund-Thread: liest Datei, sendet an KI, parst Ergebnis (#35)."""
-        import os, base64
+        import os, base64, time as _time
+        _t0 = _time.time()
+        # KI-Training laden (#46)
+        _feld_hinweise, _system_zusatz = _lade_ki_training("Beleg-Analyse")
         kategorien = BuchhaltungPage.aktive_kategorien()
         ext = os.path.splitext(pfad)[1].lower()
         try:
@@ -3448,6 +3479,11 @@ class ZahlungDialog(BaseDialog):
             )
             if inhalt_typ == "text":
                 prompt += f"Belegtext:\n{inhalt}"
+            # KI-Training-Hinweise anhängen (#46)
+            if _feld_hinweise:
+                prompt += f"\n\nZusätzliche Hinweise:\n{_feld_hinweise}"
+            if _system_zusatz:
+                prompt = _system_zusatz + "\n\n" + prompt
 
             # ── API-Aufruf ────────────────────────────────────────────────
             antwort_text = ""
@@ -3511,11 +3547,18 @@ class ZahlungDialog(BaseDialog):
                 ki_daten = json.loads(json_match.group())
             # Keys normalisieren (Groß-/Kleinschreibung, #20 fix)
             ki_daten = {k.lower(): v for k, v in ki_daten.items()}
+            # KI-Protokoll (#45)
+            ki_log("Beleg-Analyse", "Analyse",
+                   os.path.basename(pfad), str(ki_daten)[:500],
+                   modell, anbieter, int((_time.time() - _t0) * 1000))
             # Widget-Check vor after()-Aufruf (#3 fix)
             if self.winfo_exists():
                 self.after(0, lambda d=ki_daten: self._ki_felder_befuellen(d))
 
         except Exception as ex:
+            ki_log("Beleg-Analyse", "Fehler",
+                   os.path.basename(pfad), "",
+                   modell, anbieter, int((_time.time() - _t0) * 1000), str(ex))
             msg = str(ex)
             if self.winfo_exists():
                 self.after(0, lambda m=msg: self._ki_fehler(m))
@@ -3582,7 +3625,8 @@ class ZahlungDialog(BaseDialog):
             self._ki_btn.config(state="normal")
 
     def _beleg_dateiname_generieren(self, daten: dict):
-        """Generiert Dateiname: YYYY-MM-TT_Rechnungssteller_N (#35)."""
+        """Generiert Dateiname: YYYY-MM-TT_Rechnungssteller_N (#35).
+        Zielordner ist der konfigurierte Beleg-Ordner (#47)."""
         import os, re
         pfad = self._beleg_var.get().strip()
         if not pfad:
@@ -3590,7 +3634,9 @@ class ZahlungDialog(BaseDialog):
         datum = daten.get("datum", date.today().isoformat()) or date.today().isoformat()
         steller = re.sub(r'[^\w\- ]', '', daten.get("rechnungssteller", "Unbekannt"))
         steller = steller.strip().replace(" ", "_")[:30]
-        verz = os.path.dirname(pfad)
+        # Zielordner: konfigurierter Beleg-Ordner (#47), Fallback: Ordner der Quelldatei
+        beleg_ordner = str(get_pfad("pfad_belege", "Belege"))
+        verz = beleg_ordner if os.path.isdir(beleg_ordner) else os.path.dirname(pfad)
         ext = os.path.splitext(pfad)[1]
         zaehler = 1
         while True:
@@ -3977,9 +4023,19 @@ class DokumentDialog(BaseDialog):
         make_btn(row, "…", self._browse, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(4, 0))
 
     def _browse(self):
-        initial_dir = get_pfad("pfad_dokumente", "Dokumente")  # #38
-        path = filedialog.askopenfilename(title="Datei auswählen", initialdir=initial_dir)
+        import shutil, os
+        dok_ordner = get_pfad("pfad_dokumente", "Dokumente")  # #38
+        path = filedialog.askopenfilename(title="Datei auswählen", initialdir=str(dok_ordner))
         if path:
+            # Datei in den Dokumente-Ordner kopieren, falls sie nicht schon dort liegt (#47)
+            if os.path.normpath(os.path.dirname(path)) != os.path.normpath(str(dok_ordner)):
+                ziel = os.path.join(str(dok_ordner), os.path.basename(path))
+                try:
+                    if not os.path.exists(ziel):
+                        shutil.copy2(path, ziel)
+                    path = ziel
+                except Exception:
+                    pass  # Original-Pfad beibehalten wenn Kopieren fehlschlägt
             self._path_var.set(path)
 
     def _on_save(self):
@@ -7389,17 +7445,24 @@ Antworte immer auf Deutsch.
 
     def _anthropic_call_thread(self, messages, cfg, modell_override=None):
         """API-Call an Anthropic Claude."""
+        import time as _time
+        _t0 = _time.time()
         key = cfg.get("anthropic_api_key", "").strip()
         if not key:
             self.after(0, lambda: self._append_chat("error_msg",
                 "❌ Kein Anthropic API-Key. Bitte in Einstellungen → KI-Administration eintragen."))
             return
+        # KI-Training laden (#46)
+        _feld_hinweise, _system_zusatz = _lade_ki_training("KI-Assistent")
+        system_text = self._SCHEMA_KONTEXT
+        if _system_zusatz:
+            system_text = system_text + "\n\n" + _system_zusatz
         try:
             modell = modell_override or cfg.get("ki_modell", "claude-opus-4-6")
             payload = json.dumps({
                 "model": modell,
                 "max_tokens": 1024,
-                "system": self._SCHEMA_KONTEXT,
+                "system": system_text,
                 "messages": messages
             }).encode("utf-8")
             req = urllib.request.Request(
@@ -7415,22 +7478,37 @@ Antworte immer auf Deutsch.
                 data = json.loads(resp.read().decode("utf-8"))
             antwort = data["content"][0]["text"]
             self._messages.append({"role": "assistant", "content": antwort})
+            # KI-Protokoll (#45)
+            eingabe_kurz = messages[-1]["content"][:200] if messages else ""
+            ki_log("KI-Assistent", "Chat", eingabe_kurz, antwort[:300],
+                   modell, "anthropic", int((_time.time() - _t0) * 1000))
             if "SQL:" in antwort:
                 self.after(0, lambda a=antwort: self._handle_sql_response(a))
             else:
                 self.after(0, lambda a=antwort: self._append_chat("ki_bubble", f"🤖 Claude: {a}"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
+            ki_log("KI-Assistent", "Fehler", "", "", modell_override or "", "anthropic",
+                   int((_time.time() - _t0) * 1000), body[:200])
             self.after(0, lambda b=body: self._append_chat("error_msg", f"❌ API-Fehler: {b[:200]}"))
         except Exception as ex:
+            ki_log("KI-Assistent", "Fehler", "", "", modell_override or "", "anthropic",
+                   int((_time.time() - _t0) * 1000), str(ex))
             self.after(0, lambda x=str(ex): self._append_chat("error_msg", f"❌ Fehler: {x}"))
 
     def _ollama_call_thread(self, messages, cfg, modell_override=None):
         """API-Call an lokales Ollama (POST /api/chat)."""
+        import time as _time
+        _t0 = _time.time()
         base_url = cfg.get("ollama_url", "http://localhost:11434").strip().rstrip("/")
         modell   = modell_override or cfg.get("ollama_modell", "llama3.2").strip() or "llama3.2"
+        # KI-Training laden (#46)
+        _feld_hinweise, _system_zusatz = _lade_ki_training("KI-Assistent")
+        system_text = self._SCHEMA_KONTEXT
+        if _system_zusatz:
+            system_text = system_text + "\n\n" + _system_zusatz
         # System-Nachricht als erstes Element in messages-Liste (Ollama-Format)
-        ollama_msgs = [{"role": "system", "content": self._SCHEMA_KONTEXT}] + messages
+        ollama_msgs = [{"role": "system", "content": system_text}] + messages
         try:
             payload = json.dumps({
                 "model":    modell,
@@ -7447,6 +7525,10 @@ Antworte immer auf Deutsch.
                 data = json.loads(resp.read().decode("utf-8"))
             antwort = data["message"]["content"]
             self._messages.append({"role": "assistant", "content": antwort})
+            # KI-Protokoll (#45)
+            eingabe_kurz = messages[-1]["content"][:200] if messages else ""
+            ki_log("KI-Assistent", "Chat", eingabe_kurz, antwort[:300],
+                   modell, "ollama", int((_time.time() - _t0) * 1000))
             label = f"🤖 {modell}"
             if "SQL:" in antwort:
                 self.after(0, lambda a=antwort: self._handle_sql_response(a))
@@ -7454,10 +7536,14 @@ Antworte immer auf Deutsch.
                 self.after(0, lambda a=antwort, l=label:
                            self._append_chat("ki_bubble", f"{l}: {a}"))
         except urllib.error.URLError as e:
+            ki_log("KI-Assistent", "Fehler", "", "", modell, "ollama",
+                   int((_time.time() - _t0) * 1000), str(e))
             self.after(0, lambda x=str(e): self._append_chat("error_msg",
                 f"❌ Ollama nicht erreichbar ({base_url}):\n{x}\n"
                 "Bitte sicherstellen dass Ollama läuft: ollama serve"))
         except Exception as ex:
+            ki_log("KI-Assistent", "Fehler", "", "", modell, "ollama",
+                   int((_time.time() - _t0) * 1000), str(ex))
             self.after(0, lambda x=str(ex): self._append_chat("error_msg",
                 f"❌ Ollama-Fehler: {x}"))
 
@@ -7666,7 +7752,7 @@ class KiProtokollPage(tk.Frame):
         flt.pack(fill="x", padx=16, pady=(10, 4))
         tk.Label(flt, text="Bereich:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
         self._bereich_var = tk.StringVar(value="Alle")
-        bereiche = ["Alle", "Buchhaltung", "Ista-Wärme", "Nebenkosten", "Dokumente"]
+        bereiche = ["Alle", "Beleg-Analyse", "Ista-Extraktion", "KI-Assistent"]
         ttk.Combobox(flt, textvariable=self._bereich_var, values=bereiche,
                      state="readonly", width=18, font=FONT_SMALL).pack(side="left", padx=(4, 16))
         make_btn(flt, "🔄 Laden", self._load_protokoll, color=ACCENT2).pack(side="left")
@@ -7724,8 +7810,11 @@ class KiProtokollPage(tk.Frame):
             return
 
         tk.Label(parent,
-                 text="Hier können Sie der KI für jeden Bereich zusätzliche Hinweise geben.\n"
-                      "Diese werden als System-Zusatz in KI-Anfragen eingebettet.",
+                 text="Hier können Sie der KI für jeden Bereich zusätzliche Hinweise und Beispiele geben.\n"
+                      "Diese werden automatisch in alle KI-Anfragen des jeweiligen Bereichs eingebettet.\n"
+                      "  • KI-Assistent → Chat-Assistent auf der KI-Seite\n"
+                      "  • Beleg-Analyse → KI-Analyse von Rechnungen unter Buchungen\n"
+                      "  • Ista-Extraktion → KI-Auslesen von Ista-Heizkostenabrechnungen",
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
                  justify="left").pack(anchor="w", padx=16, pady=(10, 4))
 
@@ -7733,8 +7822,8 @@ class KiProtokollPage(tk.Frame):
         sel_f = tk.Frame(parent, bg=BG_CARD)
         sel_f.pack(fill="x", padx=16, pady=4)
         tk.Label(sel_f, text="Bereich:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
-        self._train_bereich_var = tk.StringVar(value="Buchhaltung")
-        train_bereiche = ["Buchhaltung", "Ista-Wärme", "Nebenkosten", "Kontoauszug", "Allgemein"]
+        self._train_bereich_var = tk.StringVar(value="KI-Assistent")
+        train_bereiche = ["KI-Assistent", "Beleg-Analyse", "Ista-Extraktion"]
         cb = ttk.Combobox(sel_f, textvariable=self._train_bereich_var,
                           values=train_bereiche, state="readonly", width=20, font=FONT_SMALL)
         cb.pack(side="left", padx=(4, 16))
@@ -9261,6 +9350,10 @@ class IstaPage(tk.Frame):
 
     def _ki_extrahieren(self, pdf_text: str, cfg: dict, _log) -> dict:
         """Versucht KI-basierte Extraktion der Ista-Daten."""
+        import time as _time
+        _t0 = _time.time()
+        # KI-Training laden (#46)
+        _feld_hinweise, _system_zusatz = _lade_ki_training("Ista-Extraktion")
         prompt = (
             "Analysiere diese Ista-Heizkostenabrechnung und extrahiere die Daten als JSON.\n"
             "Antworte NUR mit einem JSON-Objekt.\n\n"
@@ -9294,6 +9387,11 @@ class IstaPage(tk.Frame):
             '    ]\n\n'
             f"Ista-Abrechnungstext:\n{pdf_text}"
         )
+        # KI-Training-Hinweise anhängen (#46)
+        if _feld_hinweise:
+            prompt += f"\n\nZusätzliche Hinweise:\n{_feld_hinweise}"
+        if _system_zusatz:
+            prompt = _system_zusatz + "\n\n" + prompt
 
         try:
             aktiv = cfg.get("ki_aktives_modell", "")
@@ -9347,9 +9445,16 @@ class IstaPage(tk.Frame):
                 ki_daten = _json.loads(m.group())
 
             ki_daten = {k.lower(): v for k, v in ki_daten.items()}
+            # KI-Protokoll (#45)
+            ki_log("Ista-Extraktion", "Extraktion",
+                   pdf_text[:200], str(ki_daten)[:400],
+                   modell, anbieter, int((_time.time() - _t0) * 1000))
             return ki_daten
 
         except Exception as ex:
+            ki_log("Ista-Extraktion", "Fehler",
+                   pdf_text[:200], "",
+                   modell, anbieter, int((_time.time() - _t0) * 1000), str(ex))
             _log(f"   ⚠ KI-Fehler: {ex}")
             return None
 
