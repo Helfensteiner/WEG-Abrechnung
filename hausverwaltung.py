@@ -9332,6 +9332,11 @@ class HausverwaltungApp(tk.Tk):
         super().__init__()
         self.withdraw()
         init_db()
+        # Optionale Pakete prüfen und Hinweis anzeigen (#38)
+        _fehlend = _prüfe_pakete()
+        if _fehlend:
+            _dlg = AbhängigkeitenDialog(self, _fehlend)
+            self.wait_window(_dlg)
         login = LoginDialog(self)
         self.wait_window(login)
         if not login.result:
@@ -9655,14 +9660,5 @@ class AbhängigkeitenDialog(tk.Toplevel):
 
 
 if __name__ == "__main__":
-    # Vor dem Start: optionale Pakete prüfen und Hinweis anzeigen
-    _root_check = tk.Tk()
-    _root_check.withdraw()
-    _fehlend = _prüfe_pakete()
-    if _fehlend:
-        _dlg = AbhängigkeitenDialog(_root_check, _fehlend)
-        _root_check.wait_window(_dlg)
-    _root_check.destroy()
-
     app = HausverwaltungApp()
     app.mainloop()
