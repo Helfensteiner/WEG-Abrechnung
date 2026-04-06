@@ -9332,11 +9332,6 @@ class HausverwaltungApp(tk.Tk):
         super().__init__()
         self.withdraw()
         init_db()
-        # Optionale Pakete prüfen und Hinweis anzeigen (#38)
-        _fehlend = _prüfe_pakete()
-        if _fehlend:
-            _dlg = AbhängigkeitenDialog(self, _fehlend)
-            self.wait_window(_dlg)
         login = LoginDialog(self)
         self.wait_window(login)
         if not login.result:
@@ -9346,6 +9341,11 @@ class HausverwaltungApp(tk.Tk):
         self._current_user = login.result
         _CURRENT_USER = login.result
         self.deiconify()
+        # Optionale Pakete prüfen – NACH deiconify(), damit transiente Dialoge sichtbar sind
+        _fehlend = _prüfe_pakete()
+        if _fehlend:
+            _dlg = AbhängigkeitenDialog(self, _fehlend)
+            self.wait_window(_dlg)
         _cfg_t = load_config()
         _titel_name = _cfg_t.get("weg_name", "").strip() or "Hausverwaltung"
         self.title(f"{_titel_name} v{APP_VERSION} – {login.result['benutzername']}")
@@ -9559,7 +9559,7 @@ class AbhängigkeitenDialog(tk.Toplevel):
     def __init__(self, parent, fehlende_pakete: list):
         super().__init__(parent)
         self.title("Fehlende Komponenten")
-        self.transient(parent)
+        # KEIN transient() — transiente Fenster werden beim withdrawn Parent unsichtbar
         self.grab_set()
         self.resizable(False, False)
         self.configure(bg=BG_CARD)
@@ -9567,11 +9567,11 @@ class AbhängigkeitenDialog(tk.Toplevel):
         self._pakete = fehlende_pakete
         self._status_vars = {}
         self._build()
-        # Zentrieren
+        # Immer am Bildschirm-Mittelpunkt zentrieren (unabhängig vom Parent-Zustand)
         self.update_idletasks()
-        pw = parent.winfo_width(); ph = parent.winfo_height()
-        px = parent.winfo_x();    py = parent.winfo_y()
-        self.geometry(f"+{px + (pw - 580) // 2}+{py + (ph - 420) // 2}")
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        self.geometry(f"+{(sw - 580) // 2}+{(sh - 420) // 2}")
 
     def _build(self):
         # Kopf
