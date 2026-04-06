@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.17.0"
+APP_VERSION = "0.17.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.16.0 — Issues #38–#41:
@@ -7321,10 +7321,10 @@ Antworte immer auf Deutsch.
                 data = json.loads(r.read().decode())
             modelle = [m["name"] for m in data.get("models", [])]
             info = f"✅ Ollama verbunden\nModelle: {', '.join(modelle[:4]) or '–'}"
-            self.after(0, lambda: self._api_status.config(text=info, fg=SUCCESS))
+            self.after(0, lambda i=info: self._api_status.winfo_exists() and self._api_status.config(text=i, fg=SUCCESS))
         except Exception as ex:
             info = f"❌ Ollama nicht erreichbar:\n{ex}"
-            self.after(0, lambda: self._api_status.config(text=info, fg=DANGER))
+            self.after(0, lambda i=info: self._api_status.winfo_exists() and self._api_status.config(text=i, fg=DANGER))
 
     def _modell_geaendert(self, event=None):
         """Gewähltes Modell in Konfiguration speichern (#33 fix: provider:modell)."""

@@ -7,6 +7,16 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.17.1] — 2026-04-06
+
+### Bugfix
+
+**fix:** `_ollama_ping`-Thread – TclError „invalid command name" beim Seitenwechsel behoben
+- `self.after(0, lambda: self._api_status.config(...))` prüft nun via `winfo_exists()` ob das Widget noch existiert, bevor `.config()` aufgerufen wird
+- Verhindert Absturz wenn der Ollama-Ping-Thread zurückkehrt, nachdem die KI-Assistent-Seite bereits verlassen wurde
+
+---
+
 ## [0.17.0] — 2026-04-06
 
 ### Bugfixes und KI-Protokoll
