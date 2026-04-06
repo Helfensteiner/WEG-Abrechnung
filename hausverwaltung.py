@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.16.1"
+APP_VERSION = "0.17.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.16.0 — Issues #38–#41:
@@ -220,6 +220,25 @@ def get_pfad(schluessel: str, standard_unterordner: str) -> str:
     except Exception:
         pass
     return str(standard)
+
+def ki_log(bereich: str, aktion: str, eingabe: str = "", ergebnis: str = "",
+           modell: str = "", anbieter: str = "", dauer_ms: int = 0, fehler: str = ""):
+    """Schreibt einen KI-Protokoll-Eintrag in die Datenbank (#44)."""
+    try:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO ki_protokoll (bereich, aktion, eingabe_kurz, ergebnis_kurz, "
+            "modell, anbieter, benutzer_id, dauer_ms, fehler) VALUES (?,?,?,?,?,?,?,?,?)",
+            (bereich, aktion,
+             (eingabe[:300] if eingabe else ""),
+             (ergebnis[:500] if ergebnis else ""),
+             modell, anbieter,
+             _CURRENT_USER["id"] if _CURRENT_USER else None,
+             dauer_ms, fehler))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Protokollierung darf nie die App blockieren
 
 # ── Berechtigungen ──────────────────────────────────────────────────────────
 
@@ -614,6 +633,27 @@ CREATE TABLE IF NOT EXISTS ista_positionen (
 );
 CREATE INDEX IF NOT EXISTS idx_ista_positionen_abr ON ista_positionen(abrechnung_id);
 CREATE INDEX IF NOT EXISTS idx_ista_positionen_wohnung ON ista_positionen(wohnung_id);
+CREATE TABLE IF NOT EXISTS ki_protokoll (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    zeitpunkt DATETIME DEFAULT CURRENT_TIMESTAMP,
+    bereich TEXT,
+    aktion TEXT,
+    eingabe_kurz TEXT,
+    ergebnis_kurz TEXT,
+    modell TEXT,
+    anbieter TEXT,
+    benutzer_id INTEGER,
+    dauer_ms INTEGER,
+    fehler TEXT
+);
+CREATE TABLE IF NOT EXISTS ki_training (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bereich TEXT NOT NULL UNIQUE,
+    feld_hinweise TEXT,
+    system_zusatz TEXT,
+    geaendert_am DATETIME DEFAULT CURRENT_TIMESTAMP,
+    geaendert_von INTEGER
+);
 """)
     conn.commit()
     # Indizes für häufig abgefragte Spalten (IF NOT EXISTS = idempotent)
@@ -979,6 +1019,8 @@ def vorschlag_kategorie(buchungstext: str, betrag: float = None) -> tuple:
         ).fetchall()
     finally:
         conn.close()
+
+    regeln = [dict(r) for r in regeln]
 
     text_lower = buchungstext.lower()
     if "||" in buchungstext:
@@ -5621,8 +5663,8 @@ class AufteilungenPage(tk.Frame):  # #39
                     wohn_names.append(wh["bezeichnung"])
             except Exception:
                 pass
-            aktiv_str = "✅" if r.get("aktiv", 1) else "❌"  # #39
-            wohn_str = ", ".join(wohn_names) if wohn_names else (r.get("bezug") or "–")  # #39
+            aktiv_str = "✅" if (r["aktiv"] if "aktiv" in r.keys() else 1) else "❌"  # #39
+            wohn_str = ", ".join(wohn_names) if wohn_names else ((r["bezug"] if "bezug" in r.keys() else None) or "–")  # #39
             self.tree.insert("", "end", iid=r["id"], values=(
                 r["name"], r["typ"] or "–", wohn_str, aktiv_str, r["notizen"] or "–"))
         conn.close()
@@ -7589,6 +7631,159 @@ Antworte immer auf Deutsch.
                          args=(list(self._messages),), daemon=True).start()
 
 
+class KiProtokollPage(tk.Frame):
+    """KI-Protokoll und Training – nur für Admin/Superadmin (#44)."""
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG_CARD)
+        self._build()
+
+    def _build(self):
+        section_header(self, "KI-Protokoll & Training", None, None)
+
+        if not hat_recht("KI-Administration", "lesen"):
+            tk.Label(self, text="🔒  Kein Zugriff.\nNur für Admin und Super-Admin.",
+                     bg=BG_CARD, fg=DANGER, font=FONT_BODY,
+                     justify="center").pack(expand=True)
+            return
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=16, pady=(8, 16))
+
+        # Tab 1: Protokoll
+        t1 = tk.Frame(nb, bg=BG_CARD)
+        nb.add(t1, text="📋 KI-Protokoll")
+        self._build_protokoll_tab(t1)
+
+        # Tab 2: Training (nur schreiben-Recht)
+        t2 = tk.Frame(nb, bg=BG_CARD)
+        nb.add(t2, text="🎓 KI-Training")
+        self._build_training_tab(t2)
+
+    def _build_protokoll_tab(self, parent):
+        # Filter-Zeile
+        flt = tk.Frame(parent, bg=BG_CARD)
+        flt.pack(fill="x", padx=16, pady=(10, 4))
+        tk.Label(flt, text="Bereich:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._bereich_var = tk.StringVar(value="Alle")
+        bereiche = ["Alle", "Buchhaltung", "Ista-Wärme", "Nebenkosten", "Dokumente"]
+        ttk.Combobox(flt, textvariable=self._bereich_var, values=bereiche,
+                     state="readonly", width=18, font=FONT_SMALL).pack(side="left", padx=(4, 16))
+        make_btn(flt, "🔄 Laden", self._load_protokoll, color=ACCENT2).pack(side="left")
+        make_btn(flt, "🗑 Protokoll leeren", self._protokoll_leeren,
+                 color=DANGER).pack(side="right")
+
+        cols = ("Zeitpunkt", "Bereich", "Aktion", "Modell", "Eingabe (Auszug)", "Ergebnis (Auszug)", "Fehler")
+        f, self._tree_log = make_table(parent, cols, height=14)
+        f.pack(fill="both", expand=True, padx=16, pady=4)
+        for c, w in zip(cols, [140, 100, 100, 140, 200, 200, 120]):
+            self._tree_log.heading(c, text=c)
+            self._tree_log.column(c, width=w, anchor="w")
+
+        self._load_protokoll()
+
+    def _load_protokoll(self):
+        for i in self._tree_log.get_children(): self._tree_log.delete(i)
+        conn = get_db()
+        bereich = self._bereich_var.get()
+        if bereich == "Alle":
+            rows = conn.execute(
+                "SELECT * FROM ki_protokoll ORDER BY zeitpunkt DESC LIMIT 200").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM ki_protokoll WHERE bereich=? ORDER BY zeitpunkt DESC LIMIT 200",
+                (bereich,)).fetchall()
+        conn.close()
+        for r in rows:
+            self._tree_log.insert("", "end", values=(
+                (r["zeitpunkt"] or "")[:16],
+                r["bereich"] or "",
+                r["aktion"] or "",
+                r["modell"] or "",
+                (r["eingabe_kurz"] or "")[:60],
+                (r["ergebnis_kurz"] or "")[:60],
+                r["fehler"] or ""))
+        tree_empty_hint(self._tree_log)
+
+    def _protokoll_leeren(self):
+        if not hat_recht("KI-Administration", "loeschen"):
+            messagebox.showwarning("Berechtigung", "Keine Lösch-Berechtigung.", parent=self)
+            return
+        if messagebox.askyesno("Protokoll leeren",
+                               "Alle KI-Protokoll-Einträge löschen?", parent=self):
+            conn = get_db()
+            conn.execute("DELETE FROM ki_protokoll")
+            conn.commit()
+            conn.close()
+            self._load_protokoll()
+
+    def _build_training_tab(self, parent):
+        if not hat_recht("KI-Administration", "schreiben"):
+            tk.Label(parent, text="🔒  Schreibzugriff auf KI-Training benötigt.",
+                     bg=BG_CARD, fg=DANGER, font=FONT_BODY).pack(expand=True)
+            return
+
+        tk.Label(parent,
+                 text="Hier können Sie der KI für jeden Bereich zusätzliche Hinweise geben.\n"
+                      "Diese werden als System-Zusatz in KI-Anfragen eingebettet.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 justify="left").pack(anchor="w", padx=16, pady=(10, 4))
+
+        # Bereich auswählen
+        sel_f = tk.Frame(parent, bg=BG_CARD)
+        sel_f.pack(fill="x", padx=16, pady=4)
+        tk.Label(sel_f, text="Bereich:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._train_bereich_var = tk.StringVar(value="Buchhaltung")
+        train_bereiche = ["Buchhaltung", "Ista-Wärme", "Nebenkosten", "Kontoauszug", "Allgemein"]
+        cb = ttk.Combobox(sel_f, textvariable=self._train_bereich_var,
+                          values=train_bereiche, state="readonly", width=20, font=FONT_SMALL)
+        cb.pack(side="left", padx=(4, 16))
+        cb.bind("<<ComboboxSelected>>", self._load_training)
+        make_btn(sel_f, "📥 Laden", self._load_training, color=BG_INPUT, fg=TEXT).pack(side="left")
+        make_btn(sel_f, "💾 Speichern", self._save_training, color=SUCCESS).pack(side="left", padx=(8, 0))
+
+        tk.Label(parent, text="Feld-Hinweise (was soll die KI für diesen Bereich beachten?):",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=16, pady=(10, 2))
+        self._train_feld_text = tk.Text(parent, height=6, font=FONT_BODY,
+                                        bg=BG_INPUT, fg=TEXT, relief="flat",
+                                        wrap="word", padx=8, pady=6)
+        self._train_feld_text.pack(fill="x", padx=16, pady=(0, 8))
+
+        tk.Label(parent, text="System-Zusatz (wird an den KI-System-Prompt angehängt):",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=16, pady=(4, 2))
+        self._train_sys_text = tk.Text(parent, height=8, font=FONT_BODY,
+                                       bg=BG_INPUT, fg=TEXT, relief="flat",
+                                       wrap="word", padx=8, pady=6)
+        self._train_sys_text.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        self._load_training()
+
+    def _load_training(self, event=None):
+        bereich = self._train_bereich_var.get()
+        conn = get_db()
+        r = conn.execute("SELECT * FROM ki_training WHERE bereich=?", (bereich,)).fetchone()
+        conn.close()
+        self._train_feld_text.delete("1.0", "end")
+        self._train_sys_text.delete("1.0", "end")
+        if r:
+            self._train_feld_text.insert("1.0", r["feld_hinweise"] or "")
+            self._train_sys_text.insert("1.0", r["system_zusatz"] or "")
+
+    def _save_training(self):
+        bereich = self._train_bereich_var.get()
+        feld = self._train_feld_text.get("1.0", "end").strip()
+        sys_z = self._train_sys_text.get("1.0", "end").strip()
+        conn = get_db()
+        conn.execute(
+            "INSERT OR REPLACE INTO ki_training "
+            "(bereich, feld_hinweise, system_zusatz, geaendert_am, geaendert_von) "
+            "VALUES (?,?,?,CURRENT_TIMESTAMP,?)",
+            (bereich, feld, sys_z, _CURRENT_USER["id"] if _CURRENT_USER else None))
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Gespeichert", f"KI-Training für '{bereich}' gespeichert.", parent=self)
+
+
 class EinstellungenPage(tk.Frame):
     """Einstellungen-Seite: Tabs für Stammdaten, Bankdaten, Speicherpfade, KI."""
 
@@ -8045,7 +8240,7 @@ class BenutzerDialog(BaseDialog):
                        activebackground=BG_CARD, selectcolor=BG_INPUT).pack(anchor="w", padx=20, pady=(8, 0))
         # Aktiv-Checkbox (nur bei Bearbeiten)
         if row:
-            self._aktiv_var = tk.IntVar(value=int(r.get("aktiv", 1)))
+            self._aktiv_var = tk.IntVar(value=int(r["aktiv"] if "aktiv" in r.keys() else 1))
             tk.Checkbutton(self._body, text="Aktiv", variable=self._aktiv_var,
                            bg=BG_CARD, fg=TEXT, font=FONT_BODY,
                            activebackground=BG_CARD, selectcolor=BG_INPUT).pack(anchor="w", padx=20, pady=(8, 0))
@@ -8086,7 +8281,7 @@ class RollenverwaltungPage(tk.Frame):
     BEREICHE = ["Übersicht", "Eigentümer", "Wohnungen", "Mieter", "Kontoauszug",
                 "Buchhaltung", "Wartung", "Nebenkosten", "Aufteilungen",
                 "Nachrichten", "Dokumente", "Benutzer", "Rollen & Rechte",
-                "Einstellungen", "KI-Assistent", "KI-Administration", "Ista-Wärme"]
+                "Einstellungen", "KI-Assistent", "KI-Administration", "KI-Protokoll", "Ista-Wärme"]
 
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)
@@ -9323,6 +9518,7 @@ class HausverwaltungApp(tk.Tk):
         ("✉️",  "Nachrichten",    NachrichtenPage),
         ("📁", "Dokumente",      DokumentePage),
         ("🤖", "KI-Assistent",   KIAssistentPage),
+        ("📊", "KI-Protokoll",   KiProtokollPage),
         ("👤", "Benutzer",       BenutzerverwaltungPage),
         ("🔐", "Rollen & Rechte",RollenverwaltungPage),
         ("⚙",  "Einstellungen",  EinstellungenPage),

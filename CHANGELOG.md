@@ -7,6 +7,62 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.17.0] — 2026-04-06
+
+### Bugfixes und KI-Protokoll
+
+#### Bugfixes
+
+**fix #42:** `vorschlag_kategorie()` – `sqlite3.Row` zu `dict` konvertiert (AttributeError behoben)
+- Zeile 979: `regeln` werden nach dem try/finally-Block zu dicts konvertiert
+- Behebt „AttributeError: 'sqlite3.Row' object has no attribute 'get'"
+
+**fix #43:** `AufteilungenPage._load()` – `r["aktiv"]` statt `r.get("aktiv")` (weiße Seite behoben)
+- Zeile 5626: `r["aktiv"] if "aktiv" in r.keys() else 1` statt `r.get("aktiv", 1)`
+- Zeile 5627: `r["bezug"] if "bezug" in r.keys() else None` statt `r.get("bezug")`
+- Zeile 8050: `r["aktiv"] if "aktiv" in r.keys() else 1` statt `r.get("aktiv", 1)` (AufteilungenDialog)
+- Behebt weiße Seiten-Fehler beim Laden von Aufteilungen und Dialogen
+
+#### Neue Features
+
+**feat #44:** KI-Protokoll-Seite (📊 KI-Protokoll) mit Protokoll-Tab und Training-Tab
+- Neue DB-Tabellen `ki_protokoll` und `ki_training` für zentrale KI-Protokollierung
+- Hilfsfunktion `ki_log()` (Zeile ~224) für zentrale Protokollierung aller KI-Interaktionen
+  - Parameter: Bereich, Aktion, Eingabe (gekürzt auf 300 Zeichen), Ergebnis (gekürzt auf 500 Zeichen), Modell, Anbieter, Dauer, Fehler
+  - Wird automatisch aufgerufen nach KI-Anfragen (bei zukünftigen Integrationen)
+- Neue `KiProtokollPage` – nur für Admin/SuperAdmin mit Recht „KI-Administration" (lesen/schreiben/löschen)
+  - **Tab 1 – 📋 KI-Protokoll:**
+    - Filterable Tabelle (nach Bereich: Alle, Buchhaltung, Ista-Wärme, Nebenkosten, Dokumente)
+    - Spalten: Zeitpunkt, Bereich, Aktion, Modell, Eingabe (Auszug), Ergebnis (Auszug), Fehler
+    - Buttons: 🔄 Laden, 🗑 Protokoll leeren (mit Bestätigung + Berechtigungsprüfung)
+  - **Tab 2 – 🎓 KI-Training:**
+    - Nur für Nutzer mit Schreib-Recht auf KI-Administration
+    - Dropdown zur Auswahl von Trainingsbereichen (Buchhaltung, Ista-Wärme, Nebenkosten, Kontoauszug, Allgemein)
+    - Text-Felder für „Feld-Hinweise" (was soll die KI beachten?) und „System-Zusatz" (wird in KI-Anfragen eingebettet)
+    - Buttons: 📥 Laden, 💾 Speichern (speichert in `ki_training` mit Nutzer-ID und Datum)
+    - Live-Laden beim Bereich-Wechsel
+- Bereich „KI-Protokoll" in Navigation (📊 Icon, nach KI-Assistent) eingetragen
+- Bereich „KI-Protokoll" in Rollenverwaltung verfügbar (wird als neue Seite in RollenverwaltungPage angezeigt)
+
+#### Neue DB-Tabellen
+
+- `ki_protokoll` (id, zeitpunkt, bereich, aktion, eingabe_kurz, ergebnis_kurz, modell, anbieter, benutzer_id, dauer_ms, fehler)
+- `ki_training` (id, bereich NOT NULL UNIQUE, feld_hinweise, system_zusatz, geaendert_am, geaendert_von)
+
+#### Neue Funktionen
+
+- `ki_log(bereich, aktion, eingabe, ergebnis, modell, anbieter, dauer_ms, fehler)` – zentrale Protokollierung aller KI-Nutzung
+- `KiProtokollPage._load_protokoll()` – lädt Protokoll mit optionalem Filter
+- `KiProtokollPage._protokoll_leeren()` – löscht alle Einträge (mit Berechtigungsprüfung)
+- `KiProtokollPage._load_training()` – lädt Training-Einstellungen für Bereich
+- `KiProtokollPage._save_training()` – speichert Training-Einstellungen
+
+#### Bekannte Einschränkungen
+- KI-Anfragen werden derzeit noch nicht automatisch protokolliert (manuell in Feature-Branches einfügbar über `ki_log()`)
+- Training-Hinweise werden noch nicht automatisch in KI-System-Prompts eingebettet (muss in `_ki_analyse_starten` integriert werden)
+
+---
+
 ## [0.16.1] — 2026-04-05
 
 ### Abhängigkeits-Prüfung beim App-Start
