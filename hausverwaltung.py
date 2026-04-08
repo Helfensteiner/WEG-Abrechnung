@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.19.0"
+APP_VERSION = "0.19.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.16.0 — Issues #38–#41:
@@ -181,12 +181,33 @@ def _git_info() -> dict:
     return info
 
 
-DB_PATH = Path.home() / "hausverwaltung.db"
+# ── Pfad-Setup ──────────────────────────────────────────────────────────────
+# v0.20.0: DB + Konfiguration liegen standardmäßig im Unterordner "daten"
+# neben der hausverwaltung.py. Der DB-Pfad ist über die Einstellungen
+# anpassbar (z. B. auf ein Netzlaufwerk).
 
-# ── Konfiguration ───────────────────────────────────────────────────────────
+APP_DIR = Path(__file__).parent                # Verzeichnis der Programmdatei (#38)
+DATA_DIR = APP_DIR / "daten"                   # Standard-Datenverzeichnis
+try:
+    DATA_DIR.mkdir(exist_ok=True)
+except Exception:
+    pass
 
-CONFIG_PATH = Path(__file__).parent / "einstellungen.json"
-APP_DIR = Path(__file__).parent  # Verzeichnis der Programmdatei (#38)
+DEFAULT_DB_PATH = DATA_DIR / "hausverwaltung.db"
+CONFIG_PATH = DATA_DIR / "einstellungen.json"
+
+# Einmalige Migration alter Speicherorte (v0.19 und früher)
+_OLD_CONFIG = APP_DIR / "einstellungen.json"
+_OLD_DB_HOME = Path.home() / "hausverwaltung.db"
+try:
+    if _OLD_CONFIG.exists() and not CONFIG_PATH.exists():
+        import shutil as _sh
+        _sh.copy2(str(_OLD_CONFIG), str(CONFIG_PATH))
+    if _OLD_DB_HOME.exists() and not DEFAULT_DB_PATH.exists():
+        import shutil as _sh
+        _sh.copy2(str(_OLD_DB_HOME), str(DEFAULT_DB_PATH))
+except Exception:
+    pass
 
 def load_config():
     if CONFIG_PATH.exists():
@@ -198,8 +219,36 @@ def load_config():
     return {}
 
 def save_config(cfg: dict):
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+def get_db_path() -> Path:
+    """Liefert aktuellen DB-Pfad: Config 'pfad_datenbank' oder Standard (daten/hausverwaltung.db)."""
+    try:
+        cfg = load_config()
+        p = cfg.get("pfad_datenbank", "")
+        if p:
+            pp = Path(p).expanduser()
+            # Falls nur ein Verzeichnis angegeben wurde → Dateiname anhängen
+            if pp.is_dir():
+                pp = pp / "hausverwaltung.db"
+            try:
+                pp.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            return pp
+    except Exception:
+        pass
+    return DEFAULT_DB_PATH
+
+# DB_PATH wird initial ausgewertet; zur Laufzeit wird stets get_db_path()
+# verwendet, damit Änderungen in den Einstellungen (z. B. Netzlaufwerk)
+# ohne Neustart wirksam werden.
+DB_PATH = get_db_path()
 
 def get_pfad(schluessel: str, standard_unterordner: str) -> str:
     """Gibt den konfigurierten Pfad zurück oder legt einen Standard-Unterordner an.
@@ -362,7 +411,7 @@ WEG_EINLAGE_KATEGORIEN = {"Erhaltungsrücklage", "Sonderumlage"}
 # ── Datenbank ────────────────────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(str(get_db_path()))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")  # Referentielle Integrität erzwingen
     return conn
@@ -8286,7 +8335,7 @@ class EinstellungenPage(tk.Frame):
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             ziel = os.path.join(backup_ordner, f"hausverwaltung_backup_{ts}.db")
-            shutil.copy2(str(DB_PATH), ziel)
+            shutil.copy2(str(get_db_path()), ziel)
             messagebox.showinfo("Backup erstellt",
                 f"Datenbank-Backup gespeichert:\n{ziel}", parent=self)
         except Exception as exc:
@@ -8310,12 +8359,12 @@ class EinstellungenPage(tk.Frame):
         # Erst eigenes Backup anlegen
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            auto_backup = str(DB_PATH) + f".vor_restore_{ts}.bak"
-            shutil.copy2(str(DB_PATH), auto_backup)
+            auto_backup = str(get_db_path()) + f".vor_restore_{ts}.bak"
+            shutil.copy2(str(get_db_path()), auto_backup)
         except Exception:
             auto_backup = None
         try:
-            shutil.copy2(quelle, str(DB_PATH))
+            shutil.copy2(quelle, str(get_db_path()))
             info = f"Datenbank erfolgreich wiederhergestellt aus:\n{quelle}"
             if auto_backup:
                 info += f"\n\nAutomatisches Sicherheits-Backup der alten Datenbank:\n{auto_backup}"
@@ -9966,7 +10015,7 @@ class HausverwaltungApp(tk.Tk):
         _row(body, "Sprache:", "Python 3 · Tkinter")
         _row(body, "Datenbank:", "SQLite 3")
         _row(body, "Architektur:", "Single-File Desktop-App")
-        _row(body, "DB-Pfad:", str(DB_PATH))
+        _row(body, "DB-Pfad:", str(get_db_path()))
 
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 8))
         tk.Label(body, text="Änderungshistorie", bg=BG_CARD, fg=TEXT,

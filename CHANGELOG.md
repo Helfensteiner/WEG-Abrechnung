@@ -7,6 +7,22 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.19.1] — 2026-04-08
+
+### Geändert
+- **Speicherorte vereinheitlicht:** `hausverwaltung.db` und `einstellungen.json`
+  liegen jetzt standardmäßig im Unterordner `daten/` neben der `hausverwaltung.py`
+  (statt `~/hausverwaltung.db` bzw. `einstellungen.json` im App-Verzeichnis).
+- **Netzlaufwerk-Unterstützung:** Der DB-Pfad kann über *Einstellungen →
+  Datenbankdatei* frei gewählt werden (z. B. ein Netzlaufwerk). Änderungen
+  werden sofort ohne Neustart wirksam, da `get_db()` den Pfad bei jedem
+  Verbindungsaufbau neu aus der Konfiguration liest.
+- **Automatische Migration:** Vorhandene `~/hausverwaltung.db` und
+  `einstellungen.json` im App-Verzeichnis werden beim ersten Start nach
+  `daten/` kopiert, falls dort noch keine Datei liegt.
+
+---
+
 ## [0.19.0] — 2026-04-08
 
 ### Behoben
