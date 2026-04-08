@@ -7,6 +7,31 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.19.0] — 2026-04-08
+
+### Behoben
+- **#50** Bug: Neue Wohnungen wurden beim Klick auf „Speichern" nicht persistiert.
+  Ursache: `WohnungenPage._new()` referenzierte `v["miteigentumsanteil"]`, ein Feld
+  das im `WohnungDialog` nie angelegt wurde → KeyError verschluckte den INSERT.
+  Fix: zentrales `_save_values()` mit Spaltenliste `_COLS`, Fehler werden jetzt
+  per Messagebox angezeigt statt still verschluckt.
+
+### Neu
+- **#48** Wohnfläche und Nutzfläche laut Aufteilungsplan
+  - Neue Spalte `wohnflaeche_qm` (Wohnfläche, MEA-relevant)
+  - Spalte `nutzflaeche_qm` bleibt für nicht-MEA-relevante Flächen
+  - Live-MEA-Kontrollwert im Dialog: 1000 × Wohnfläche / Σ aktive Wohnflächen
+  - Neue Spalte „MEA-Kontr. ‰" in der Wohnungsübersicht
+- **#49** Balkon / Terrasse / Garten / Stellplatz / Carport mit Anzahl
+  - Neue Spalten: `balkon_anzahl`, `terrasse(_anzahl)`, `garten(_anzahl)`,
+    `stellplatz_anzahl`, `carport(_anzahl)`
+- **#50** Wohnung deaktivieren / reaktivieren (Soft-Delete)
+  - Neue Spalte `aktiv` (Default 1)
+  - Buttons „⊘ Deaktivieren" und „↺ Reaktivieren"
+  - Deaktivierte Wohnungen nur für Benutzer mit Löschrecht sichtbar
+
+---
+
 ## [0.18.0] — 2026-04-06
 
 ### KI-Protokoll, KI-Training und Speicherpfade

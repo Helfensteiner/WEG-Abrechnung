@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.18.0"
+APP_VERSION = "0.19.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.16.0 — Issues #38–#41:
@@ -744,6 +744,19 @@ CREATE TABLE IF NOT EXISTS ki_training (
         "ALTER TABLE aufteilungen ADD COLUMN aktiv INTEGER DEFAULT 1",  # #39
         "ALTER TABLE aufteilungen ADD COLUMN ist_benutzerdefiniert INTEGER DEFAULT 0",  # #39
         "ALTER TABLE buchungsregeln ADD COLUMN keywords TEXT",  # #40
+        # v0.19.0 – #48 Wohnfläche/Nutzfläche
+        "ALTER TABLE wohnungen ADD COLUMN wohnflaeche_qm REAL",
+        # v0.19.0 – #49 Balkon/Terrasse/Garten/Stellplatz/Carport mit Anzahl
+        "ALTER TABLE wohnungen ADD COLUMN balkon_anzahl INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN terrasse INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN terrasse_anzahl INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN garten INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN garten_anzahl INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN stellplatz_anzahl INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN carport INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN carport_anzahl INTEGER DEFAULT 0",
+        # v0.19.0 – #50 Soft-Delete Wohnung
+        "ALTER TABLE wohnungen ADD COLUMN aktiv INTEGER DEFAULT 1",
     ]:
         try:
             c.execute(sql)
@@ -1936,37 +1949,105 @@ class WohnungenPage(tk.Frame):
         super().__init__(parent, bg=BG_CARD)
         self._build()
 
+    # Spalten die im INSERT/UPDATE der Wohnungen verwendet werden (#50 Bug-Fix +
+    # #48/#49 neue Felder).  Eine zentrale Liste verhindert, dass Spalten und
+    # Werte sich auseinander entwickeln.
+    _COLS = (
+        "bezeichnung", "typ", "etage", "lage",
+        "wohnflaeche_qm", "nutzflaeche_qm", "zimmer",
+        "balkon", "balkon_anzahl",
+        "terrasse", "terrasse_anzahl",
+        "garten", "garten_anzahl",
+        "stellplatz", "stellplatz_anzahl",
+        "carport", "carport_anzahl",
+        "keller", "heizungsart",
+        "mea_tausendstel", "eigentuemer_id", "mieter_id",
+        "baujahr", "bewohner_anzahl", "notizen", "aktiv",
+    )
+
     def _build(self):
         section_header(self, "Wohnungen", "＋ Wohnung", self._new)
-        cols = ("Bezeichnung", "Typ", "Lage", "Fläche m²", "Zimmer", "MEA ‰", "Eigentümer", "Mieter")
+        cols = ("Bezeichnung", "Typ", "Lage", "Wohnfl. m²", "Nutzfl. m²", "Zimmer",
+                "MEA ‰", "MEA-Kontr. ‰", "Eigentümer", "Mieter", "Status")
         f, self.tree = make_table(self, cols, height=16)
         f.pack(fill="both", expand=True, padx=20, pady=10)
-        for c, w in zip(cols, [120, 80, 100, 80, 70, 80, 150, 150]):
+        for c, w in zip(cols, [110, 70, 90, 75, 75, 60, 70, 90, 130, 130, 70]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
         self.tree.bind("<Double-1>", self._edit)
         btn_row = tk.Frame(self, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0, 10))
         if hat_recht("Wohnungen", "schreiben"):
             make_btn(btn_row, "✏ Bearbeiten", self._edit, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 8))
+            make_btn(btn_row, "⊘ Deaktivieren", self._deaktivieren, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 8))
+            if hat_recht("Wohnungen", "loeschen"):
+                make_btn(btn_row, "↺ Reaktivieren", self._reaktivieren, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 8))
         if hat_recht("Wohnungen", "loeschen"):
             make_btn(btn_row, "🗑 Löschen", self._delete, color=DANGER).pack(side="left")
+        # Anzeige inaktiver Wohnungen erfordert Löschrecht (#50)
+        self._zeige_inaktive = hat_recht("Wohnungen", "loeschen")
         self._load()
 
     def _load(self):
         for i in self.tree.get_children(): self.tree.delete(i)
         conn = get_db()
-        rows = conn.execute("SELECT w.*, e.name as ename, e.vorname as evname, m.name as mname, m.vorname as mvname FROM wohnungen w LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id LEFT JOIN mieter m ON w.mieter_id=m.id ORDER BY w.bezeichnung").fetchall()
+        where = "" if self._zeige_inaktive else "WHERE COALESCE(w.aktiv,1)=1"
+        rows = conn.execute(
+            "SELECT w.*, e.name as ename, e.vorname as evname, m.name as mname, m.vorname as mvname "
+            "FROM wohnungen w "
+            "LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id "
+            "LEFT JOIN mieter m ON w.mieter_id=m.id "
+            f"{where} ORDER BY w.bezeichnung").fetchall()
+        # Summe der Wohnflächen für MEA-Kontrollberechnung (#48)
+        total_wfl = conn.execute(
+            "SELECT COALESCE(SUM(wohnflaeche_qm),0) FROM wohnungen WHERE COALESCE(aktiv,1)=1"
+        ).fetchone()[0] or 0.0
         for r in rows:
-            ename = f"{r['evname'] or ''} {r['ename'] or ''}".strip() if r['ename'] else "–"
-            mname = f"{r['mvname'] or ''} {r['mname'] or ''}".strip() if r['mname'] else "–"
-            mea = f"{parse_float(r['mea_tausendstel']):.1f}" if r["mea_tausendstel"] else "–"
-            self.tree.insert("", "end", iid=r["id"], values=(
-                r["bezeichnung"], r["typ"] or "–", r["lage"] or "–",
-                f"{parse_float(r['nutzflaeche_qm']):.1f}" if r["nutzflaeche_qm"] else "–",
-                r["zimmer"] or "–", mea,
-                ename, mname))
+            d = dict(r)
+            ename = f"{d.get('evname') or ''} {d.get('ename') or ''}".strip() if d.get('ename') else "–"
+            mname = f"{d.get('mvname') or ''} {d.get('mname') or ''}".strip() if d.get('mname') else "–"
+            mea = f"{parse_float(d.get('mea_tausendstel')):.1f}" if d.get("mea_tausendstel") else "–"
+            wfl = parse_float(d.get("wohnflaeche_qm"))
+            # MEA-Kontrolle nach Wohnfläche: 1000 * (Wohnfläche / Gesamt-Wohnfläche)
+            mea_ctrl = f"{(1000.0 * wfl / total_wfl):.1f}" if (wfl and total_wfl) else "–"
+            status = "aktiv" if (d.get("aktiv") in (None, 1)) else "inaktiv"
+            self.tree.insert("", "end", iid=d["id"], values=(
+                d["bezeichnung"], d.get("typ") or "–", d.get("lage") or "–",
+                f"{wfl:.1f}" if wfl else "–",
+                f"{parse_float(d.get('nutzflaeche_qm')):.1f}" if d.get("nutzflaeche_qm") else "–",
+                d.get("zimmer") or "–", mea, mea_ctrl,
+                ename, mname, status))
         conn.close()
         tree_empty_hint(self.tree)
+
+    def _save_values(self, v: dict, where_id: int = None):
+        """Zentrales INSERT/UPDATE für Wohnungen (#50 Bug-Fix).
+        Verwendet self._COLS damit Spalten und Werte synchron bleiben.
+        Fehler werden dem Benutzer als Messagebox angezeigt."""
+        try:
+            conn = get_db()
+            try:
+                vals = [v.get(c) if v.get(c) not in ("", None) else (0 if c in (
+                    "balkon","balkon_anzahl","terrasse","terrasse_anzahl",
+                    "garten","garten_anzahl","stellplatz_anzahl","carport","carport_anzahl"
+                ) else (1 if c == "aktiv" else None)) for c in self._COLS]
+                if where_id is None:
+                    cols_sql = ",".join(self._COLS)
+                    placeholders = ",".join(["?"] * len(self._COLS))
+                    conn.execute(f"INSERT INTO wohnungen ({cols_sql}) VALUES ({placeholders})", vals)
+                else:
+                    set_sql = ",".join(f"{c}=?" for c in self._COLS)
+                    conn.execute(f"UPDATE wohnungen SET {set_sql} WHERE id=?", vals + [int(where_id)])
+                conn.commit()
+                sync_mea_eigentuemer(conn)
+                conn.commit()
+            finally:
+                conn.close()
+            return True
+        except Exception as ex:
+            messagebox.showerror("Fehler beim Speichern",
+                                 f"Wohnung konnte nicht gespeichert werden:\n{ex}",
+                                 parent=self)
+            return False
 
     def _new(self):
         if not hat_recht("Wohnungen", "schreiben"):
@@ -1974,16 +2055,8 @@ class WohnungenPage(tk.Frame):
         d = WohnungDialog(self)
         self.wait_window(d)
         if d.result:
-            v = d.result
-            conn = get_db()
-            conn.execute("INSERT INTO wohnungen (bezeichnung,typ,lage,nutzflaeche_qm,zimmer,balkon,keller,stellplatz,heizungsart,mea_tausendstel,eigentuemer_id,mieter_id,miteigentumsanteil,baujahr,notizen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (v["bezeichnung"], v["typ"], v["lage"], v["nutzflaeche_qm"] or None, v["zimmer"] or None,
-                 v["balkon"], v["keller"], v["stellplatz"], v["heizungsart"], v["mea_tausendstel"] or None,
-                 v["eigentuemer_id"] or None, v["mieter_id"] or None,
-                 v["miteigentumsanteil"] or None, v["baujahr"] or None, v["notizen"]))
-            conn.commit()
-            sync_mea_eigentuemer(conn)   # #20 MEA-Sync
-            conn.commit(); conn.close(); self._load()
+            if self._save_values(d.result):
+                self._load()
 
     def _edit(self, event=None):
         if not hat_recht("Wohnungen", "schreiben"):
@@ -1993,67 +2066,123 @@ class WohnungenPage(tk.Frame):
         conn = get_db()
         row = conn.execute("SELECT * FROM wohnungen WHERE id=?", (int(sel[0]),)).fetchone()
         conn.close()
+        if not row: return
         d = WohnungDialog(self, row)
         self.wait_window(d)
         if d.result:
-            v = d.result
+            if self._save_values(d.result, where_id=int(sel[0])):
+                self._load()
+
+    def _deaktivieren(self):
+        if not hat_recht("Wohnungen", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Sie haben keine Schreibberechtigung.", parent=self); return
+        sel = self.tree.selection()
+        if not sel: return
+        if messagebox.askyesno("Deaktivieren", "Wohnung deaktivieren?", parent=self):
             conn = get_db()
-            conn.execute("UPDATE wohnungen SET bezeichnung=?,typ=?,lage=?,nutzflaeche_qm=?,zimmer=?,balkon=?,keller=?,stellplatz=?,heizungsart=?,mea_tausendstel=?,eigentuemer_id=?,mieter_id=?,miteigentumsanteil=?,baujahr=?,notizen=? WHERE id=?",
-                (v["bezeichnung"], v["typ"], v["lage"], v["nutzflaeche_qm"] or None, v["zimmer"] or None,
-                 v["balkon"], v["keller"], v["stellplatz"], v["heizungsart"], v["mea_tausendstel"] or None,
-                 v["eigentuemer_id"] or None, v["mieter_id"] or None,
-                 v["miteigentumsanteil"] or None, v["baujahr"] or None, v["notizen"], int(sel[0])))
-            conn.commit()
-            sync_mea_eigentuemer(conn)   # #20 MEA-Sync
-            conn.commit(); conn.close(); self._load()
+            conn.execute("UPDATE wohnungen SET aktiv=0 WHERE id=?", (int(sel[0]),))
+            conn.commit(); sync_mea_eigentuemer(conn); conn.commit(); conn.close()
+            self._load()
+
+    def _reaktivieren(self):
+        if not hat_recht("Wohnungen", "loeschen"):
+            messagebox.showwarning("Berechtigung", "Reaktivieren erfordert Löschrecht.", parent=self); return
+        sel = self.tree.selection()
+        if not sel: return
+        conn = get_db()
+        conn.execute("UPDATE wohnungen SET aktiv=1 WHERE id=?", (int(sel[0]),))
+        conn.commit(); sync_mea_eigentuemer(conn); conn.commit(); conn.close()
+        self._load()
 
     def _delete(self):
         if not hat_recht("Wohnungen", "loeschen"):
             messagebox.showwarning("Berechtigung", "Sie haben keine Löschberechtigung.", parent=self); return
         sel = self.tree.selection()
         if not sel: return
-        if messagebox.askyesno("Löschen", "Wohnung löschen?"):
-            conn = get_db()
-            conn.execute("DELETE FROM wohnungen WHERE id=?", (int(sel[0]),))
-            conn.commit(); conn.close(); self._load()
+        if messagebox.askyesno("Löschen", "Wohnung endgültig löschen?", parent=self):
+            try:
+                conn = get_db()
+                conn.execute("DELETE FROM wohnungen WHERE id=?", (int(sel[0]),))
+                conn.commit(); conn.close()
+            except Exception as ex:
+                messagebox.showerror("Fehler", str(ex), parent=self)
+            self._load()
 
 
 class WohnungDialog(BaseDialog):
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Wohnung " + ("bearbeiten" if row else "hinzufügen"), 540, 700)
+        super().__init__(parent, "Wohnung " + ("bearbeiten" if row else "hinzufügen"), 600, 780)
         r = dict(row) if row else {}
+        self._row = r
+
+        def _two():
+            f = tk.Frame(self._body, bg=BG_CARD); f.pack(fill="x", padx=20)
+            f.columnconfigure((0,1), weight=1)
+            l = tk.Frame(f, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
+            ri = tk.Frame(f, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
+            return l, ri
 
         self._add_field("Bezeichnung *", "bezeichnung", r.get("bezeichnung",""))
-        # Row 1: Typ + Etage
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
-        l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
-        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
+        l, ri = _two()
         self._add_field("Typ", "typ", r.get("typ","Wohnung"), row=l)
         self._add_field("Etage", "etage", r.get("etage",""), row=ri)
-        # Row 2: Lage + Fläche
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
-        l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
-        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
+        l, ri = _two()
         self._add_field("Lage", "lage", r.get("lage",""), row=l)
-        self._add_field("Nutzfläche m²", "nutzflaeche_qm", r.get("nutzflaeche_qm",""), row=ri)
-        # Row 3: Zimmer + Balkon
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
-        l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
-        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
-        self._add_field("Zimmer", "zimmer", r.get("zimmer",""), row=l)
-        balkon_opt = ["Nein", "Ja"]
-        cur_bal = balkon_opt[1] if r.get("balkon") else balkon_opt[0]
-        self._add_field("Balkon", "balkon", cur_bal, widget_type="combo", options=balkon_opt, row=ri)
-        # Row 4: Keller + Stellplatz
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
-        l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
-        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
-        self._add_field("Keller", "keller", r.get("keller",""), row=l)
-        self._add_field("Stellplatz", "stellplatz", r.get("stellplatz",""), row=ri)
+        self._add_field("Zimmer", "zimmer", r.get("zimmer",""), row=ri)
 
-        self._add_field("Heizungsart", "heizungsart", r.get("heizungsart","Zentralheizung"))
-        self._add_field("MEA Tausendstel (Miteigentumsanteil)", "mea_tausendstel", r.get("mea_tausendstel",""))
-        self._add_field("Baujahr", "baujahr", r.get("baujahr",""))
+        # #48 Wohnfläche / Nutzfläche laut Aufteilungsplan
+        l, ri = _two()
+        self._add_field("Wohnfläche m² (laut Aufteilungsplan)", "wohnflaeche_qm",
+                        r.get("wohnflaeche_qm",""), row=l)
+        self._add_field("Nutzfläche m² (z. B. Keller, ohne MEA-Einfluss)", "nutzflaeche_qm",
+                        r.get("nutzflaeche_qm",""), row=ri)
+
+        # #49 Balkon / Terrasse / Garten / Stellplatz / Carport mit Anzahl
+        ja_nein = ["Nein", "Ja"]
+        def _ja(val): return "Ja" if val else "Nein"
+        l, ri = _two()
+        self._add_field("Balkon", "balkon", _ja(r.get("balkon")),
+                        widget_type="combo", options=ja_nein, row=l)
+        self._add_field("Anzahl Balkone", "balkon_anzahl", r.get("balkon_anzahl") or 0, row=ri)
+        l, ri = _two()
+        self._add_field("Terrasse", "terrasse", _ja(r.get("terrasse")),
+                        widget_type="combo", options=ja_nein, row=l)
+        self._add_field("Anzahl Terrassen", "terrasse_anzahl", r.get("terrasse_anzahl") or 0, row=ri)
+        l, ri = _two()
+        self._add_field("Garten", "garten", _ja(r.get("garten")),
+                        widget_type="combo", options=ja_nein, row=l)
+        self._add_field("Anzahl Gärten", "garten_anzahl", r.get("garten_anzahl") or 0, row=ri)
+        l, ri = _two()
+        self._add_field("Stellplatz", "stellplatz", r.get("stellplatz","") or "",
+                        widget_type="combo", options=["", "Außen", "Tiefgarage", "Doppelparker"], row=l)
+        self._add_field("Anzahl Stellplätze", "stellplatz_anzahl", r.get("stellplatz_anzahl") or 0, row=ri)
+        l, ri = _two()
+        self._add_field("Carport", "carport", _ja(r.get("carport")),
+                        widget_type="combo", options=ja_nein, row=l)
+        self._add_field("Anzahl Carports", "carport_anzahl", r.get("carport_anzahl") or 0, row=ri)
+
+        l, ri = _two()
+        self._add_field("Keller", "keller", r.get("keller",""), row=l)
+        self._add_field("Heizungsart", "heizungsart", r.get("heizungsart","Zentralheizung"), row=ri)
+
+        l, ri = _two()
+        self._add_field("MEA Tausendstel (Miteigentumsanteil)", "mea_tausendstel",
+                        r.get("mea_tausendstel",""), row=l)
+        self._add_field("Baujahr", "baujahr", r.get("baujahr",""), row=ri)
+
+        # #48 MEA-Kontrollwert (live berechnet aus Wohnfläche / Σ Wohnflächen)
+        self._mea_ctrl_var = tk.StringVar(value="")
+        ctl = tk.Frame(self._body, bg=BG_CARD); ctl.pack(fill="x", padx=20, pady=(8,0))
+        tk.Label(ctl, text="MEA-Kontrollwert (1000 × Wohnfläche / Σ aktive Wohnflächen):",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+        tk.Label(ctl, textvariable=self._mea_ctrl_var, bg=BG_CARD, fg=ACCENT2,
+                 font=FONT_BODY).pack(anchor="w")
+        # Bei jeder Änderung des Wohnflächen-Feldes neu berechnen
+        try:
+            self._fields["wohnflaeche_qm"].trace_add("write", lambda *a: self._update_mea_kontrolle())
+        except Exception:
+            pass
+        self._update_mea_kontrolle()
 
         # Eigentümer-Dropdown
         conn = get_db()
@@ -2077,13 +2206,52 @@ class WohnungDialog(BaseDialog):
         self._add_field("Mieter", "mieter_str", mt_options[cur_mt], widget_type="combo", options=mt_options)
         self._add_field("Notizen", "notizen", r.get("notizen",""), widget_type="text")
 
+    def _update_mea_kontrolle(self):
+        """#48 – Live-Anzeige des MEA-Kontrollwerts beim Bearbeiten."""
+        try:
+            wfl = parse_float(self._fields["wohnflaeche_qm"].get())
+        except Exception:
+            wfl = 0.0
+        try:
+            conn = get_db()
+            row_id = self._row.get("id")
+            if row_id:
+                total = conn.execute(
+                    "SELECT COALESCE(SUM(wohnflaeche_qm),0) FROM wohnungen "
+                    "WHERE COALESCE(aktiv,1)=1 AND id<>?", (row_id,)).fetchone()[0] or 0.0
+            else:
+                total = conn.execute(
+                    "SELECT COALESCE(SUM(wohnflaeche_qm),0) FROM wohnungen "
+                    "WHERE COALESCE(aktiv,1)=1").fetchone()[0] or 0.0
+            conn.close()
+        except Exception:
+            total = 0.0
+        gesamt = total + (wfl or 0.0)
+        if wfl and gesamt:
+            self._mea_ctrl_var.set(f"{(1000.0 * wfl / gesamt):.2f} ‰  (von gesamt {gesamt:.1f} m²)")
+        else:
+            self._mea_ctrl_var.set("– (Wohnfläche eintragen)")
+
     def _on_save(self):
         v = self._get_values()
         if not v.get("bezeichnung"):
             messagebox.showwarning("Pflichtfeld", "Bezeichnung ist erforderlich.", parent=self); return
 
-        # Convert balkon to 0/1
-        v["balkon"] = 1 if v.get("balkon") == "Ja" else 0
+        # Ja/Nein → 0/1 (#49)
+        for key in ("balkon", "terrasse", "garten", "carport"):
+            v[key] = 1 if v.get(key) == "Ja" else 0
+
+        # Anzahl-Felder → int
+        for key in ("balkon_anzahl", "terrasse_anzahl", "garten_anzahl",
+                    "stellplatz_anzahl", "carport_anzahl", "zimmer", "baujahr"):
+            try:
+                v[key] = int(parse_float(v.get(key))) if v.get(key) not in ("", None) else 0
+            except Exception:
+                v[key] = 0
+
+        # Float-Felder
+        for key in ("wohnflaeche_qm", "nutzflaeche_qm", "mea_tausendstel"):
+            v[key] = parse_float(v.get(key)) if v.get(key) not in ("", None) else None
 
         # Resolve Eigentümer-ID
         et_str = v.get("eigentuemer_str","")
@@ -2098,6 +2266,13 @@ class WohnungDialog(BaseDialog):
         for m in self._mieter_list:
             if f"{m['vorname'] or ''} {m['name']}".strip() == mt_str:
                 v["mieter_id"] = m["id"]; break
+
+        # Felder die im Dialog nicht editierbar sind beim Bearbeiten erhalten
+        v.setdefault("bewohner_anzahl", self._row.get("bewohner_anzahl") or 1)
+        # Beim Bearbeiten Aktiv-Status erhalten, beim Neu-Anlegen aktiv=1 (#50)
+        v["aktiv"] = self._row.get("aktiv", 1)
+        if v["aktiv"] is None:
+            v["aktiv"] = 1
 
         self.result = v; self.destroy()
 
