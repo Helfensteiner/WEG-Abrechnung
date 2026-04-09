@@ -72,7 +72,7 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.19.1"
+APP_VERSION = "0.19.2"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.16.0 — Issues #38–#41:
@@ -188,26 +188,45 @@ def _git_info() -> dict:
 
 APP_DIR = Path(__file__).parent                # Verzeichnis der Programmdatei (#38)
 DATA_DIR = APP_DIR / "daten"                   # Standard-Datenverzeichnis
-try:
-    DATA_DIR.mkdir(exist_ok=True)
-except Exception:
-    pass
 
 DEFAULT_DB_PATH = DATA_DIR / "hausverwaltung.db"
 CONFIG_PATH = DATA_DIR / "einstellungen.json"
 
-# Einmalige Migration alter Speicherorte (v0.19 und früher)
-_OLD_CONFIG = APP_DIR / "einstellungen.json"
-_OLD_DB_HOME = Path.home() / "hausverwaltung.db"
+def _init_data_dir():
+    """Erstellt daten/-Verzeichnis, migriert alte Dateien und legt eine
+    Standard-einstellungen.json an falls noch keine existiert."""
+    import shutil as _sh
+    # 1. Verzeichnis sicherstellen
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 2. Alte Dateien migrieren (v0.19.0 und früher)
+    _old_config = APP_DIR / "einstellungen.json"
+    _old_db_home = Path.home() / "hausverwaltung.db"
+
+    if _old_config.exists() and not CONFIG_PATH.exists():
+        _sh.copy2(str(_old_config), str(CONFIG_PATH))
+        print(f"[Migration] {_old_config} → {CONFIG_PATH}")
+
+    if _old_db_home.exists() and not DEFAULT_DB_PATH.exists():
+        _sh.copy2(str(_old_db_home), str(DEFAULT_DB_PATH))
+        print(f"[Migration] {_old_db_home} → {DEFAULT_DB_PATH}")
+
+    # 3. Garantiert eine einstellungen.json anlegen (Standardwerte)
+    if not CONFIG_PATH.exists():
+        default_cfg = {
+            "pfad_datenbank": str(DEFAULT_DB_PATH),
+            "pfad_belege": str(APP_DIR / "Belege"),
+            "pfad_dokumente": str(APP_DIR / "Dokumente"),
+            "pfad_backup": str(DATA_DIR / "backups"),
+        }
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(default_cfg, indent=2, ensure_ascii=False, fp=f)
+        print(f"[Init] Standardkonfiguration angelegt: {CONFIG_PATH}")
+
 try:
-    if _OLD_CONFIG.exists() and not CONFIG_PATH.exists():
-        import shutil as _sh
-        _sh.copy2(str(_OLD_CONFIG), str(CONFIG_PATH))
-    if _OLD_DB_HOME.exists() and not DEFAULT_DB_PATH.exists():
-        import shutil as _sh
-        _sh.copy2(str(_OLD_DB_HOME), str(DEFAULT_DB_PATH))
-except Exception:
-    pass
+    _init_data_dir()
+except Exception as _e:
+    print(f"[Warnung] daten/-Verzeichnis konnte nicht initialisiert werden: {_e}")
 
 def load_config():
     if CONFIG_PATH.exists():

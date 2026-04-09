@@ -7,6 +7,19 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.19.2] — 2026-04-09
+
+### Behoben
+- **einstellungen.json wurde nicht angelegt:** Bei frischer Installation (ohne
+  alte Dateien) wurde `daten/einstellungen.json` nicht erzeugt, weil die
+  Migration nur kopierte, aber keine Standarddatei anlegte. Jetzt erstellt
+  `_init_data_dir()` beim Start automatisch eine `einstellungen.json` mit
+  sinnvollen Standardwerten (DB-Pfad, Belege, Dokumente, Backup-Ordner).
+- **Fehler bei Migration werden sichtbar geloggt** (print auf Konsole statt
+  stilles `except: pass`).
+
+---
+
 ## [0.19.1] — 2026-04-08
 
 ### Geändert
