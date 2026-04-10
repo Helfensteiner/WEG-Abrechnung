@@ -72,9 +72,17 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.19.2"
+APP_VERSION = "0.20.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
+#   0.20.0 — Issues #51–#54:
+#             #51 WohnungDialog: Balkon/Terrasse/Garten/Stellplatz/Carport als Dropdown 0-5
+#                 statt Ja/Nein + separate Anzahlfelder; vereinfachte Eingabe.
+#             #52 ISTA PDF-Import: Bild-/Scan-PDFs per Anthropic Vision API (base64 Document-Block)
+#                 analysieren; automatische Erkennung von gescannten vs. Text-PDFs.
+#             #53 KI-Protokoll: Detail-Dialog (Doppelklick/Button), Kopieren-Funktion,
+#                 versteckte ID-Spalte für eindeutige Selektion.
+#             #54 Buchungsregeln: Spalte „Muster" → „Auftraggeber / Empfänger" für Klarheit.
 #   0.16.0 — Issues #38–#41:
 #             #38 Default Speicherpfade: get_pfad() anlegt Unterordner automatisch,
 #                 _get_default_import_dir, DokumentePage, EinstellungenPage.
@@ -2205,29 +2213,26 @@ class WohnungDialog(BaseDialog):
         self._add_field("Nutzfläche m² (z. B. Keller, ohne MEA-Einfluss)", "nutzflaeche_qm",
                         r.get("nutzflaeche_qm",""), row=ri)
 
-        # #49 Balkon / Terrasse / Garten / Stellplatz / Carport mit Anzahl
-        ja_nein = ["Nein", "Ja"]
-        def _ja(val): return "Ja" if val else "Nein"
+        # #51 Balkon / Terrasse / Garten / Stellplatz / Carport — einheitlich als
+        # Dropdown 0-5 (Anzahl).  Das ersetzt die bisherigen Ja/Nein + separate
+        # Anzahl-Felder.  Die DB-Spalten "balkon", "terrasse" etc. speichern jetzt
+        # direkt die Anzahl (0 = keiner, 1-5 = Stück).
+        anzahl_opt = ["0", "1", "2", "3", "4", "5"]
         l, ri = _two()
-        self._add_field("Balkon", "balkon", _ja(r.get("balkon")),
-                        widget_type="combo", options=ja_nein, row=l)
-        self._add_field("Anzahl Balkone", "balkon_anzahl", r.get("balkon_anzahl") or 0, row=ri)
+        self._add_field("Balkone", "balkon", str(r.get("balkon") or 0),
+                        widget_type="combo", options=anzahl_opt, row=l)
+        self._add_field("Terrassen", "terrasse", str(r.get("terrasse") or 0),
+                        widget_type="combo", options=anzahl_opt, row=ri)
         l, ri = _two()
-        self._add_field("Terrasse", "terrasse", _ja(r.get("terrasse")),
-                        widget_type="combo", options=ja_nein, row=l)
-        self._add_field("Anzahl Terrassen", "terrasse_anzahl", r.get("terrasse_anzahl") or 0, row=ri)
+        self._add_field("Gärten", "garten", str(r.get("garten") or 0),
+                        widget_type="combo", options=anzahl_opt, row=l)
+        self._add_field("Stellplätze", "stellplatz_anzahl", str(r.get("stellplatz_anzahl") or 0),
+                        widget_type="combo", options=anzahl_opt, row=ri)
         l, ri = _two()
-        self._add_field("Garten", "garten", _ja(r.get("garten")),
-                        widget_type="combo", options=ja_nein, row=l)
-        self._add_field("Anzahl Gärten", "garten_anzahl", r.get("garten_anzahl") or 0, row=ri)
-        l, ri = _two()
-        self._add_field("Stellplatz", "stellplatz", r.get("stellplatz","") or "",
-                        widget_type="combo", options=["", "Außen", "Tiefgarage", "Doppelparker"], row=l)
-        self._add_field("Anzahl Stellplätze", "stellplatz_anzahl", r.get("stellplatz_anzahl") or 0, row=ri)
-        l, ri = _two()
-        self._add_field("Carport", "carport", _ja(r.get("carport")),
-                        widget_type="combo", options=ja_nein, row=l)
-        self._add_field("Anzahl Carports", "carport_anzahl", r.get("carport_anzahl") or 0, row=ri)
+        self._add_field("Carports", "carport", str(r.get("carport") or 0),
+                        widget_type="combo", options=anzahl_opt, row=l)
+        self._add_field("Stellplatz-Typ", "stellplatz", r.get("stellplatz","") or "",
+                        widget_type="combo", options=["", "Außen", "Tiefgarage", "Doppelparker"], row=ri)
 
         l, ri = _two()
         self._add_field("Keller", "keller", r.get("keller",""), row=l)
@@ -2305,17 +2310,18 @@ class WohnungDialog(BaseDialog):
         if not v.get("bezeichnung"):
             messagebox.showwarning("Pflichtfeld", "Bezeichnung ist erforderlich.", parent=self); return
 
-        # Ja/Nein → 0/1 (#49)
-        for key in ("balkon", "terrasse", "garten", "carport"):
-            v[key] = 1 if v.get(key) == "Ja" else 0
-
-        # Anzahl-Felder → int
-        for key in ("balkon_anzahl", "terrasse_anzahl", "garten_anzahl",
-                    "stellplatz_anzahl", "carport_anzahl", "zimmer", "baujahr"):
+        # #51 Dropdown-Werte → int (Balkone, Terrassen etc. jetzt direkt als Anzahl 0-5)
+        for key in ("balkon", "terrasse", "garten", "carport",
+                    "stellplatz_anzahl", "zimmer", "baujahr"):
             try:
                 v[key] = int(parse_float(v.get(key))) if v.get(key) not in ("", None) else 0
             except Exception:
                 v[key] = 0
+        # Nicht mehr genutzte separate Anzahl-Felder synchronisieren (Abwärtskompatibilität)
+        v["balkon_anzahl"] = v.get("balkon", 0)
+        v["terrasse_anzahl"] = v.get("terrasse", 0)
+        v["garten_anzahl"] = v.get("garten", 0)
+        v["carport_anzahl"] = v.get("carport", 0)
 
         # Float-Felder
         for key in ("wohnflaeche_qm", "nutzflaeche_qm", "mea_tausendstel"):
@@ -2484,7 +2490,7 @@ class BuchhaltungPage(tk.Frame):
             text="Automatisch gelernte Zuordnungsregeln — können hier korrigiert oder gelöscht werden",
             bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL)
         info_r.pack(anchor="w", padx=20, pady=(6, 2))
-        cols_r = ("Muster", "Kategorie", "Typ", "Konto", "Treffer", "Korrektur")
+        cols_r = ("Auftraggeber / Empfänger", "Kategorie", "Typ", "Konto", "Treffer", "Korrektur")  # #54
         fr, self.tree_r = make_table(self._view_regeln, cols_r, height=12)
         fr.pack(fill="both", expand=True, padx=20, pady=4)
         for c, w in zip(cols_r, [220, 130, 90, 110, 70, 80]):
@@ -8002,12 +8008,25 @@ class KiProtokollPage(tk.Frame):
         make_btn(flt, "🗑 Protokoll leeren", self._protokoll_leeren,
                  color=DANGER).pack(side="right")
 
-        cols = ("Zeitpunkt", "Bereich", "Aktion", "Modell", "Eingabe (Auszug)", "Ergebnis (Auszug)", "Fehler")
+        cols = ("ID", "Zeitpunkt", "Bereich", "Aktion", "Modell", "Eingabe (Auszug)", "Ergebnis (Auszug)", "Fehler")
         f, self._tree_log = make_table(parent, cols, height=14)
         f.pack(fill="both", expand=True, padx=16, pady=4)
-        for c, w in zip(cols, [140, 100, 100, 140, 200, 200, 120]):
+        for c, w in zip(cols, [0, 140, 100, 100, 140, 200, 200, 120]):
             self._tree_log.heading(c, text=c)
             self._tree_log.column(c, width=w, anchor="w")
+        # ID-Spalte unsichtbar (#53)
+        self._tree_log.column("ID", width=0, minwidth=0, stretch=False)
+
+        # #53 Doppelklick für Detail-Ansicht
+        self._tree_log.bind("<Double-1>", self._show_detail)
+
+        # Buttons unter dem Tree
+        btn_proto = tk.Frame(parent, bg=BG_CARD)
+        btn_proto.pack(fill="x", padx=16, pady=(0, 4))
+        make_btn(btn_proto, "🔍 Details anzeigen", self._show_detail,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+        make_btn(btn_proto, "📋 Kopieren", self._copy_detail,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
 
         self._load_protokoll()
 
@@ -8025,6 +8044,7 @@ class KiProtokollPage(tk.Frame):
         conn.close()
         for r in rows:
             self._tree_log.insert("", "end", values=(
+                r["id"],
                 (r["zeitpunkt"] or "")[:16],
                 r["bereich"] or "",
                 r["aktion"] or "",
@@ -8045,6 +8065,97 @@ class KiProtokollPage(tk.Frame):
             conn.commit()
             conn.close()
             self._load_protokoll()
+
+    def _get_selected_protokoll(self):
+        """Gibt den vollständigen DB-Row des ausgewählten Protokolleintrags zurück (#53)."""
+        sel = self._tree_log.selection()
+        if not sel:
+            messagebox.showinfo("Hinweis", "Bitte einen Eintrag auswählen.", parent=self)
+            return None
+        vals = self._tree_log.item(sel[0], "values")
+        if not vals:
+            return None
+        row_id = vals[0]
+        try:
+            conn = get_db()
+            r = conn.execute("SELECT * FROM ki_protokoll WHERE id=?", (int(row_id),)).fetchone()
+            conn.close()
+            return dict(r) if r else None
+        except Exception:
+            return None
+
+    def _show_detail(self, event=None):
+        """#53 – Detail-Ansicht eines KI-Protokolleintrags per Doppelklick oder Button."""
+        r = self._get_selected_protokoll()
+        if not r:
+            return
+        # Detail-Dialog
+        dlg = tk.Toplevel(self)
+        dlg.title(f"KI-Protokoll – {r.get('bereich','')} – {r.get('aktion','')}")
+        dlg.geometry("700x550")
+        dlg.configure(bg=BG_CARD)
+        dlg.grab_set()
+
+        header = tk.Frame(dlg, bg=BG_SIDEBAR, height=40)
+        header.pack(fill="x"); header.pack_propagate(False)
+        tk.Label(header, text=f"Protokoll #{r['id']}", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H3).pack(side="left", padx=14, pady=8)
+
+        body = tk.Frame(dlg, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=16, pady=8)
+
+        def _row(lbl, val):
+            f = tk.Frame(body, bg=BG_CARD); f.pack(fill="x", pady=2)
+            tk.Label(f, text=lbl, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     width=14, anchor="e").pack(side="left")
+            tk.Label(f, text=str(val or "–"), bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                     anchor="w", wraplength=520).pack(side="left", padx=(6,0), fill="x", expand=True)
+
+        _row("Zeitpunkt:", r.get("zeitpunkt",""))
+        _row("Bereich:", r.get("bereich",""))
+        _row("Aktion:", r.get("aktion",""))
+        _row("Modell:", r.get("modell",""))
+        _row("Anbieter:", r.get("anbieter",""))
+        _row("Dauer (ms):", r.get("dauer_ms",""))
+        _row("Fehler:", r.get("fehler",""))
+
+        # Eingabe (vollständig)
+        tk.Label(body, text="Eingabe:", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w", pady=(8,2))
+        t_in = tk.Text(body, height=5, font=FONT_BODY, bg=BG_INPUT, fg=TEXT,
+                       relief="flat", wrap="word", padx=6, pady=4)
+        t_in.pack(fill="x")
+        t_in.insert("1.0", r.get("eingabe_kurz","") or "")
+        t_in.configure(state="disabled")
+
+        # Ergebnis (vollständig)
+        tk.Label(body, text="Ergebnis:", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w", pady=(8,2))
+        t_out = tk.Text(body, height=8, font=FONT_BODY, bg=BG_INPUT, fg=TEXT,
+                        relief="flat", wrap="word", padx=6, pady=4)
+        t_out.pack(fill="both", expand=True)
+        t_out.insert("1.0", r.get("ergebnis_kurz","") or "")
+        t_out.configure(state="disabled")
+
+        # Buttons
+        btn_f = tk.Frame(dlg, bg=BG_CARD)
+        btn_f.pack(fill="x", padx=16, pady=(4,12))
+        make_btn(btn_f, "📋 Alles kopieren",
+                 lambda: self._copy_row_to_clipboard(r), color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,8))
+        make_btn(btn_f, "Schließen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(side="right")
+
+    def _copy_row_to_clipboard(self, r: dict):
+        """Kopiert alle Felder eines Protokolleintrags in die Zwischenablage (#53)."""
+        text = "\n".join(f"{k}: {v}" for k, v in r.items() if v)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        messagebox.showinfo("Kopiert", "Protokolleintrag wurde in die Zwischenablage kopiert.", parent=self)
+
+    def _copy_detail(self):
+        """#53 – Kopiert den ausgewählten Eintrag in die Zwischenablage."""
+        r = self._get_selected_protokoll()
+        if r:
+            self._copy_row_to_clipboard(r)
 
     def _build_training_tab(self, parent):
         if not hat_recht("KI-Administration", "schreiben"):
@@ -9539,18 +9650,25 @@ class IstaPage(tk.Frame):
 
                 _log(f"\n📝 Gesamt: {len(pdf_text)} Zeichen")
 
-                if not pdf_text.strip():
-                    _log("⚠ Kein Text extrahiert – PDF evtl. gescannt (Bild-PDF)")
-                    _log("  Manuelle Eingabe erforderlich")
+                # #52 Wenn kein/wenig Text → OCR via KI-Vision (Bild senden)
+                ist_bild_pdf = len(pdf_text.strip()) < 100
+
+                if ist_bild_pdf:
+                    _log("⚠ Kein/wenig Text extrahiert – PDF evtl. gescannt (Bild-PDF)")
+                    _log("  → Versuche KI-Vision-Analyse (OCR per KI) …")
+                else:
+                    _log(f"  ✓ Textextraktion OK ({len(pdf_text.strip())} Zeichen)")
 
                 _update_status("🤖 KI analysiert Ista-Daten …")
                 _log("\n🤖 Starte KI-Analyse …")
 
-                # KI-Extraktion versuchen
                 cfg = load_config()
                 ki_daten = None
 
-                if pdf_text.strip():
+                if ist_bild_pdf:
+                    # OCR via KI-Vision: PDF-Seiten als Bilder senden (#52)
+                    ki_daten = self._ki_extrahieren_bild(pdf_pfad, cfg, _log)
+                elif pdf_text.strip():
                     ki_daten = self._ki_extrahieren(pdf_text[:8000], cfg, _log)
 
                 if ki_daten:
@@ -9590,6 +9708,118 @@ class IstaPage(tk.Frame):
         # Import in Thread damit UI nicht einfriert
         import threading
         threading.Thread(target=_do_import, daemon=True).start()
+
+    def _ki_extrahieren_bild(self, pdf_pfad: str, cfg: dict, _log) -> dict:
+        """#52 – OCR via KI-Vision: Sendet PDF-Seiten als Bilder an die KI-API."""
+        import base64, time as _time, json as _json
+        _t0 = _time.time()
+        _feld_hinweise, _system_zusatz = _lade_ki_training("Ista-Extraktion")
+
+        # PDF-Seiten zu Bildern konvertieren (benötigt pypdf ≥ 4.x)
+        bilder_b64 = []
+        try:
+            import pypdf
+            with open(pdf_pfad, "rb") as fh:
+                pdf_bytes = fh.read()
+            # Sende das gesamte PDF als Base64 (Anthropic unterstützt PDF-Analyse)
+            bilder_b64 = [base64.standard_b64encode(pdf_bytes).decode("ascii")]
+            _log(f"   PDF: {len(pdf_bytes)} Bytes als Bild-Eingabe vorbereitet")
+        except Exception as ex:
+            _log(f"   ⚠ PDF konnte nicht für Bildanalyse vorbereitet werden: {ex}")
+            return None
+
+        if not bilder_b64:
+            _log("   ⚠ Keine Bilddaten – KI-Vision-Analyse abgebrochen")
+            return None
+
+        prompt = (
+            "Analysiere diese Ista-Heizkostenabrechnung (als PDF/Bild). "
+            "Führe zunächst OCR durch und extrahiere dann alle Daten als JSON.\n"
+            "Antworte NUR mit einem JSON-Objekt.\n\n"
+            "Felder:\n"
+            '  "abrechnungsjahr": Abrechnungsjahr (Integer)\n'
+            '  "abrechnungszeitraum_von": Startdatum YYYY-MM-DD\n'
+            '  "abrechnungszeitraum_bis": Enddatum YYYY-MM-DD\n'
+            '  "objekt_adresse": Objektadresse\n'
+            '  "ista_auftragsnummer": Auftragsnummer\n'
+            '  "gesamtkosten_heizung": Gesamte Heizkosten als Zahl\n'
+            '  "gesamtkosten_warmwasser": Gesamte Warmwasserkosten als Zahl\n'
+            '  "gesamtkosten_gesamt": Gesamtkosten als Zahl\n'
+            '  "positionen": Array pro Wohneinheit/Mieter:\n'
+            '    [{"ista_einheit_nr":"...", "ista_einheit_bezeichnung":"...",\n'
+            '      "mieter_name":"...", "hke":0, "hke_anteil_pct":0,\n'
+            '      "warmwasser_m3":0, "warmwasser_anteil_pct":0,\n'
+            '      "heizkosten_grundkosten":0, "heizkosten_verbrauchskosten":0,\n'
+            '      "heizkosten_gesamt":0, "warmwasserkosten_gesamt":0,\n'
+            '      "gesamtkosten":0, "vorauszahlung":0, "nachzahlung_guthaben":0}]'
+        )
+        if _feld_hinweise:
+            prompt += f"\n\nZusätzliche Hinweise:\n{_feld_hinweise}"
+
+        try:
+            aktiv = cfg.get("ki_aktives_modell", "")
+            if aktiv:
+                anbieter, modell = KIAssistentPage._parse_modell_auswahl(aktiv)
+            else:
+                anbieter = cfg.get("ki_anbieter", "anthropic")
+                modell = cfg.get("ki_modell", "claude-opus-4-6")
+            _log(f"   Anbieter: {anbieter}, Modell: {modell} (Vision/PDF-Modus)")
+
+            import urllib.request
+            if anbieter == "anthropic":
+                api_key = cfg.get("ki_api_key", "")
+                if not api_key:
+                    _log("   ⚠ Kein Anthropic API-Key konfiguriert")
+                    return None
+                system_text = "Du bist ein Experte für Heizkostenabrechnungen der Firma Ista."
+                if _system_zusatz:
+                    system_text += "\n" + _system_zusatz
+                # Anthropic Vision: PDF als document block
+                content_blocks = [
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": bilder_b64[0]}},
+                    {"type": "text", "text": prompt}
+                ]
+                body = _json.dumps({
+                    "model": modell,
+                    "max_tokens": 4096,
+                    "system": system_text,
+                    "messages": [{"role": "user", "content": content_blocks}]
+                }).encode()
+                req = urllib.request.Request(
+                    "https://api.anthropic.com/v1/messages",
+                    data=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01"
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    result = _json.loads(resp.read().decode())
+                antwort = result.get("content", [{}])[0].get("text", "")
+            else:
+                _log("   ⚠ KI-Vision nur mit Anthropic-API unterstützt")
+                return None
+
+            # JSON parsen
+            antwort = antwort.strip()
+            if antwort.startswith("```"):
+                antwort = antwort.split("\n", 1)[-1].rsplit("```", 1)[0]
+            ki_daten = _json.loads(antwort)
+
+            dauer = int((_time.time() - _t0) * 1000)
+            _log(f"   ✅ KI-Vision-Analyse erfolgreich ({dauer} ms)")
+            ki_log("Ista-Extraktion", "Vision-OCR", os.path.basename(pdf_pfad),
+                   str(ki_daten)[:500], modell, anbieter, dauer)
+            return ki_daten
+
+        except Exception as ex:
+            dauer = int((_time.time() - _t0) * 1000)
+            _log(f"   ❌ KI-Vision-Fehler: {ex}")
+            ki_log("Ista-Extraktion", "Vision-Fehler", os.path.basename(pdf_pfad),
+                   "", modell if 'modell' in dir() else "?", anbieter if 'anbieter' in dir() else "?",
+                   dauer, str(ex))
+            return None
 
     def _ki_extrahieren(self, pdf_text: str, cfg: dict, _log) -> dict:
         """Versucht KI-basierte Extraktion der Ista-Daten."""

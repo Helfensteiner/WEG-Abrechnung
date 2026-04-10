@@ -7,6 +7,27 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.20.0] — 2026-04-10
+
+### Hinzugefügt
+- **#51 WohnungDialog vereinfacht:** Balkon, Terrasse, Garten, Stellplatz und
+  Carport werden jetzt als einzelnes Dropdown (0–5) eingegeben statt als
+  Ja/Nein-Checkbox + separates Anzahlfeld. Rückwärtskompatible Synchronisation
+  der alten `*_anzahl`-Spalten.
+- **#52 ISTA Bild-PDF-Import:** Gescannte/Bild-PDFs (weniger als 100 Zeichen
+  extrahierbarer Text) werden automatisch erkannt und per Anthropic Vision API
+  als base64-Document-Block analysiert. Fallback auf Text-Extraktion bei
+  normalen PDFs.
+- **#53 KI-Protokoll Detail-Dialog:** Doppelklick oder „🔍 Details anzeigen"-
+  Button öffnet Protokolleinträge in einem eigenen Dialog mit allen Feldern
+  (Eingabe, Ergebnis, Fehler) in voller Länge. „📋 Kopieren"-Button kopiert
+  die ausgewählte Zeile in die Zwischenablage. Versteckte ID-Spalte für
+  eindeutige Selektion.
+- **#54 Buchungsregeln-Spalte umbenannt:** „Muster" → „Auftraggeber / Empfänger"
+  für bessere Verständlichkeit.
+
+---
+
 ## [0.19.2] — 2026-04-09
 
 ### Behoben
