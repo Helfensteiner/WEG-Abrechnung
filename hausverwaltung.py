@@ -72,9 +72,12 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.20.0"
+APP_VERSION = "0.20.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
+#   0.20.1 — Issue #55: Ista-Werte manuell erfassen (_manuell_erfassen_komplett):
+#             Gesamtwerte + Positionen pro Wohnung, „Alle Wohnungen laden"-Button,
+#             Plausibilitätsprüfung (Summe Positionen vs. Gesamtwerte) mit Farbstatus.
 #   0.20.0 — Issues #51–#54:
 #             #51 WohnungDialog: Balkon/Terrasse/Garten/Stellplatz/Carport als Dropdown 0-5
 #                 statt Ja/Nein + separate Anzahlfelder; vereinfachte Eingabe.
@@ -9081,16 +9084,21 @@ class IstaPage(tk.Frame):
         self._build()
 
     def _build(self):
-        # Header
-        section_header(self, "🔥 Ista-Wärmeabrechnung",
-                        "📥 Ista-PDF importieren", self._import_pdf)
+        # Header – zwei Buttons: PDF-Import und manuelle Erfassung (#55)
+        hdr = tk.Frame(self, bg=BG_CARD)
+        hdr.pack(fill="x", padx=20, pady=(18, 6))
+        tk.Label(hdr, text="🔥 Ista-Wärmeabrechnung",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(side="left")
+        make_btn(hdr, "✏️ Manuell erfassen", self._manuell_erfassen_komplett).pack(side="right", padx=(6, 0))
+        make_btn(hdr, "📥 Ista-PDF importieren", self._import_pdf).pack(side="right")
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20)
 
         # Info-Banner
         info = tk.Frame(self, bg="#EBF5FB", bd=0)
         info.pack(fill="x", padx=20, pady=(8, 4))
         tk.Label(info,
                  text="ℹ  Ista liefert Heizkostenabrechnungen als PDF. "
-                      "Importieren Sie das PDF und ordnen Sie die Wohnungseinheiten zu. "
+                      "Importieren Sie das PDF oder erfassen Sie die Werte manuell. "
                       "Die Kosten werden automatisch in die Nebenkosten-Abrechnung übernommen.",
                  bg="#EBF5FB", fg="#1A5276", font=FONT_SMALL,
                  wraplength=900, justify="left").pack(padx=12, pady=8, anchor="w")
@@ -9996,30 +10004,68 @@ class IstaPage(tk.Frame):
             parent=self)
 
     def _manuell_eingeben(self, dlg, pdf_pfad):
-        """Manuelle Eingabe der Ista-Daten wenn automatische Extraktion fehlschlägt."""
+        """Manuelle Eingabe nach fehlgeschlagenem PDF-Import → delegiert an Komplett-Dialog."""
         dlg.destroy()
-        dlg2 = tk.Toplevel(self)
-        dlg2.title("Ista-Daten manuell eingeben")
-        dlg2.geometry("560x500")
-        dlg2.configure(bg=BG_CARD)
-        dlg2.transient(self.winfo_toplevel())
+        self._manuell_erfassen_komplett(pdf_pfad=pdf_pfad)
 
-        tk.Label(dlg2, text="Ista-Abrechnung manuell erfassen",
-                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 4), anchor="w")
+    # ── #55 Manuelle Ista-Erfassung (Gesamtwerte + Positionen pro Wohnung) ───
+
+    def _manuell_erfassen_komplett(self, pdf_pfad: str = None):
+        """#55 – Vollständige manuelle Erfassung: Gesamtwerte UND Einzelpositionen
+        pro Wohnung/Mieter mit Plausibilitätsprüfung."""
+        if not hat_recht("Ista-Wärme", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Ista-Abrechnung manuell erfassen")
+        dlg.geometry("920x700")
+        dlg.minsize(800, 600)
+        dlg.configure(bg=BG_CARD)
+        dlg.transient(self.winfo_toplevel())
+        dlg.grab_set()
+
+        # ── Scrollbarer Container ────────────────────────────────────────────
+        canvas = tk.Canvas(dlg, bg=BG_CARD, highlightthickness=0)
+        vsb = ttk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg=BG_CARD)
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        # Mausrad-Scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        dlg.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget == dlg else None)
+
+        # ── Sektion 1: Gesamtwerte ───────────────────────────────────────────
+        tk.Label(scroll_frame, text="📊 Ista-Abrechnung – Gesamtwerte",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 8), anchor="w")
+
+        gesamt_frame = tk.Frame(scroll_frame, bg=BG_CARD)
+        gesamt_frame.pack(fill="x", padx=20, pady=(0, 8))
 
         felder = {}
+        cfg = load_config()
+        weg_name = cfg.get("weg_strasse", "")
+        weg_plz = cfg.get("weg_plz", "")
+        weg_ort = cfg.get("weg_ort", "")
+        default_adresse = f"{weg_name}, {weg_plz} {weg_ort}".strip(", ")
+
         for label, key, default in [
             ("Abrechnungsjahr *", "abrechnungsjahr", str(date.today().year - 1)),
             ("Zeitraum von (JJJJ-MM-TT)", "abrechnungszeitraum_von", f"{date.today().year-1}-01-01"),
             ("Zeitraum bis (JJJJ-MM-TT)", "abrechnungszeitraum_bis", f"{date.today().year-1}-12-31"),
-            ("Objekt-Adresse", "objekt_adresse", ""),
+            ("Objekt-Adresse", "objekt_adresse", default_adresse),
             ("Ista-Auftragsnummer", "ista_auftragsnummer", ""),
-            ("Gesamtkosten Heizung (€)", "gesamtkosten_heizung", "0"),
-            ("Gesamtkosten Warmwasser (€)", "gesamtkosten_warmwasser", "0"),
-            ("Gesamtkosten Gesamt (€)", "gesamtkosten_gesamt", "0"),
+            ("Gesamtkosten Heizung (€)", "gesamtkosten_heizung", "0,00"),
+            ("Gesamtkosten Warmwasser (€)", "gesamtkosten_warmwasser", "0,00"),
+            ("Gesamtkosten Gesamt (€)", "gesamtkosten_gesamt", "0,00"),
         ]:
-            row = tk.Frame(dlg2, bg=BG_CARD)
-            row.pack(fill="x", padx=20, pady=3)
+            row = tk.Frame(gesamt_frame, bg=BG_CARD)
+            row.pack(fill="x", pady=2)
             tk.Label(row, text=label, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
                      width=28, anchor="w").pack(side="left")
             var = tk.StringVar(value=default)
@@ -10027,31 +10073,240 @@ class IstaPage(tk.Frame):
                      relief="flat", bd=0).pack(side="left", fill="x", expand=True, ipady=4)
             felder[key] = var
 
-        tk.Label(dlg2, text="💡 Tipp: Nach dem Speichern können Sie Einzel-Positionen\n"
-                             "im Tab 'Positionen & Zuordnung' manuell ergänzen.",
-                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, pady=(8, 4), anchor="w")
+        tk.Frame(scroll_frame, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(12, 8))
 
-        def _save():
+        # ── Sektion 2: Positionen pro Wohnung/Mieter ────────────────────────
+        tk.Label(scroll_frame, text="🏠 Positionen pro Wohnung / Mieter",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, anchor="w")
+        tk.Label(scroll_frame,
+                 text="Erfassen Sie hier die Einzelwerte für jede Wohnung. "
+                      "Sie können Wohnungen aus der Datenbank übernehmen oder frei eingeben.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 wraplength=860).pack(padx=20, pady=(2, 6), anchor="w")
+
+        # Wohnungen laden
+        conn = get_db()
+        try:
+            wohnungen_db = conn.execute(
+                "SELECT w.id, w.bezeichnung, w.wohnflaeche_qm, "
+                "  COALESCE(m.vorname || ' ' || m.name, e.vorname || ' ' || e.name, '–') as bewohner "
+                "FROM wohnungen w "
+                "LEFT JOIN mieter m ON m.id = w.mieter_id "
+                "LEFT JOIN eigentuemer e ON e.id = w.eigentuemer_id "
+                "WHERE w.aktiv = 1 ORDER BY w.bezeichnung"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        # Button-Leiste für Positionen
+        pos_ctrl = tk.Frame(scroll_frame, bg=BG_CARD)
+        pos_ctrl.pack(fill="x", padx=20, pady=(0, 4))
+        make_btn(pos_ctrl, "➕ Position hinzufügen", lambda: _add_position()).pack(side="left", padx=(0, 6))
+        make_btn(pos_ctrl, "📋 Alle Wohnungen laden", lambda: _load_all_wohnungen()).pack(side="left", padx=(0, 6))
+        make_btn(pos_ctrl, "🗑 Letzte entfernen", lambda: _remove_last_position(),
+                 color=DANGER).pack(side="left")
+
+        # Container für die Positions-Zeilen
+        pos_container = tk.Frame(scroll_frame, bg=BG_CARD)
+        pos_container.pack(fill="x", padx=20, pady=(4, 8))
+
+        # Spaltenüberschriften
+        header_fr = tk.Frame(pos_container, bg=BG_INPUT)
+        header_fr.pack(fill="x", pady=(0, 4))
+        for txt, w in [("Nr.", 4), ("Wohnung/Einheit", 14), ("Mieter", 14),
+                        ("Heizkosten €", 10), ("Warmwasser €", 10), ("Gesamt €", 10),
+                        ("Vorauszahlung €", 12), ("Nachz./Guthaben €", 13)]:
+            tk.Label(header_fr, text=txt, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     width=w, anchor="w").pack(side="left", padx=1)
+
+        positionen_rows = []  # Liste von dicts {frame, felder}
+
+        def _add_position(wohnung_bez="", mieter="", heiz="0,00", ww="0,00",
+                          gesamt="0,00", voraus="0,00", nachz="0,00"):
+            idx = len(positionen_rows) + 1
+            row_fr = tk.Frame(pos_container, bg=BG_CARD if idx % 2 else BG_INPUT)
+            row_fr.pack(fill="x", pady=1)
+            bg = BG_CARD if idx % 2 else BG_INPUT
+
+            tk.Label(row_fr, text=str(idx), bg=bg, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     width=4, anchor="center").pack(side="left", padx=1)
+
+            pf = {}
+            for key, default, w in [
+                ("wohnung", wohnung_bez, 14), ("mieter", mieter, 14),
+                ("heizkosten", heiz, 10), ("warmwasser", ww, 10),
+                ("gesamt", gesamt, 10), ("vorauszahlung", voraus, 12),
+                ("nachzahlung", nachz, 13),
+            ]:
+                var = tk.StringVar(value=default)
+                e = tk.Entry(row_fr, textvariable=var, bg=BG_INPUT, fg=TEXT,
+                             font=FONT_SMALL, relief="flat", bd=0, width=w)
+                e.pack(side="left", padx=1, ipady=2)
+                pf[key] = var
+
+            # Auto-Berechnung: Heiz + WW = Gesamt, wenn Gesamt leer
+            def _auto_gesamt(*_args):
+                try:
+                    h = float(pf["heizkosten"].get().replace(",", ".") or 0)
+                    w = float(pf["warmwasser"].get().replace(",", ".") or 0)
+                    g = float(pf["gesamt"].get().replace(",", ".") or 0)
+                    if abs(g - (h + w)) > 0.01 and g == 0:
+                        pf["gesamt"].set(f"{h + w:.2f}".replace(".", ","))
+                except ValueError:
+                    pass
+            pf["heizkosten"].trace_add("write", _auto_gesamt)
+            pf["warmwasser"].trace_add("write", _auto_gesamt)
+
+            positionen_rows.append({"frame": row_fr, "felder": pf})
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _remove_last_position():
+            if positionen_rows:
+                last = positionen_rows.pop()
+                last["frame"].destroy()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _load_all_wohnungen():
+            """Lädt alle aktiven Wohnungen aus der DB als Positionen."""
+            if positionen_rows:
+                if not messagebox.askyesno("Wohnungen laden",
+                    "Vorhandene Positionen werden beibehalten.\n"
+                    "Fehlende Wohnungen werden hinzugefügt.", parent=dlg):
+                    return
+            existing = {r["felder"]["wohnung"].get().strip().lower() for r in positionen_rows}
+            for w in wohnungen_db:
+                bez = w["bezeichnung"] or ""
+                if bez.strip().lower() not in existing:
+                    _add_position(wohnung_bez=bez, mieter=w["bewohner"] or "–")
+
+        # ── Sektion 3: Plausibilitäts-Anzeige ────────────────────────────────
+        tk.Frame(scroll_frame, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(8, 6))
+
+        plaus_frame = tk.Frame(scroll_frame, bg="#FEF9E7")
+        plaus_frame.pack(fill="x", padx=20, pady=(0, 8))
+        plaus_lbl = tk.Label(plaus_frame, text="⏳ Plausibilitätsprüfung: Erfassen Sie Positionen …",
+                              bg="#FEF9E7", fg="#7D6608", font=FONT_SMALL, wraplength=860, justify="left")
+        plaus_lbl.pack(padx=12, pady=8, anchor="w")
+
+        def _check_plausibilitaet():
+            """#55 – Prüft ob Summe der Positionen ≈ Gesamtkosten."""
             try:
+                g_heiz = float(felder["gesamtkosten_heizung"].get().replace(",", ".") or 0)
+                g_ww = float(felder["gesamtkosten_warmwasser"].get().replace(",", ".") or 0)
+                g_ges = float(felder["gesamtkosten_gesamt"].get().replace(",", ".") or 0)
+            except ValueError:
+                plaus_lbl.config(text="⚠ Gesamtwerte ungültig – bitte Zahlen eingeben.",
+                                  bg="#FDEDEC", fg=DANGER)
+                plaus_frame.config(bg="#FDEDEC")
+                return False
+
+            sum_heiz = 0.0
+            sum_ww = 0.0
+            sum_ges = 0.0
+            for r in positionen_rows:
+                pf = r["felder"]
+                try:
+                    sum_heiz += float(pf["heizkosten"].get().replace(",", ".") or 0)
+                    sum_ww += float(pf["warmwasser"].get().replace(",", ".") or 0)
+                    sum_ges += float(pf["gesamt"].get().replace(",", ".") or 0)
+                except ValueError:
+                    pass
+
+            abweichungen = []
+            ok = True
+            if g_heiz > 0 and abs(sum_heiz - g_heiz) > 0.99:
+                abweichungen.append(
+                    f"Heizung: Summe Positionen {sum_heiz:,.2f} € ≠ Gesamt {g_heiz:,.2f} € "
+                    f"(Δ {abs(sum_heiz - g_heiz):,.2f} €)")
+                ok = False
+            if g_ww > 0 and abs(sum_ww - g_ww) > 0.99:
+                abweichungen.append(
+                    f"Warmwasser: Summe Positionen {sum_ww:,.2f} € ≠ Gesamt {g_ww:,.2f} € "
+                    f"(Δ {abs(sum_ww - g_ww):,.2f} €)")
+                ok = False
+            if g_ges > 0 and abs(sum_ges - g_ges) > 0.99:
+                abweichungen.append(
+                    f"Gesamt: Summe Positionen {sum_ges:,.2f} € ≠ Gesamt {g_ges:,.2f} € "
+                    f"(Δ {abs(sum_ges - g_ges):,.2f} €)")
+                ok = False
+
+            if not positionen_rows:
+                plaus_lbl.config(
+                    text="ℹ Keine Positionen erfasst – nur Gesamtwerte werden gespeichert.",
+                    bg="#EBF5FB", fg="#1A5276")
+                plaus_frame.config(bg="#EBF5FB")
+                return True
+            elif ok:
+                plaus_lbl.config(
+                    text=f"✅ Plausibel: {len(positionen_rows)} Positionen, Summen stimmen überein.\n"
+                         f"   Heizung: {sum_heiz:,.2f} €  |  Warmwasser: {sum_ww:,.2f} €  |  "
+                         f"Gesamt: {sum_ges:,.2f} €",
+                    bg="#EAFAF1", fg=SUCCESS)
+                plaus_frame.config(bg="#EAFAF1")
+                return True
+            else:
+                plaus_lbl.config(
+                    text="⚠ Abweichungen:\n" + "\n".join(f"   • {a}" for a in abweichungen) +
+                         "\n   Prüfen Sie die Eingaben oder speichern Sie trotzdem.",
+                    bg="#FEF9E7", fg="#7D6608")
+                plaus_frame.config(bg="#FEF9E7")
+                return False
+
+        # ── Buttons am Ende ──────────────────────────────────────────────────
+        btn_frame = tk.Frame(scroll_frame, bg=BG_CARD)
+        btn_frame.pack(fill="x", padx=20, pady=(4, 16))
+
+        def _on_pruefen():
+            _check_plausibilitaet()
+
+        def _on_save():
+            plaus_ok = _check_plausibilitaet()
+            if not plaus_ok and positionen_rows:
+                if not messagebox.askyesno("Abweichung",
+                    "Die Summe der Positionen weicht von den Gesamtwerten ab.\n"
+                    "Trotzdem speichern?", parent=dlg):
+                    return
+            try:
+                _pf = lambda v: float(v.replace(",", ".")) if v else 0
                 daten = {
                     "abrechnungsjahr": int(felder["abrechnungsjahr"].get() or date.today().year - 1),
                     "abrechnungszeitraum_von": felder["abrechnungszeitraum_von"].get() or None,
                     "abrechnungszeitraum_bis": felder["abrechnungszeitraum_bis"].get() or None,
                     "objekt_adresse": felder["objekt_adresse"].get(),
                     "ista_auftragsnummer": felder["ista_auftragsnummer"].get(),
-                    "gesamtkosten_heizung": float(felder["gesamtkosten_heizung"].get().replace(",", ".") or 0),
-                    "gesamtkosten_warmwasser": float(felder["gesamtkosten_warmwasser"].get().replace(",", ".") or 0),
-                    "gesamtkosten_gesamt": float(felder["gesamtkosten_gesamt"].get().replace(",", ".") or 0),
+                    "gesamtkosten_heizung": _pf(felder["gesamtkosten_heizung"].get()),
+                    "gesamtkosten_warmwasser": _pf(felder["gesamtkosten_warmwasser"].get()),
+                    "gesamtkosten_gesamt": _pf(felder["gesamtkosten_gesamt"].get()),
                     "positionen": [],
                 }
-                self._save_import(dlg2, pdf_pfad, daten)
-            except ValueError as e:
-                messagebox.showerror("Eingabefehler", f"Ungültige Eingabe: {e}", parent=dlg2)
+                for r in positionen_rows:
+                    pf = r["felder"]
+                    pos = {
+                        "ista_einheit_nr": "",
+                        "ista_einheit_bezeichnung": pf["wohnung"].get().strip(),
+                        "mieter_name": pf["mieter"].get().strip(),
+                        "hke": 0,
+                        "hke_anteil_pct": 0,
+                        "warmwasser_m3": 0,
+                        "warmwasser_anteil_pct": 0,
+                        "heizkosten_grundkosten": 0,
+                        "heizkosten_verbrauchskosten": 0,
+                        "heizkosten_gesamt": _pf(pf["heizkosten"].get()),
+                        "warmwasserkosten_gesamt": _pf(pf["warmwasser"].get()),
+                        "gesamtkosten": _pf(pf["gesamt"].get()),
+                        "vorauszahlung": _pf(pf["vorauszahlung"].get()),
+                        "nachzahlung_guthaben": _pf(pf["nachzahlung"].get()),
+                    }
+                    daten["positionen"].append(pos)
 
-        btn_row = tk.Frame(dlg2, bg=BG_CARD)
-        btn_row.pack(pady=12)
-        make_btn(btn_row, "💾 Speichern", _save).pack(side="left", padx=6)
-        make_btn(btn_row, "Abbrechen", dlg2.destroy, color=BG_INPUT, fg=TEXT).pack(side="left", padx=6)
+                self._save_import(dlg, pdf_pfad, daten)
+            except ValueError as e:
+                messagebox.showerror("Eingabefehler", f"Ungültige Eingabe: {e}", parent=dlg)
+
+        make_btn(btn_frame, "🔍 Plausibilität prüfen", _on_pruefen,
+                 color=ACCENT).pack(side="left", padx=(0, 8))
+        make_btn(btn_frame, "💾 Speichern & Importieren", _on_save).pack(side="left", padx=(0, 8))
+        make_btn(btn_frame, "Abbrechen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(side="left")
 
     def _delete_abrechnung(self):
         if not hat_recht("Ista-Wärme", "loeschen"):

@@ -7,6 +7,25 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.20.1] — 2026-04-11
+
+### Hinzugefügt
+- **#55 ISTA-Werte manuell erfassen:** Neuer Button „✏️ Manuell erfassen" direkt im
+  Ista-Wärmeabrechnung-Header. Öffnet einen vollständigen Dialog mit:
+  - **Gesamtwerte** (Heizkosten, Warmwasser, Gesamt, Zeitraum, Adresse, Auftragsnummer)
+  - **Positionen pro Wohnung/Mieter** – beliebig viele Zeilen, jede mit Heizkosten,
+    Warmwasser, Gesamt, Vorauszahlung und Nachzahlung/Guthaben. Auto-Berechnung
+    Gesamt = Heizung + Warmwasser.
+  - **„📋 Alle Wohnungen laden"** – übernimmt alle aktiven Wohnungen inkl. Bewohner-
+    name aus der Datenbank als Startpunkt.
+  - **Plausibilitätsprüfung** (#55-AC3): Vergleich Summe Positionen vs. Gesamtwerte
+    mit farbiger Rückmeldung (grün/gelb/rot). Warnung bei Speichern mit Abweichung.
+  - Scrollbarer Dialog mit Mausrad-Unterstützung.
+- Der bisherige „✏️ Manuell eingeben"-Button nach fehlgeschlagenem PDF-Import
+  öffnet jetzt ebenfalls diesen vollständigen Dialog.
+
+---
+
 ## [0.20.0] — 2026-04-10
 
 ### Hinzugefügt
