@@ -72,9 +72,17 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.20.1"
+APP_VERSION = "0.21.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
+#   0.21.0 — Issues #56, #57:
+#             #56 Buchungsdatum + Rechnungsdatum: zahlungen.rechnungsdatum (ALTER TABLE),
+#                 ZahlungDialog umstrukturiert — Buchungsdatum oben, Sektion
+#                 „Rechnungsinformationen" mit Rechnungsdatum + Rechnungssteller (#35/#56).
+#                 BuchhaltungPage Spalte „Datum" → „Buchungsdatum".
+#             #57 Aufteilung ↔ Kostenarten: _umlageschluessel_aus_aufteilungen() liest
+#                 aktive aufteilungen.typ aus DB; _new_kostenart/_edit_kostenart nutzen
+#                 dynamische Liste statt hardcodierter Werte.
 #   0.20.1 — Issue #55: Ista-Werte manuell erfassen (_manuell_erfassen_komplett):
 #             Gesamtwerte + Positionen pro Wohnung, „Alle Wohnungen laden"-Button,
 #             Plausibilitätsprüfung (Summe Positionen vs. Gesamtwerte) mit Farbstatus.
@@ -813,6 +821,7 @@ CREATE TABLE IF NOT EXISTS ki_training (
         "ALTER TABLE zahlungen ADD COLUMN abrechnungsrelevant INTEGER DEFAULT 1",
         "ALTER TABLE zahlungen ADD COLUMN abrechnungsjahr INTEGER",
         "ALTER TABLE zahlungen ADD COLUMN kommentar_abrechnung TEXT",
+        "ALTER TABLE zahlungen ADD COLUMN rechnungsdatum DATE",  # #56 Rechnungsdatum
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_min REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_max REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN konfidenz REAL DEFAULT 0.5",
@@ -2442,10 +2451,10 @@ class BuchhaltungPage(tk.Frame):
 
         # Buchungen-View
         self._view_buchungen = tk.Frame(self._content, bg=BG_CARD)
-        cols_b = ("Datum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Belegnr.", "📎")
+        cols_b = ("Buchungsdatum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Belegnr.", "📎")  # #56
         fb, self.tree_b = make_table(self._view_buchungen, cols_b, height=13)
         fb.pack(fill="both", expand=True, padx=20, pady=6)
-        for c, w in zip(cols_b, [90, 210, 110, 100, 80, 80, 80, 28]):
+        for c, w in zip(cols_b, [100, 200, 110, 100, 80, 80, 80, 28]):
             self.tree_b.heading(c, text=c); self.tree_b.column(c, width=w, anchor="w")
         self.tree_b.tag_configure("einnahme", foreground=SUCCESS)
         self.tree_b.tag_configure("ausgabe",  foreground=DANGER)
@@ -2630,12 +2639,13 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr,rechnungsdatum) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
                  v.get("status", "Geprüft"), v.get("beleg_dateipfad"),
                  v.get("rechnungssteller") or None, v.get("abrechnungsrelevant", 1),
-                 v.get("abrechnungsjahr") or None))
+                 v.get("abrechnungsjahr") or None,
+                 v.get("rechnungsdatum") or None))  # #56
             conn.commit(); conn.close()
             if self._active_tab == "buchungen": self._load_buchungen()
 
@@ -2655,12 +2665,13 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnungsdatum=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
                  v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"),
                  v.get("beleg_dateipfad"), v.get("rechnungssteller") or None,
-                 v.get("abrechnungsrelevant", 1), v.get("abrechnungsjahr") or None, int(sel[0])))
+                 v.get("abrechnungsrelevant", 1), v.get("abrechnungsjahr") or None,
+                 v.get("rechnungsdatum") or None, int(sel[0])))  # #56
             conn.commit(); conn.close()
             self._load_buchungen()
 
@@ -3379,6 +3390,27 @@ class BuchhaltungPage(tk.Frame):
         self._tree_wg.tag_configure("plus",  foreground=SUCCESS)
         self._tree_wg.tag_configure("minus", foreground=DANGER)
 
+    @staticmethod
+    def _umlageschluessel_aus_aufteilungen() -> list:
+        """#57 – Lädt verfügbare Umlageschlüssel aus der aufteilungen-Tabelle
+        (aktive Einträge, nach Typ geordnet). Fällt auf Basis-Liste zurück."""
+        basis = ["MEA", "Wohnfläche", "Verbrauch", "Verbrauch/Wohnfläche",
+                 "HeizKV", "Kopfanzahl", "Wasserkosten nach Punkten", "–"]
+        try:
+            conn = get_db()
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT typ FROM aufteilungen WHERE aktiv=1 ORDER BY typ"
+                ).fetchall()
+            finally:
+                conn.close()
+            db_typen = [r["typ"] for r in rows if r["typ"]]
+            # Basis-Schlüssel + DB-Einträge (ohne Duplikate, Reihenfolge: Basis zuerst)
+            gesamt = list(dict.fromkeys(basis + db_typen))
+            return gesamt
+        except Exception:
+            return basis
+
     def _new_kostenart(self):
         """Neue benutzerdefinierte Kategorie hinzufügen."""
         win = tk.Toplevel(self)
@@ -3403,7 +3435,7 @@ class BuchhaltungPage(tk.Frame):
         tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
         schluessel_var = tk.StringVar(value="MEA")
         ttk.Combobox(body, textvariable=schluessel_var,
-                     values=["MEA", "Wohnfläche", "Verbrauch/Wohnfläche", "MEA/Fläche", "MEA/Wohneinheiten", "Wohneinheiten/MEA", "–"],
+                     values=self._umlageschluessel_aus_aufteilungen(),  # #57 dynamisch aus aufteilungen
                      font=FONT_BODY).pack(fill="x", ipady=4)
         uml_var = tk.BooleanVar(value=False)
         tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
@@ -3464,7 +3496,7 @@ class BuchhaltungPage(tk.Frame):
         tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
         schluessel_var = tk.StringVar(value=meta.get("schluessel", "MEA"))
         ttk.Combobox(body, textvariable=schluessel_var,
-                     values=["MEA", "Wohnfläche", "Verbrauch/Wohnfläche", "MEA/Fläche", "MEA/Wohneinheiten", "Wohneinheiten/MEA", "–"],
+                     values=self._umlageschluessel_aus_aufteilungen(),  # #57 dynamisch aus aufteilungen
                      font=FONT_BODY).pack(fill="x", ipady=4)
         uml = meta.get("umlagefaehig", False)
         uml_var = tk.BooleanVar(value=uml if isinstance(uml, bool) else False)
@@ -3541,9 +3573,11 @@ class BuchhaltungPage(tk.Frame):
 
 class ZahlungDialog(BaseDialog):
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Buchung", 540, 620)
+        super().__init__(parent, "Buchung", 560, 680)
         r = dict(row) if row else {}
-        self._add_field("Datum (JJJJ-MM-TT) *", "datum",
+
+        # ── Buchungsdaten (#56: Buchungsdatum klar als solches kennzeichnen) ──
+        self._add_field("Buchungsdatum (JJJJ-MM-TT) *", "datum",
                         r.get("datum", date.today().isoformat()))
         self._add_field("Typ *", "typ", r.get("typ", "Einnahme"),
                         widget_type="combo", options=["Einnahme", "Ausgabe"])
@@ -3551,14 +3585,22 @@ class ZahlungDialog(BaseDialog):
         self._add_field("Kategorie", "kategorie", r.get("kategorie", ""),
                         widget_type="combo",
                         options=BuchhaltungPage.aktive_kategorien())
-        self._add_field("Rechnungssteller", "rechnungssteller",
-                        r.get("rechnungssteller", "") or "")   # #35
         self._add_field("Beschreibung", "beschreibung", r.get("beschreibung", ""))
         self._add_field("Belegnummer",  "belegnr",      r.get("belegnr", ""))
         self._add_field("Status", "status", r.get("status", "Neu"),
                         widget_type="combo", options=["Neu", "Geprüft", "Freigegeben"])
         self._add_field("Abrechnungsjahr", "abrechnungsjahr",
                         r.get("abrechnungsjahr", "") or "")
+
+        # ── Rechnungsinformationen (#56) ──────────────────────────────────────
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(self._body, text="Rechnungsinformationen",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(
+                     padx=20, anchor="w")
+        self._add_field("Rechnungsdatum (JJJJ-MM-TT)", "rechnungsdatum",
+                        r.get("rechnungsdatum", "") or "")   # #56
+        self._add_field("Rechnungssteller", "rechnungssteller",
+                        r.get("rechnungssteller", "") or "")  # #35
 
         # Abrechnungsrelevanz-Checkbox
         abr_frame = tk.Frame(self._body, bg=BG_CARD)

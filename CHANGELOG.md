@@ -7,6 +7,28 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.21.0] — 2026-04-11
+
+### Hinzugefügt
+- **#56 Buchungsdatum & Rechnungsdatum:** Die `zahlungen`-Tabelle erhält eine neue
+  Spalte `rechnungsdatum`. Der `ZahlungDialog` ist neu strukturiert:
+  - Oberer Bereich: **Buchungsdatum** (klar als solches bezeichnet), Typ, Betrag,
+    Kategorie, Beschreibung, Belegnummer, Status, Abrechnungsjahr
+  - Neue Sektion **„Rechnungsinformationen"**: Rechnungsdatum + Rechnungssteller
+    (zusammengefasst für Transparenz zwischen Buchungs- und Rechnungsdatum)
+  - Buchungsliste: Spaltenbezeichnung „Datum" → **„Buchungsdatum"** (#56-AC3)
+
+### Behoben
+- **#57 Aufteilung ↔ Kostenarten:** Neue Hilfsmethode
+  `BuchhaltungPage._umlageschluessel_aus_aufteilungen()` liest aktive Einträge
+  aus der `aufteilungen`-Tabelle (Spalte `typ`) und liefert eine dynamische
+  Liste für den Umlageschlüssel-Dropdown in Kostenkategorien. Neue Aufteilungstypen
+  erscheinen automatisch in den Kostenarten-Dialogen. Basis-Schlüssel (MEA,
+  Wohnfläche, Verbrauch, HeizKV, Wasserkosten nach Punkten …) bleiben immer
+  verfügbar als Fallback.
+
+---
+
 ## [0.20.1] — 2026-04-11
 
 ### Hinzugefügt
