@@ -7,6 +7,50 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.22.0] — 2026-04-12
+
+### Hinzugefügt
+- **#58 Buchung – erweiterte Rechnungsinformationen:**
+  - Neue DB-Spalten: `rechnungsnummer`, `gesamtrechnungsbetrag`, `lohnanteil`,
+    `handwerker_steuerlich` (INTEGER, §35a EStG Flag)
+  - `ZahlungDialog` – neue Felder in Sektion „Rechnungsinformationen":
+    Rechnungsnummer, Gesamtrechnungsbetrag €, Lohnanteil €, Checkbox
+    „§35a EStG – Handwerkerleistung steuerlich absetzbar"
+  - **Auto-Status „Geprüft"**: wenn Betrag == Gesamtrechnungsbetrag UND
+    Belegnummer == Rechnungsnummer, wird der Status automatisch auf „Geprüft" gesetzt
+  - `_ki_felder_befuellen`: Datum und Betrag werden durch KI nicht mehr überschrieben,
+    wenn das Feld bereits ausgefüllt ist
+
+- **#59 Mieter – NK-Vorauszahlung mit Zeiträumen (§556 BGB):**
+  - Neue Tabelle `nk_vorauszahlung_zeitraeume` mit Von/Bis-Datum und Monatsbetrag
+  - Neue Klasse `NKZeitraumDialog`: Verwaltung der Zeiträume mit Überschneidungscheck
+  - „📅 NK-Zeiträume verwalten"-Button im `MieterDialog` (bei bestehenden Mietern)
+  - Hilfsfunktion `nk_vorauszahlung_fuer_jahr(mieter_id, jahr, fallback)`: berechnet
+    tagesgenau die gewichtete Jahres-Vorauszahlung aus den Zeiträumen (Pro-Rata-Temporis);
+    Fallback auf `nebenkosten_vorauszahlung × 12` wenn keine Zeiträume definiert
+  - §556 BGB Abrechnung nutzt `nk_vorauszahlung_fuer_jahr()` statt statischem Wert
+
+- **#60 Ista – Abrechnungsjahr aktualisiert Zeitraum automatisch:**
+  - `trace_add` auf `abrechnungsjahr`-Feld in `_manuell_erfassen_komplett`:
+    Ändert Zeitraum-von/bis automatisch auf `{Jahr}-01-01` / `{Jahr}-12-31`
+
+- **#62 Ista – „Alle Wohnungen laden" filtert nach Abrechnungsjahr:**
+  - Liest Abrechnungsjahr aus Formular, fragt Mieter mit Überschneidungs-Filter
+    (`einzug ≤ {Jahr}-12-31` UND `auszug ≥ {Jahr}-01-01`) ab
+  - Bei Mieterwechsel im Jahr erscheinen beide Mieter als separate Zeilen
+
+- **#63 Wasserkosten – „Aus Stamm" aktualisiert bestehende Einträge:**
+  - `_import_wohnungen` verwendet jetzt `UPDATE` für vorhandene Zeilen (Stammdaten-Sync)
+    statt nur neue Zeilen einzufügen; Meldung zeigt „X neu hinzugefügt, Y aktualisiert"
+  - `_jahr_var.trace_add`: Jahreswechsel löst automatisch `_refresh()` aus
+
+### Behoben
+- **#61 Ista – Liegenschaftsnummer statt Auftragsnummer:**
+  - Label „Ista-Auftragsnummer" → **„Liegenschaftsnummer"** im manuellen Erfassungsdialog
+    und in den KI-Prompts (DB-Spalte `ista_auftragsnummer` bleibt unverändert)
+
+---
+
 ## [0.21.0] — 2026-04-11
 
 ### Hinzugefügt

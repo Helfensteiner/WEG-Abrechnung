@@ -72,9 +72,26 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.21.0"
+APP_VERSION = "0.22.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
+#   0.22.0 — Issues #58–#63:
+#             #58 Buchung Rechnungsinformationen: rechnungsnummer, gesamtrechnungsbetrag,
+#                 lohnanteil, handwerker_steuerlich (§35a EStG) als neue DB-Spalten;
+#                 ZahlungDialog um diese Felder erweitert; Auto-Status „Geprüft" wenn
+#                 Betrag == Gesamtrechnungsbetrag UND Belegnr == Rechnungsnummer;
+#                 _ki_felder_befuellen: datum + betrag nur überschreiben wenn noch leer.
+#             #59 Mieter NK-Vorauszahlung mit Zeiträumen: neue Tabelle
+#                 nk_vorauszahlung_zeitraeume; NKZeitraumDialog für Verwaltung;
+#                 nk_vorauszahlung_fuer_jahr() Hilfsfunktion (Pro-Rata-Temporis);
+#                 §556 BGB Berechnung nutzt Zeitraum-basierte Vorauszahlungen.
+#             #60 Ista-Abrechnungsjahr: Trace auf Abrechnungsjahr-Feld aktualisiert
+#                 Zeitraum-von/bis automatisch auf 01-01 / 12-31.
+#             #61 Ista-Auftragsnummer → Liegenschaftsnummer (Label + KI-Prompts).
+#             #62 „Alle Wohnungen laden" filtert Mieter nach Abrechnungsjahr;
+#                 separate Zeile je Mieter bei Mieterwechsel im Jahr.
+#             #63 Wasserkosten „Aus Stamm": UPDATE bestehende Zeilen statt nur INSERT;
+#                 _jahr_var trace_add für automatische Aktualisierung bei Jahreswechsel.
 #   0.21.0 — Issues #56, #57:
 #             #56 Buchungsdatum + Rechnungsdatum: zahlungen.rechnungsdatum (ALTER TABLE),
 #                 ZahlungDialog umstrukturiert — Buchungsdatum oben, Sektion
@@ -755,6 +772,14 @@ CREATE TABLE IF NOT EXISTS ki_training (
     geaendert_am DATETIME DEFAULT CURRENT_TIMESTAMP,
     geaendert_von INTEGER
 );
+CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mieter_id INTEGER NOT NULL,
+    beginn_datum DATE NOT NULL,
+    ende_datum DATE,
+    betrag REAL NOT NULL,
+    FOREIGN KEY (mieter_id) REFERENCES mieter(id) ON DELETE CASCADE
+);
 """)
     conn.commit()
     # Indizes für häufig abgefragte Spalten (IF NOT EXISTS = idempotent)
@@ -822,6 +847,11 @@ CREATE TABLE IF NOT EXISTS ki_training (
         "ALTER TABLE zahlungen ADD COLUMN abrechnungsjahr INTEGER",
         "ALTER TABLE zahlungen ADD COLUMN kommentar_abrechnung TEXT",
         "ALTER TABLE zahlungen ADD COLUMN rechnungsdatum DATE",  # #56 Rechnungsdatum
+        "CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (id INTEGER PRIMARY KEY AUTOINCREMENT, mieter_id INTEGER NOT NULL, beginn_datum DATE NOT NULL, ende_datum DATE, betrag REAL NOT NULL)",  # #59
+        "ALTER TABLE zahlungen ADD COLUMN rechnungsnummer TEXT",  # #58
+        "ALTER TABLE zahlungen ADD COLUMN gesamtrechnungsbetrag REAL",  # #58
+        "ALTER TABLE zahlungen ADD COLUMN lohnanteil REAL",  # #58
+        "ALTER TABLE zahlungen ADD COLUMN handwerker_steuerlich INTEGER DEFAULT 0",  # #58 §35a EStG
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_min REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_max REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN konfidenz REAL DEFAULT 0.5",
@@ -1749,6 +1779,224 @@ class MieterPage(tk.Frame):
         make_btn(btn_row, "✔ Übernehmen", _uebernehmen, color=ACCENT2).pack(side="right")
 
 
+# ── #59 Hilfsfunktion: NK-Vorauszahlung aus Zeiträumen ───────────────────────
+
+def nk_vorauszahlung_fuer_jahr(mieter_id: int, jahr: int,
+                                fallback_monatlich: float = 0.0) -> float:
+    """Berechnet die gewichtete NK-Vorauszahlung für ein Abrechnungsjahr.
+
+    Für jeden Zeitraum, der das Jahr überlappt, wird der tagesgenaue Anteil
+    berechnet (Pro-Rata-Temporis). Wenn keine Zeiträume vorhanden sind,
+    wird der Fallback-Wert × 12 verwendet.
+    """
+    from datetime import date as _date
+    try:
+        conn = get_db()
+        try:
+            reihen = conn.execute(
+                "SELECT beginn_datum, ende_datum, betrag "
+                "FROM nk_vorauszahlung_zeitraeume "
+                "WHERE mieter_id=? ORDER BY beginn_datum",
+                (mieter_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        if not reihen:
+            return fallback_monatlich * 12
+        jahr_von = _date(jahr, 1, 1)
+        jahr_bis = _date(jahr, 12, 31)
+        tage_jahr = 366 if jahr % 4 == 0 and (jahr % 100 != 0 or jahr % 400 == 0) else 365
+        total = 0.0
+        for r in reihen:
+            b = r["beginn_datum"]
+            e = r["ende_datum"]
+            betrag = float(r["betrag"] or 0)
+            try:
+                zr_von = _date.fromisoformat(b) if b else _date(1900, 1, 1)
+                zr_bis = _date.fromisoformat(e) if e else _date(9999, 12, 31)
+            except (ValueError, TypeError):
+                continue
+            # Überschneidung mit Abrechnungsjahr
+            overlap_von = max(zr_von, jahr_von)
+            overlap_bis = min(zr_bis, jahr_bis)
+            if overlap_von > overlap_bis:
+                continue
+            tage = (overlap_bis - overlap_von).days + 1
+            # Jahresanteil × Jahresbetrag (= betrag_monatlich × 12)
+            total += betrag * 12 * (tage / tage_jahr)
+        return total
+    except Exception:
+        return fallback_monatlich * 12
+
+
+class NKZeitraumDialog(tk.Toplevel):
+    """#59 – Verwaltung der NK-Vorauszahlungs-Zeiträume für einen Mieter."""
+
+    def __init__(self, parent, mieter_id: int, mieter_name: str):
+        super().__init__(parent)
+        self.title(f"NK-Vorauszahlungs-Zeiträume – {mieter_name}")
+        self.configure(bg=BG_CARD)
+        self.geometry("580x460")
+        self.resizable(False, False)
+        self.grab_set()
+        self._mieter_id = mieter_id
+        self._build()
+        self._load()
+
+    def _build(self):
+        tk.Label(self, text="NK-Vorauszahlungs-Zeiträume",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 2), anchor="w")
+        tk.Label(self,
+                 text="Kein Ende-Datum = unbefristet. Zeiträume dürfen sich nicht überschneiden.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, anchor="w")
+
+        # Tabelle
+        f, self._tree = make_table(self,
+            ("Von (JJJJ-MM-TT)", "Bis (JJJJ-MM-TT)", "Betrag €/Monat"), height=8)
+        f.pack(fill="both", expand=True, padx=20, pady=8)
+        for col, w in zip(("Von (JJJJ-MM-TT)", "Bis (JJJJ-MM-TT)", "Betrag €/Monat"),
+                           [170, 170, 130]):
+            self._tree.heading(col, text=col)
+            self._tree.column(col, width=w, anchor="w")
+
+        # Formular für neue Zeile
+        frm = tk.Frame(self, bg=BG_INPUT, padx=12, pady=10)
+        frm.pack(fill="x", padx=20, pady=(0, 8))
+        tk.Label(frm, text="Von:", bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 width=6, anchor="w").grid(row=0, column=0)
+        self._von_var = tk.StringVar()
+        tk.Entry(frm, textvariable=self._von_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                 relief="flat", bd=0, width=14).grid(row=0, column=1, padx=(4, 12))
+        tk.Label(frm, text="Bis:", bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 width=4, anchor="w").grid(row=0, column=2)
+        self._bis_var = tk.StringVar()
+        tk.Entry(frm, textvariable=self._bis_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                 relief="flat", bd=0, width=14).grid(row=0, column=3, padx=(4, 12))
+        tk.Label(frm, text="Betrag €:", bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 width=8, anchor="w").grid(row=0, column=4)
+        self._betrag_var = tk.StringVar()
+        tk.Entry(frm, textvariable=self._betrag_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                 relief="flat", bd=0, width=10).grid(row=0, column=5, padx=(4, 12))
+        make_btn(frm, "➕ Hinzufügen", self._add).grid(row=0, column=6)
+
+        # Buttons
+        btn_row = tk.Frame(self, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(btn_row, "🗑 Ausgewählten löschen", self._delete, color=DANGER).pack(side="left")
+        make_btn(btn_row, "Schließen", self.destroy, color=ACCENT2).pack(side="right")
+
+    def _load(self):
+        for i in self._tree.get_children():
+            self._tree.delete(i)
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT id, beginn_datum, ende_datum, betrag "
+                "FROM nk_vorauszahlung_zeitraeume "
+                "WHERE mieter_id=? ORDER BY beginn_datum",
+                (self._mieter_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            self._tree.insert("", "end", iid=r["id"], values=(
+                r["beginn_datum"] or "–",
+                r["ende_datum"] or "unbefristet",
+                fmt_euro(r["betrag"])
+            ))
+        tree_empty_hint(self._tree)
+
+    def _add(self):
+        von = self._von_var.get().strip()
+        bis = self._bis_var.get().strip() or None
+        betrag_str = self._betrag_var.get().strip().replace(",", ".")
+        # Validierung
+        if not von:
+            messagebox.showwarning("Pflichtfeld", "Von-Datum ist erforderlich.", parent=self)
+            return
+        try:
+            from datetime import date as _date
+            _date.fromisoformat(von)
+            if bis:
+                bis_d = _date.fromisoformat(bis)
+                von_d = _date.fromisoformat(von)
+                if bis_d < von_d:
+                    messagebox.showwarning("Datum", "Bis-Datum darf nicht vor Von-Datum liegen.", parent=self)
+                    return
+        except ValueError:
+            messagebox.showwarning("Datum", "Datum im Format JJJJ-MM-TT eingeben.", parent=self)
+            return
+        try:
+            betrag = float(betrag_str)
+            if betrag < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Betrag", "Betrag muss eine positive Zahl sein.", parent=self)
+            return
+        # Überschneidungs-Check
+        if self._hat_ueberschneidung(von, bis):
+            messagebox.showwarning("Überschneidung",
+                "Dieser Zeitraum überschneidet sich mit einem bestehenden Eintrag.\n"
+                "Bitte Zeiträume lückenlos und überschneidungsfrei anlegen.", parent=self)
+            return
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO nk_vorauszahlung_zeitraeume (mieter_id, beginn_datum, ende_datum, betrag) "
+                "VALUES (?,?,?,?)",
+                (self._mieter_id, von, bis, betrag)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._von_var.set("")
+        self._bis_var.set("")
+        self._betrag_var.set("")
+        self._load()
+
+    def _delete(self):
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showwarning("Auswahl", "Bitte einen Eintrag auswählen.", parent=self)
+            return
+        if not messagebox.askyesno("Löschen", "Ausgewählten Zeitraum löschen?", parent=self):
+            return
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM nk_vorauszahlung_zeitraeume WHERE id=?", (int(sel[0]),))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load()
+
+    def _hat_ueberschneidung(self, von: str, bis) -> bool:
+        """Prüft ob der neue Zeitraum einen bestehenden überlappt."""
+        from datetime import date as _date
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT beginn_datum, ende_datum FROM nk_vorauszahlung_zeitraeume "
+                "WHERE mieter_id=?",
+                (self._mieter_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        try:
+            von_d = _date.fromisoformat(von)
+            bis_d = _date.fromisoformat(bis) if bis else _date(9999, 12, 31)
+        except (ValueError, TypeError):
+            return False
+        for r in rows:
+            try:
+                ex_von = _date.fromisoformat(r["beginn_datum"]) if r["beginn_datum"] else _date(1900, 1, 1)
+                ex_bis = _date.fromisoformat(r["ende_datum"]) if r["ende_datum"] else _date(9999, 12, 31)
+            except (ValueError, TypeError):
+                continue
+            if von_d <= ex_bis and bis_d >= ex_von:
+                return True
+        return False
+
+
 class MieterDialog(BaseDialog):
     def __init__(self, parent, row=None):
         super().__init__(parent, "Mieter" + (" bearbeiten" if row else " hinzufügen"), 520, 700)
@@ -1803,7 +2051,20 @@ class MieterDialog(BaseDialog):
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
         self._add_field("Kaltmiete €", "kaltmiete", r.get("kaltmiete",""), row=l)
-        self._add_field("NK-Vorausz. €", "nk", r.get("nebenkosten_vorauszahlung",""), row=ri)
+        self._add_field("NK-Vorausz. € (aktuell)", "nk", r.get("nebenkosten_vorauszahlung",""), row=ri)
+        # #59 – Zeiträume-Button (nur für vorhandene Mieter)
+        self._mieter_id = r.get("id")
+        self._mieter_row = r
+        if self._mieter_id:
+            nk_btn_row = tk.Frame(self._body, bg=BG_CARD)
+            nk_btn_row.pack(fill="x", padx=20, pady=(0, 4))
+            mieter_name = f"{r.get('vorname','')} {r.get('name','')}".strip()
+            make_btn(nk_btn_row, "📅 NK-Zeiträume verwalten",
+                     lambda: NKZeitraumDialog(self, self._mieter_id, mieter_name),
+                     color=BG_INPUT, fg=TEXT).pack(side="left")
+            tk.Label(nk_btn_row,
+                     text="(Zeitraum-basierte Vorauszahlungen für §556 BGB Abrechnung)",
+                     bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left", padx=(8, 0))
 
         self._add_field("Kaution €", "kaution", r.get("kaution",""))
 
@@ -2639,13 +2900,15 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr,rechnungsdatum) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr,rechnungsdatum,rechnungsnummer,gesamtrechnungsbetrag,lohnanteil,handwerker_steuerlich) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
                  v.get("status", "Geprüft"), v.get("beleg_dateipfad"),
                  v.get("rechnungssteller") or None, v.get("abrechnungsrelevant", 1),
                  v.get("abrechnungsjahr") or None,
-                 v.get("rechnungsdatum") or None))  # #56
+                 v.get("rechnungsdatum") or None,  # #56
+                 v.get("rechnungsnummer") or None, v.get("gesamtrechnungsbetrag") or None,
+                 v.get("lohnanteil") or None, v.get("handwerker_steuerlich", 0)))  # #58
             conn.commit(); conn.close()
             if self._active_tab == "buchungen": self._load_buchungen()
 
@@ -2665,13 +2928,16 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnungsdatum=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnungsdatum=?,rechnungsnummer=?,gesamtrechnungsbetrag=?,lohnanteil=?,handwerker_steuerlich=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
                  v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"),
                  v.get("beleg_dateipfad"), v.get("rechnungssteller") or None,
                  v.get("abrechnungsrelevant", 1), v.get("abrechnungsjahr") or None,
-                 v.get("rechnungsdatum") or None, int(sel[0])))  # #56
+                 v.get("rechnungsdatum") or None,  # #56
+                 v.get("rechnungsnummer") or None, v.get("gesamtrechnungsbetrag") or None,
+                 v.get("lohnanteil") or None, v.get("handwerker_steuerlich", 0),
+                 int(sel[0])))  # #58
             conn.commit(); conn.close()
             self._load_buchungen()
 
@@ -3599,8 +3865,23 @@ class ZahlungDialog(BaseDialog):
                      padx=20, anchor="w")
         self._add_field("Rechnungsdatum (JJJJ-MM-TT)", "rechnungsdatum",
                         r.get("rechnungsdatum", "") or "")   # #56
+        self._add_field("Rechnungsnummer", "rechnungsnummer",
+                        r.get("rechnungsnummer", "") or "")  # #58
         self._add_field("Rechnungssteller", "rechnungssteller",
                         r.get("rechnungssteller", "") or "")  # #35
+        self._add_field("Gesamtrechnungsbetrag €", "gesamtrechnungsbetrag",
+                        r.get("gesamtrechnungsbetrag", "") or "")  # #58
+        self._add_field("Lohnanteil €", "lohnanteil",
+                        r.get("lohnanteil", "") or "")  # #58
+        # §35a EStG Checkbox
+        steuerlich_frame = tk.Frame(self._body, bg=BG_CARD)
+        steuerlich_frame.pack(fill="x", padx=20, pady=(2, 4))
+        self._steuerlich_var = tk.BooleanVar(value=bool(r.get("handwerker_steuerlich", 0)))
+        tk.Checkbutton(steuerlich_frame,
+                       text="§35a EStG – Handwerkerleistung steuerlich absetzbar",
+                       variable=self._steuerlich_var,
+                       bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                       activebackground=BG_CARD, selectcolor=BG_CARD).pack(anchor="w")  # #58
 
         # Abrechnungsrelevanz-Checkbox
         abr_frame = tk.Frame(self._body, bg=BG_CARD)
@@ -3872,14 +4153,21 @@ class ZahlungDialog(BaseDialog):
                 w.insert(0, str(val))
 
         if daten.get("datum"):
-            # ISO-Format (YYYY-MM-DD) direkt übernehmen, kein parse_datum nötig (#16 fix)
-            raw_datum = str(daten["datum"]).strip()
-            import re as _re
-            if _re.match(r'^\d{4}-\d{2}-\d{2}$', raw_datum):
-                _set("datum", raw_datum)
-            else:
-                # Fallback: parse_datum für andere Formate
-                _set("datum", parse_datum(raw_datum) or raw_datum)
+            # #58: Datum nur befüllen wenn noch leer
+            _datum_w = self._fields.get("datum")
+            _datum_aktuell = ""
+            if _datum_w and hasattr(_datum_w, "get"):
+                _datum_aktuell = _datum_w.get().strip() if not hasattr(_datum_w, "index") \
+                                 else _datum_w.get("1.0", "end-1c").strip()
+            if not _datum_aktuell:
+                # ISO-Format (YYYY-MM-DD) direkt übernehmen, kein parse_datum nötig (#16 fix)
+                raw_datum = str(daten["datum"]).strip()
+                import re as _re
+                if _re.match(r'^\d{4}-\d{2}-\d{2}$', raw_datum):
+                    _set("datum", raw_datum)
+                else:
+                    # Fallback: parse_datum für andere Formate
+                    _set("datum", parse_datum(raw_datum) or raw_datum)
         if daten.get("belegnr"):
             _set("belegnr", daten["belegnr"])
         # Beschreibung NUR befüllen wenn Feld leer (#37: nicht überschreiben)
@@ -3908,10 +4196,17 @@ class ZahlungDialog(BaseDialog):
             # Dateiname generieren: YYYY-MM-TT_Rechnungssteller_Zähler
             self._beleg_dateiname_generieren(daten)
         if daten.get("betrag"):
-            try:
-                _set("betrag", abs(float(str(daten["betrag"]).replace(",", "."))))
-            except Exception:
-                pass
+            # #58: Betrag nur befüllen wenn noch leer (0 zählt als leer)
+            _betrag_w = self._fields.get("betrag")
+            _betrag_aktuell = ""
+            if _betrag_w and hasattr(_betrag_w, "get"):
+                _betrag_aktuell = _betrag_w.get().strip() if not hasattr(_betrag_w, "index") \
+                                  else _betrag_w.get("1.0", "end-1c").strip()
+            if not _betrag_aktuell or _betrag_aktuell in ("0", "0.0", "0,0", "0.00", "0,00"):
+                try:
+                    _set("betrag", abs(float(str(daten["betrag"]).replace(",", "."))))
+                except Exception:
+                    pass
 
         if hasattr(self, "_ki_status_lbl"):
             self._ki_status_lbl.config(text="✅ KI-Analyse abgeschlossen", fg=SUCCESS)
@@ -3963,6 +4258,20 @@ class ZahlungDialog(BaseDialog):
         v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
         # Abrechnungsrelevanz speichern
         v["abrechnungsrelevant"] = 1 if self._abr_var.get() else 0
+        # §35a EStG (#58)
+        v["handwerker_steuerlich"] = 1 if self._steuerlich_var.get() else 0
+        # Auto-Status: Betrag == Gesamtrechnungsbetrag UND Belegnr == Rechnungsnummer → "Geprüft" (#58)
+        try:
+            betrag_val = abs(float(str(v.get("betrag", "") or 0).replace(",", ".")))
+            gesamtbetrag_str = str(v.get("gesamtrechnungsbetrag", "") or "").replace(",", ".").strip()
+            rgnr = str(v.get("rechnungsnummer", "") or "").strip()
+            belegnr = str(v.get("belegnr", "") or "").strip()
+            if gesamtbetrag_str and rgnr and belegnr:
+                gesamtbetrag_val = abs(float(gesamtbetrag_str))
+                if abs(betrag_val - gesamtbetrag_val) < 0.01 and rgnr == belegnr:
+                    v["status"] = "Geprüft"
+        except (ValueError, TypeError):
+            pass
         self.result = v; self.destroy()
 
 # ── Wartung-Seite ─────────────────────────────────────────────────────────────
@@ -4852,7 +5161,10 @@ class NebenkostenPage(tk.Frame):
                 color_tag     = "leerstand"
             else:
                 mieter_name   = f"{w['vorname'] or ''} {w['name']}".strip()
-                vorauszahlung = (parse_float(w["nebenkosten_vorauszahlung"]) or 0) * 12 * zeitfaktor
+                # #59: Zeitraum-basierte NK-Vorauszahlung (Fallback: statischer Wert × 12)
+                fallback_monatlich = parse_float(w["nebenkosten_vorauszahlung"]) or 0
+                vorauszahlung = nk_vorauszahlung_fuer_jahr(
+                    w["mieter_id"], int(jahr), fallback_monatlich) * zeitfaktor
                 saldo         = vorauszahlung - kosten
                 color_tag     = "plus" if saldo >= 0 else "minus"
             self._tree_bgb_mi.insert("", "end", values=(
@@ -6833,6 +7145,7 @@ class WasserkostenPage(tk.Frame):
                           state="readonly", width=6, font=FONT_BODY)
         cb.pack(side="left")
         cb.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+        self._jahr_var.trace_add("write", lambda *_: self._refresh())  # #63
         make_btn(top, "Aktualisieren", self._refresh,
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=8)
 
@@ -7155,11 +7468,22 @@ class WasserkostenPage(tk.Frame):
                 parent=self)
             conn.close()
             return
-        added = 0
+        # #63 – INSERT neue Zeilen; UPDATE vorhandene Zeilen aus Stammdaten
+        added = updated = 0
         for w in wohnungen:
-            if not conn.execute(
+            existing = conn.execute(
                 "SELECT id FROM wasserkosten_wohnungsdaten WHERE jahr=? AND wohnung_bezeichnung=?",
-                    (jahr, w["bezeichnung"])).fetchone():
+                (jahr, w["bezeichnung"])).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE wasserkosten_wohnungsdaten SET "
+                    "eigentuemer=?, personen=?, spuelmaschinen=?, waschmaschinen=?, "
+                    "trockner_wasserkuehlung=? "
+                    "WHERE jahr=? AND wohnung_bezeichnung=?",
+                    (w["eig"], w["personen"], w["spuel"], w["wasch"], w["trockner"],
+                     jahr, w["bezeichnung"]))
+                updated += 1
+            else:
                 conn.execute(
                     "INSERT INTO wasserkosten_wohnungsdaten "
                     "(jahr, wohnung_bezeichnung, eigentuemer, personen, spuelmaschinen, "
@@ -7168,11 +7492,17 @@ class WasserkostenPage(tk.Frame):
                 added += 1
         conn.commit()
         conn.close()
+        teile = []
         if added:
-            messagebox.showinfo("Uebernommen",
-                f"{added} Wohnung(en) uebernommen.\nBitte Werte anpassen.", parent=self)
+            teile.append(f"{added} neu hinzugefügt")
+        if updated:
+            teile.append(f"{updated} aus Stammdaten aktualisiert")
+        if teile:
+            messagebox.showinfo("Aus Stamm übernommen",
+                ", ".join(teile) + ".\nBitte Werte prüfen.", parent=self)
         else:
-            messagebox.showinfo("Vorhanden", "Alle Wohnungen bereits eingetragen.", parent=self)
+            messagebox.showinfo("Keine Wohnungen",
+                "Keine Wohnungen in den Stammdaten gefunden.", parent=self)
         self._load_punkte()
 
     # ── Tab 3: Auswertung ─────────────────────────────────────────────────────
@@ -9791,7 +10121,7 @@ class IstaPage(tk.Frame):
             '  "abrechnungszeitraum_von": Startdatum YYYY-MM-DD\n'
             '  "abrechnungszeitraum_bis": Enddatum YYYY-MM-DD\n'
             '  "objekt_adresse": Objektadresse\n'
-            '  "ista_auftragsnummer": Auftragsnummer\n'
+            '  "ista_auftragsnummer": Liegenschaftsnummer\n'
             '  "gesamtkosten_heizung": Gesamte Heizkosten als Zahl\n'
             '  "gesamtkosten_warmwasser": Gesamte Warmwasserkosten als Zahl\n'
             '  "gesamtkosten_gesamt": Gesamtkosten als Zahl\n'
@@ -9885,7 +10215,7 @@ class IstaPage(tk.Frame):
             '  "abrechnungszeitraum_von": Startdatum YYYY-MM-DD\n'
             '  "abrechnungszeitraum_bis": Enddatum YYYY-MM-DD\n'
             '  "objekt_adresse": Objektadresse\n'
-            '  "ista_auftragsnummer": Auftragsnummer falls vorhanden\n'
+            '  "ista_auftragsnummer": Liegenschaftsnummer falls vorhanden\n'
             '  "gesamtkosten_heizung": Gesamte Heizkosten als Zahl\n'
             '  "gesamtkosten_warmwasser": Gesamte Warmwasserkosten als Zahl\n'
             '  "gesamtkosten_gesamt": Gesamtkosten als Zahl\n'
@@ -10101,7 +10431,7 @@ class IstaPage(tk.Frame):
             ("Zeitraum von (JJJJ-MM-TT)", "abrechnungszeitraum_von", f"{date.today().year-1}-01-01"),
             ("Zeitraum bis (JJJJ-MM-TT)", "abrechnungszeitraum_bis", f"{date.today().year-1}-12-31"),
             ("Objekt-Adresse", "objekt_adresse", default_adresse),
-            ("Ista-Auftragsnummer", "ista_auftragsnummer", ""),
+            ("Liegenschaftsnummer", "ista_auftragsnummer", ""),  # #61
             ("Gesamtkosten Heizung (€)", "gesamtkosten_heizung", "0,00"),
             ("Gesamtkosten Warmwasser (€)", "gesamtkosten_warmwasser", "0,00"),
             ("Gesamtkosten Gesamt (€)", "gesamtkosten_gesamt", "0,00"),
@@ -10114,6 +10444,14 @@ class IstaPage(tk.Frame):
             tk.Entry(row, textvariable=var, bg=BG_INPUT, fg=TEXT, font=FONT_BODY,
                      relief="flat", bd=0).pack(side="left", fill="x", expand=True, ipady=4)
             felder[key] = var
+
+        # #60 – Abrechnungsjahr-Änderung aktualisiert Zeitraum automatisch
+        def _on_jahr_changed(*_):
+            jahr_str = felder["abrechnungsjahr"].get().strip()
+            if len(jahr_str) == 4 and jahr_str.isdigit():
+                felder["abrechnungszeitraum_von"].set(f"{jahr_str}-01-01")
+                felder["abrechnungszeitraum_bis"].set(f"{jahr_str}-12-31")
+        felder["abrechnungsjahr"].trace_add("write", _on_jahr_changed)
 
         tk.Frame(scroll_frame, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(12, 8))
 
@@ -10209,17 +10547,62 @@ class IstaPage(tk.Frame):
                 canvas.configure(scrollregion=canvas.bbox("all"))
 
         def _load_all_wohnungen():
-            """Lädt alle aktiven Wohnungen aus der DB als Positionen."""
+            """#62 – Lädt aktive Wohnungen gefiltert nach Abrechnungsjahr."""
             if positionen_rows:
                 if not messagebox.askyesno("Wohnungen laden",
                     "Vorhandene Positionen werden beibehalten.\n"
                     "Fehlende Wohnungen werden hinzugefügt.", parent=dlg):
                     return
+            # Jahr aus Formular lesen
+            jahr_str = felder["abrechnungsjahr"].get().strip()
+            try:
+                jahr_int = int(jahr_str)
+                von_str = f"{jahr_int}-01-01"
+                bis_str = f"{jahr_int}-12-31"
+            except ValueError:
+                messagebox.showwarning("Kein Jahr",
+                    "Bitte zuerst ein gültiges Abrechnungsjahr eingeben.", parent=dlg)
+                return
+            # Wohnungen + Mieter (die im Abrechnungsjahr aktiv waren) laden
+            conn2 = get_db()
+            try:
+                w_rows = conn2.execute(
+                    "SELECT w.id, w.bezeichnung, w.wohnflaeche_qm, "
+                    "  COALESCE(e.vorname || ' ' || e.name, '') AS eigentuemer "
+                    "FROM wohnungen w "
+                    "LEFT JOIN eigentuemer e ON e.id = w.eigentuemer_id "
+                    "WHERE w.aktiv = 1 ORDER BY w.bezeichnung"
+                ).fetchall()
+                m_rows = conn2.execute(
+                    "SELECT m.wohnung_id, m.vorname || ' ' || m.name AS mietername "
+                    "FROM mieter m "
+                    "WHERE m.einzug <= ? "
+                    "  AND (m.auszug IS NULL OR m.auszug = '' OR m.auszug >= ?) "
+                    "ORDER BY m.wohnung_id, m.einzug",
+                    (bis_str, von_str)
+                ).fetchall()
+            finally:
+                conn2.close()
+            # Mieter je Wohnung gruppieren
+            mieter_map: dict = {}
+            for m in m_rows:
+                mieter_map.setdefault(m["wohnung_id"], []).append(m["mietername"])
             existing = {r["felder"]["wohnung"].get().strip().lower() for r in positionen_rows}
-            for w in wohnungen_db:
+            for w in w_rows:
                 bez = w["bezeichnung"] or ""
-                if bez.strip().lower() not in existing:
-                    _add_position(wohnung_bez=bez, mieter=w["bewohner"] or "–")
+                mieter_liste = mieter_map.get(w["id"], [])
+                if not mieter_liste:
+                    # Keine Mieter → Eigentümer als Bewohner oder Leerzeichen
+                    bewohner = w["eigentuemer"] or "–"
+                    if bez.strip().lower() not in existing:
+                        _add_position(wohnung_bez=bez, mieter=bewohner)
+                else:
+                    # Für jeden Mieter im Jahr eine eigene Zeile
+                    for mname in mieter_liste:
+                        key = f"{bez.strip().lower()}|{mname.strip().lower()}"
+                        if key not in existing:
+                            _add_position(wohnung_bez=bez, mieter=mname)
+                            existing.add(key)
 
         # ── Sektion 3: Plausibilitäts-Anzeige ────────────────────────────────
         tk.Frame(scroll_frame, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(8, 6))
