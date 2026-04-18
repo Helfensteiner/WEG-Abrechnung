@@ -94,6 +94,18 @@ from pathlib import Path
 #                 _auto_update_rechnung_status() in _new_zahlung, _edit_buchung, BuchungZuordnenDialog;
 #             #68 KI-OCR Fallback in _extrahiere_und_parse: Anthropic PDF-Vision wenn
 #                 kein ZUGFeRD erkannt (claude-haiku-4-5-20251001 mit PDFs-Beta)
+#   0.26.0 — GH Issues #72/#73/#74/#75:
+#             #72 Dialog-Größen persistent: BaseDialog.destroy() überschrieben →
+#                 _persist_size() wird immer aufgerufen (auch bei Speichern/Abbrechen,
+#                 nicht nur X-Button); _on_close() ruft jetzt destroy() auf.
+#             #73 Beleg-Archivierung: neue Funktion _beleg_archivieren(); nach jedem
+#                 Rechnung-Speichern wird Beleg-Kopie unter <app-dir>/Belege/<Jahr>/
+#                 abgelegt; Ordner wird automatisch erstellt.
+#             #74 §35a-Checkbox aus RechnungDialog entfernt: handwerker_steuerlich
+#                 wird auto. auf 1 gesetzt wenn lohnanteil > 0, sonst 0.
+#             #75 Duplikat-Erkennung Belegablage: bei gleichem Dateinamen in Ablage →
+#                 Hinweisfenster mit Speichern/Abbrechen; bei Speichern: Versionierung
+#                 als <basis>_duplikat_v<n><ext>; Original bleibt erhalten.
 #   0.25.0 — GH Issues #68/#69/#70/#71:
 #             #68 §35a EStG in RechnungDialog verschoben: handwerker_steuerlich
 #                 Checkbox jetzt in RechnungDialog (Beträge-Abschnitt), nicht mehr
@@ -109,7 +121,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.25.0"
+APP_VERSION = "0.26.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -1451,8 +1463,12 @@ class BaseDialog(tk.Toplevel):
         self._canvas.unbind_all("<Button-5>")
 
     def _on_close(self):
+        self.destroy()  # destroy() ruft _persist_size() auf (#72)
+
+    def destroy(self):
+        """#72 – Größe immer speichern: bei X-Button, Speichern UND Abbrechen."""
         self._persist_size()
-        self.destroy()
+        super().destroy()
 
     def _persist_size(self):
         """Save current window geometry to cache."""
@@ -4371,6 +4387,59 @@ class ZahlungDialog(BaseDialog):
         v["rechnung_id"] = self._rechnung_id_val if hasattr(self, "_rechnung_id_val") else None
         self.result = v; self.destroy()
 
+# ── Rechnungen-Hilfsfunktionen ───────────────────────────────────────────────
+
+def _beleg_archivieren(parent_win, beleg_pfad: str, rechnungsdatum: str) -> str | None:
+    """#73/#75 – Archiviert Beleg-Datei unter <app-dir>/Belege/<Jahr>/.
+
+    Bei Duplikat (#75): Hinweisfenster mit Entscheidung Speichern/Abbrechen.
+    Bei Speichern-Entscheid: Versionierung als <basis>_duplikat_v<n><ext>.
+    Vorhandene Datei wird niemals überschrieben.
+    Gibt den Zielpfad zurück, oder None bei Abbruch / Fehler.
+    """
+    if not beleg_pfad or not os.path.isfile(beleg_pfad):
+        return None
+    try:
+        import shutil as _shutil
+        # Jahr aus Rechnungsdatum ableiten
+        jahr = str((rechnungsdatum or "")[:4]).strip() or str(date.today().year)
+        if not jahr.isdigit() or not (2000 <= int(jahr) <= 2100):
+            jahr = str(date.today().year)
+        # Zielordner: <app-dir>/Belege/<Jahr>/
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        ziel_dir = os.path.join(app_dir, "Belege", jahr)
+        os.makedirs(ziel_dir, exist_ok=True)
+        dateiname = os.path.basename(beleg_pfad)
+        basis, ext = os.path.splitext(dateiname)
+        ziel_pfad = os.path.join(ziel_dir, dateiname)
+
+        if os.path.exists(ziel_pfad):
+            # #75 – Duplikat: Benutzer fragen
+            antwort = messagebox.askyesno(
+                "Duplikat erkannt",
+                f"Ein Beleg '{dateiname}' ist bereits in der Jahresablage {jahr} vorhanden.\n\n"
+                f"Soll der Beleg trotzdem gespeichert werden?\n"
+                f"(Vorhandene Datei bleibt unverändert; der neue Beleg wird\n"
+                f"als Duplikat mit Versionsnummer abgelegt.)",
+                parent=parent_win
+            )
+            if not antwort:
+                return None  # Abbrechen
+            # Nächste freie Versionsnummer finden
+            version = 2
+            while True:
+                versionierter_name = f"{basis}_duplikat_v{version}{ext}"
+                ziel_pfad = os.path.join(ziel_dir, versionierter_name)
+                if not os.path.exists(ziel_pfad):
+                    break
+                version += 1
+
+        _shutil.copy2(beleg_pfad, ziel_pfad)
+        return ziel_pfad
+    except Exception:
+        return None
+
+
 # ── Rechnungen-Hilfsfunktion (#67 – Auto-Status) ─────────────────────────────
 
 def _auto_update_rechnung_status(conn, rechnung_id):
@@ -4750,6 +4819,9 @@ class RechnungenPage(tk.Frame):
                 conn.commit()
             finally:
                 conn.close()
+            # #73/#75 – Beleg automatisch in Jahresablage archivieren
+            if v.get("beleg_dateipfad"):
+                _beleg_archivieren(self, v.get("beleg_dateipfad"), v.get("rechnungsdatum", ""))
             self._load()
 
     def _edit_rechnung(self, event=None):
@@ -4790,6 +4862,9 @@ class RechnungenPage(tk.Frame):
                 conn.commit()
             finally:
                 conn.close()
+            # #73/#75 – Beleg automatisch in Jahresablage archivieren
+            if v.get("beleg_dateipfad"):
+                _beleg_archivieren(self, v.get("beleg_dateipfad"), v.get("rechnungsdatum", ""))
             self._load()
 
     def _delete_rechnung(self):
@@ -5457,16 +5532,9 @@ class RechnungDialog(BaseDialog):
         l, ri = _two_col()
         self._add_field("MwSt. %", "mwst_satz", r.get("mwst_satz", "19") or "19", row=l)
         self._add_field("MwSt. Betrag €", "mwst_betrag", r.get("mwst_betrag", "") or "", row=ri)
-        self._add_field("Lohnanteil € (§35a EStG)", "lohnanteil", r.get("lohnanteil", "") or "")
-        # §35a EStG Checkbox (#68)
-        steuerlich_frame = tk.Frame(self._body, bg=BG_CARD)
-        steuerlich_frame.pack(fill="x", padx=20, pady=(2, 4))
-        self._steuerlich_var = tk.BooleanVar(value=bool(r.get("handwerker_steuerlich", 0)))
-        tk.Checkbutton(steuerlich_frame,
-                       text="§35a EStG – Handwerkerleistung steuerlich absetzbar",
-                       variable=self._steuerlich_var,
-                       bg=BG_CARD, fg=TEXT, font=FONT_BODY,
-                       activebackground=BG_CARD, selectcolor=BG_CARD).pack(anchor="w")
+        # #74 – Lohnanteil: §35a EStG wird automatisch erkannt (kein Checkbox mehr)
+        self._add_field("Lohnanteil € (§35a EStG – Handwerkerleistung)", "lohnanteil",
+                        r.get("lohnanteil", "") or "")
 
         # Kategorie & Status
         tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
@@ -5546,7 +5614,11 @@ class RechnungDialog(BaseDialog):
             return
         v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
         v["zugferd_format"] = getattr(self, "_zugferd_format_val", None)  # #66
-        v["handwerker_steuerlich"] = 1 if self._steuerlich_var.get() else 0  # #68 §35a EStG
+        # #74 – handwerker_steuerlich auto: 1 wenn Lohnanteil > 0 (keine Checkbox)
+        try:
+            v["handwerker_steuerlich"] = 1 if float(v.get("lohnanteil") or 0) > 0 else 0
+        except (ValueError, TypeError):
+            v["handwerker_steuerlich"] = 0
         self.result = v
         self.destroy()
 

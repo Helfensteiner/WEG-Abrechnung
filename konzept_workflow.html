@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>WEG-Hausverwaltung – Workflow-Konzept: Kontoauszug → Rechnung → Abrechnung</title>
+<style>
+  :root {
+    --bg:       #F7F5F0;
+    --card:     #FFFFFF;
+    --sidebar:  #1C2B3A;
+    --gold:     #C8A96E;
+    --blue:     #2E6DA4;
+    --darkblue: #1A5276;
+    --green:    #3A7D44;
+    --red:      #C0392B;
+    --orange:   #D35400;
+    --purple:   #6C3483;
+    --text:     #2C2C2C;
+    --light:    #7F8C8D;
+    --border:   #E0DDD7;
+    --new:      #E8F5E9;
+    --missing:  #FFF3E0;
+    --done:     #E3F2FD;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+
+  /* ── Header ── */
+  header {
+    background: var(--sidebar);
+    color: #fff;
+    padding: 24px 40px 20px;
+    display: flex; align-items: flex-end; gap: 20px;
+  }
+  header h1 { font-size: 22px; font-weight: 700; letter-spacing: .3px; }
+  header p  { font-size: 13px; color: #aab; margin-top: 4px; }
+  .ver-badge {
+    margin-left: auto;
+    background: var(--gold); color: var(--sidebar);
+    font-weight: 700; font-size: 12px;
+    padding: 4px 12px; border-radius: 20px; white-space: nowrap;
+  }
+
+  /* ── Tabs ── */
+  .tab-bar { background: var(--sidebar); padding: 0 40px; display: flex; gap: 4px; }
+  .tab-btn {
+    background: transparent; border: none; color: #aab;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    padding: 10px 18px 8px; border-bottom: 3px solid transparent;
+    transition: color .2s, border-color .2s;
+  }
+  .tab-btn.active { color: var(--gold); border-color: var(--gold); }
+  .tab-btn:hover { color: #fff; }
+
+  /* ── Content ── */
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+  main { padding: 32px 40px; max-width: 1400px; }
+
+  /* ── Section ── */
+  .section { margin-bottom: 36px; }
+  .section-title {
+    font-size: 16px; font-weight: 700; color: var(--sidebar);
+    border-left: 4px solid var(--gold); padding-left: 12px;
+    margin-bottom: 16px;
+  }
+
+  /* ── Cards ── */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 18px;
+  }
+  .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .card-icon { font-size: 22px; }
+  .card-title { font-size: 14px; font-weight: 700; }
+  .card-sub { font-size: 12px; color: var(--light); }
+  .card ul { padding-left: 16px; }
+  .card li { font-size: 13px; margin-bottom: 4px; color: #3a3a3a; }
+  .card p { font-size: 13px; color: #3a3a3a; line-height: 1.5; }
+
+  .badge {
+    display: inline-block; font-size: 10px; font-weight: 700;
+    padding: 2px 7px; border-radius: 10px; margin-left: 6px; vertical-align: middle;
+  }
+  .badge-done    { background: #C8E6C9; color: #1B5E20; }
+  .badge-missing { background: #FFE0B2; color: #E65100; }
+  .badge-new     { background: #BBDEFB; color: #0D47A1; }
+
+  /* ── Swimlane ── */
+  .swimlane-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: auto; }
+  .swimlane { min-width: 1100px; }
+
+  /* ── Process Steps ── */
+  .steps { display: flex; gap: 0; align-items: stretch; }
+  .step {
+    flex: 1; border-right: 1px dashed var(--border); padding: 12px 10px 10px;
+    min-width: 130px;
+  }
+  .step:last-child { border-right: none; }
+  .step-num {
+    width: 24px; height: 24px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; color: #fff; margin-bottom: 6px;
+  }
+  .step-title { font-size: 12px; font-weight: 700; margin-bottom: 4px; }
+  .step-body  { font-size: 11px; color: #555; line-height: 1.4; }
+
+  /* ── Swimlane Rows ── */
+  .lane { display: flex; border-bottom: 1px solid var(--border); }
+  .lane:last-child { border-bottom: none; }
+  .lane-label {
+    width: 140px; min-width: 140px; padding: 12px 14px;
+    background: #f0f0f0; font-size: 12px; font-weight: 700; color: var(--sidebar);
+    display: flex; align-items: flex-start; border-right: 2px solid var(--border);
+    writing-mode: horizontal-tb;
+  }
+  .lane-cells { display: flex; flex: 1; }
+  .lane-cell {
+    flex: 1; border-right: 1px dashed #e0e0e0; padding: 10px 8px;
+    display: flex; flex-direction: column; gap: 4px; min-width: 130px;
+  }
+  .lane-cell:last-child { border-right: none; }
+  .lane-cell.empty { background: #fafafa; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 6px;
+    white-space: nowrap; width: fit-content;
+  }
+  .chip-blue   { background: #DBEAFE; color: #1D4ED8; }
+  .chip-green  { background: #D1FAE5; color: #065F46; }
+  .chip-orange { background: #FEF3C7; color: #92400E; }
+  .chip-red    { background: #FEE2E2; color: #991B1B; }
+  .chip-purple { background: #EDE9FE; color: #5B21B6; }
+  .chip-grey   { background: #F3F4F6; color: #374151; }
+  .chip-dark   { background: var(--darkblue); color: #fff; }
+  .chip-gold   { background: var(--gold); color: var(--sidebar); }
+
+  .arrow { font-size: 16px; color: var(--gold); text-align: center; padding: 2px; }
+
+  /* ── Tables ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: var(--sidebar); color: #fff; padding: 8px 12px; text-align: left; font-size: 12px; }
+  td { padding: 7px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:nth-child(even) td { background: #fafaf8; }
+  tr:hover td { background: #f0ede8; }
+  .td-code { font-family: 'Courier New', monospace; font-size: 11px; color: var(--darkblue); }
+  .td-status-done { color: var(--green); font-weight: 700; }
+  .td-status-miss { color: var(--orange); font-weight: 700; }
+
+  /* ── Flow Diagram ── */
+  .flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+  .flow-box {
+    background: var(--card); border: 2px solid var(--blue);
+    border-radius: 6px; padding: 8px 14px; font-size: 12px; font-weight: 600;
+    text-align: center; min-width: 110px;
+  }
+  .flow-box.done   { border-color: var(--green);  background: #f0faf2; }
+  .flow-box.miss   { border-color: var(--orange); background: #fff8f0; }
+  .flow-box.key    { border-color: var(--darkblue); background: #eaf1f8; }
+  .flow-arrow { font-size: 18px; color: var(--gold); font-weight: 900; }
+
+  /* ── Matching Algorithm ── */
+  .algo-box {
+    background: #1A2332; color: #E8E8E8; border-radius: 8px;
+    padding: 20px 24px; font-family: 'Courier New', monospace; font-size: 12px;
+    line-height: 1.7; overflow-x: auto;
+  }
+  .algo-comment { color: #6A9955; }
+  .algo-key     { color: #569CD6; }
+  .algo-str     { color: #CE9178; }
+  .algo-num     { color: #B5CEA8; }
+  .algo-func    { color: #DCDCAA; }
+
+  /* ── Info Boxes ── */
+  .info-box {
+    border-left: 4px solid var(--blue);
+    background: #EBF5FB; padding: 12px 16px; border-radius: 0 6px 6px 0;
+    font-size: 13px; margin: 12px 0;
+  }
+  .info-box.warn { border-color: var(--orange); background: #FEF9F0; }
+  .info-box.ok   { border-color: var(--green);  background: #F0FAF2; }
+  .info-box strong { display: block; margin-bottom: 4px; font-size: 13px; }
+
+  /* ── Summary ── */
+  .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .summary-grid { grid-template-columns: 1fr; } }
+
+  .phase-card {
+    border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden;
+  }
+  .phase-head {
+    padding: 10px 16px; font-size: 13px; font-weight: 700; color: #fff;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .phase-body { padding: 14px 16px; }
+  .phase-body p { font-size: 13px; margin-bottom: 6px; }
+  .phase-body ul { padding-left: 16px; }
+  .phase-body li { font-size: 13px; margin-bottom: 3px; }
+
+  /* ── Roadmap ── */
+  .roadmap { display: flex; flex-direction: column; gap: 10px; }
+  .roadmap-item {
+    display: flex; gap: 14px; align-items: flex-start;
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px;
+  }
+  .roadmap-icon { font-size: 20px; min-width: 28px; text-align: center; }
+  .roadmap-text h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .roadmap-text p  { font-size: 12px; color: #555; line-height: 1.4; }
+  .roadmap-tag {
+    margin-left: auto; white-space: nowrap;
+    font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 10px;
+  }
+  .tag-done    { background: #C8E6C9; color: #1B5E20; }
+  .tag-next    { background: #BBDEFB; color: #0D47A1; }
+  .tag-future  { background: #E8EAF6; color: #283593; }
+
+  footer { padding: 20px 40px; text-align: center; font-size: 12px; color: var(--light); border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>WEG-Hausverwaltung · Workflow-Konzept</h1>
+    <p>Kontoauszug-Upload → Rechnungs-Upload → Zahlungsabgleich → Jahresabrechnung</p>
+  </div>
+  <div class="ver-badge">v0.23.1 · April 2026</div>
+</header>
+
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="showTab('overview')">📋 Überblick &amp; Ziel</button>
+  <button class="tab-btn" onclick="showTab('swimlane')">🏊 Swimlane-Prozess</button>
+  <button class="tab-btn" onclick="showTab('matching')">🔗 Matching-Algorithmus</button>
+  <button class="tab-btn" onclick="showTab('impl')">🛠 Implementierung</button>
+  <button class="tab-btn" onclick="showTab('roadmap')">🗺 Roadmap</button>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!--  TAB 1: ÜBERBLICK                                                     -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content active" id="tab-overview">
+<main>
+
+  <div class="section">
+    <div class="section-title">Zielbild: Vollständig digitaler Buchungskreislauf</div>
+    <div class="info-box ok">
+      <strong>State of the Art (Best Practice 2025/2026)</strong>
+      Professionelle Hausverwaltungs-Software (UTS Karthago, Wodis Sigma, ALCO HOUSE) bildet einen geschlossenen Kreislauf ab: Der Kontoauszug trifft als strukturiertes CAMT.052-XML ein, Rechnungen werden per ZUGFeRD/xRechnung/OCR digital erfasst, ein Matching-Algorithmus ordnet Bankbuchungen automatisch den Verbindlichkeiten zu – und die Jahresabrechnung entsteht als Knopfdruck-Bericht. <strong>Three-Way-Matching</strong> (Rechnung ↔ Kontoauszug ↔ Buchung) gilt als GoB-konformer Standard.
+    </div>
+
+    <div class="card-grid" style="margin-top:16px;">
+      <div class="card">
+        <div class="card-head"><span class="card-icon">🏦</span><div><div class="card-title">Phase 1: Kontoauszug</div><div class="card-sub">CAMT.052 XML · ISO 20022</div></div></div>
+        <ul>
+          <li>Sparkasse Bodensee liefert CAMT.052 (ISO 20022)</li>
+          <li>Strukturierte Felder: IBAN, Betrag, Datum, Gegenkonto, Verwendungszweck</li>
+          <li>Intraday (camt.052) oder Tagesabschluss (camt.053)</li>
+          <li>Duplikatprüfung, Auto-Kategorisierung</li>
+        </ul>
+        <p style="margin-top:8px;font-size:12px;color:var(--green);">✅ In App implementiert (KontoauszugPage)</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span class="card-icon">🧾</span><div><div class="card-title">Phase 2: Rechnungs-Import</div><div class="card-sub">ZUGFeRD · xRechnung · KI-OCR</div></div></div>
+        <ul>
+          <li>ZUGFeRD/Factur-X: PDF mit eingebettetem CII-XML</li>
+          <li>xRechnung UBL 2.1: reines XML (EU-Standard)</li>
+          <li>KI-OCR Fallback: Anthropic claude-haiku für normale PDFs</li>
+          <li>Verbindlichkeit wird in <em>rechnungen</em>-Tabelle angelegt (GoB)</li>
+        </ul>
+        <p style="margin-top:8px;font-size:12px;color:var(--green);">✅ In App implementiert (RechnungenPage)</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span class="card-icon">🔗</span><div><div class="card-title">Phase 3: Automatischer Abgleich</div><div class="card-sub">Fuzzy Matching · Confidence Score</div></div></div>
+        <ul>
+          <li>Betrag-Match (±1 % Toleranz für Skonti/Bankgebühren)</li>
+          <li>Datums-Match (±5 Werktage Valuta-Fenster)</li>
+          <li>Text-Match: Rechnungsnummer im Verwendungszweck (fuzzy)</li>
+          <li>Confidence Score 0–100 %; ab 80 % Auto-Buchung</li>
+        </ul>
+        <p style="margin-top:8px;font-size:12px;color:var(--green);">✅ Implementiert in v0.24.0 – Auto-Matching Engine mit Confidence Score, MatchingReviewDialog, Audit-Log</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span class="card-icon">📊</span><div><div class="card-title">Phase 4: Jahresabrechnung</div><div class="card-sub">MEA · Umlageschlüssel · GoB</div></div></div>
+        <ul>
+          <li>Alle abrechnungsrelevanten Buchungen → NebenkostenPage</li>
+          <li>Kostenverteilung nach Miteigentumsanteil (MEA) oder Verbrauch</li>
+          <li>Einzelabrechnung pro Eigentümer / Mieter</li>
+          <li>Gesamtabrechnung WEG (Einnahmen/Ausgaben-Rechnung)</li>
+        </ul>
+        <p style="margin-top:8px;font-size:12px;color:var(--blue);">🔄 Teilweise implementiert (NebenkostenPage)</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Gesamtprozess – Auf einen Blick</div>
+    <div class="flow">
+      <div class="flow-box done">🏦<br>CAMT.052<br>Import</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box done">🧾<br>Rechnungs-<br>Import</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box done">🔗<br>Auto-<br>Matching</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box done">✋<br>Review-<br>Dialog</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box done">💰<br>Buchung<br>buchen</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box done">✅<br>Rechnung<br>Bezahlt</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box key">📊<br>Jahres-<br>abrechnung</div>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:16px;flex-wrap:wrap;">
+      <span style="font-size:12px;"><span class="badge badge-done">✅ Implementiert</span> bereits vorhanden</span>
+      <span style="font-size:12px;"><span class="badge badge-missing">⚠️ Fehlt</span> nächste Iteration</span>
+      <span style="font-size:12px;"><span class="badge badge-new">🔑 Kernziel</span> GoB-Vollständigkeit</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Three-Way-Matching: GoB-konformer Standard</div>
+    <div class="info-box">
+      <strong>Was ist Three-Way-Matching?</strong>
+      In der professionellen Kreditorenbuchhaltung (Accounts Payable) werden drei Dokumente abgeglichen:
+      <strong>(1) Bestellung/Rechnung</strong> → <strong>(2) Bankbuchung (Kontoauszug)</strong> → <strong>(3) Zahlungsbuchung im System</strong>.
+      Stimmen alle drei überein, ist die Verbindlichkeit GoB-konform getilgt. In der WEG-Verwaltung entspricht dies:
+      Rechnung (rechnungen) ↔ Kontoauszug (kontoauszug) ↔ Buchung (zahlungen mit rechnung_id).
+    </div>
+
+    <div class="card-grid" style="grid-template-columns: repeat(3,1fr);">
+      <div class="card" style="border-top: 3px solid var(--darkblue);">
+        <div class="card-head"><span class="card-icon">🧾</span><div><div class="card-title">Dokument 1: Rechnung</div></div></div>
+        <p>Verbindlichkeit: Wer hat wie viel berechnet?</p>
+        <p style="margin-top:6px;font-family:monospace;font-size:12px;color:var(--darkblue);">rechnungen (rechnungsnummer, betrag_brutto, fällig)</p>
+      </div>
+      <div class="card" style="border-top: 3px solid var(--blue);">
+        <div class="card-head"><span class="card-icon">🏦</span><div><div class="card-title">Dokument 2: Kontoauszug</div></div></div>
+        <p>Zahlungsnachweis: Wann hat die Bank tatsächlich abgebucht?</p>
+        <p style="margin-top:6px;font-family:monospace;font-size:12px;color:var(--darkblue);">kontoauszug (datum, betrag, buchungstext, iban)</p>
+      </div>
+      <div class="card" style="border-top: 3px solid var(--green);">
+        <div class="card-head"><span class="card-icon">💰</span><div><div class="card-title">Dokument 3: Buchung</div></div></div>
+        <p>Buchhaltungsbeleg: Buchung im System mit Rechnung verknüpft</p>
+        <p style="margin-top:6px;font-family:monospace;font-size:12px;color:var(--darkblue);">zahlungen (rechnung_id → rechnungen.id)</p>
+      </div>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!--  TAB 2: SWIMLANE                                                      -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-swimlane">
+<main>
+  <div class="section">
+    <div class="section-title">Swimlane-Diagramm: Vollständiger Buchungskreislauf</div>
+    <p style="font-size:13px;color:var(--light);margin-bottom:14px;">Jede Zeile = eine Systemschicht (Lane). Spalten = Prozessphasen 1–7.</p>
+
+    <div class="swimlane-wrap">
+      <div class="swimlane">
+
+        <!-- Phasen-Header -->
+        <div class="lane" style="background:#f5f5f5;">
+          <div class="lane-label" style="background:#e8e8e8;color:#666;font-weight:400;font-size:11px;">PHASE</div>
+          <div class="lane-cells">
+            <div class="lane-cell" style="background:#1C2B3A;color:#fff;text-align:center;font-size:12px;font-weight:700;">1<br><span style="font-weight:400;font-size:11px;">Kontoauszug<br>Import</span></div>
+            <div class="lane-cell" style="background:#1A5276;color:#fff;text-align:center;font-size:12px;font-weight:700;">2<br><span style="font-weight:400;font-size:11px;">Rechnungs-<br>Import</span></div>
+            <div class="lane-cell" style="background:#D35400;color:#fff;text-align:center;font-size:12px;font-weight:700;">3<br><span style="font-weight:400;font-size:11px;">Auto-<br>Matching</span></div>
+            <div class="lane-cell" style="background:#7D6608;color:#fff;text-align:center;font-size:12px;font-weight:700;">4<br><span style="font-weight:400;font-size:11px;">Manuelle<br>Nacharbeit</span></div>
+            <div class="lane-cell" style="background:#1E8449;color:#fff;text-align:center;font-size:12px;font-weight:700;">5<br><span style="font-weight:400;font-size:11px;">Buchung<br>erfassen</span></div>
+            <div class="lane-cell" style="background:#145A32;color:#fff;text-align:center;font-size:12px;font-weight:700;">6<br><span style="font-weight:400;font-size:11px;">Rechnung<br>abschließen</span></div>
+            <div class="lane-cell" style="background:#4A235A;color:#fff;text-align:center;font-size:12px;font-weight:700;">7<br><span style="font-weight:400;font-size:11px;">Jahres-<br>abrechnung</span></div>
+          </div>
+        </div>
+
+        <!-- Lane: Bank / Sparkasse -->
+        <div class="lane">
+          <div class="lane-label">🏦 Bank<br>Sparkasse</div>
+          <div class="lane-cells">
+            <div class="lane-cell">
+              <span class="chip chip-blue">CAMT.052 XML</span>
+              <span class="chip chip-grey">Datei/Ordner wählen</span>
+              <span class="chip chip-blue">IBAN erkennen</span>
+              <span class="chip chip-blue">Saldo auslesen</span>
+            </div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell">
+              <span class="chip chip-orange">IBAN + Betrag</span>
+              <span class="chip chip-orange">Verwendungszweck</span>
+              <span class="chip chip-orange">Buchungsdatum</span>
+            </div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell empty"></div>
+          </div>
+        </div>
+
+        <!-- Lane: kontoauszug DB -->
+        <div class="lane">
+          <div class="lane-label">🗄 DB: kontoauszug</div>
+          <div class="lane-cells">
+            <div class="lane-cell">
+              <span class="chip chip-blue">Dublettenprüfung</span>
+              <span class="chip chip-green">INSERT kontoauszug</span>
+              <span class="chip chip-blue">Auto-Kategorie</span>
+              <span class="chip chip-blue">konto_typ setzen</span>
+            </div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell">
+              <span class="chip chip-orange">Match-Score ≥ 80%</span>
+              <div class="arrow">↓</div>
+              <span class="chip chip-green">zahlung_id verknüpfen</span>
+            </div>
+            <div class="lane-cell">
+              <span class="chip chip-gold">Manuell zuordnen</span>
+              <span class="chip chip-green">zahlung_id setzen</span>
+              <span class="chip chip-green">zugeordnet = 1</span>
+            </div>
+            <div class="lane-cell">
+              <span class="chip chip-green">als_buchung_uebernommen</span>
+            </div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell empty"></div>
+          </div>
+        </div>
+
+        <!-- Lane: rechnungen DB -->
+        <div class="lane">
+          <div class="lane-label" style="color:var(--darkblue);">🧾 DB: rechnungen</div>
+          <div class="lane-cells">
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell" style="background:#EAF1F8;">
+              <span class="chip chip-dark">ZUGFeRD-CII XML</span>
+              <span class="chip chip-dark">xRechnung UBL</span>
+              <span class="chip chip-dark">KI-OCR (Haiku)</span>
+              <span class="chip chip-dark">Manuelle Eingabe</span>
+              <div class="arrow">↓</div>
+              <span class="chip chip-green">INSERT rechnungen</span>
+              <span class="chip chip-orange">status = "Offen"</span>
+            </div>
+            <div class="lane-cell">
+              <span class="chip chip-orange">Kandidaten suchen</span>
+              <span class="chip chip-orange">Status: Offen / Teilbezahlt</span>
+            </div>
+            <div class="lane-cell">
+              <span class="chip chip-gold">BuchungZuordnenDialog</span>
+            </div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell">
+              <span class="chip chip-green">status → Bezahlt</span>
+              <span class="chip chip-blue">auto_update_status()</span>
+            </div>
+            <div class="lane-cell">
+              <span class="chip chip-purple">abrechnungs-<br>relevant = 1</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Lane: Matching Engine -->
+        <div class="lane" style="background:#FFF8F0;">
+          <div class="lane-label" style="background:#F5CBA7;color:#6E2C00;">🔗 Matching<br>Engine</div>
+          <div class="lane-cells">
+            <div class="lane-cell empty" style="background:#FFF8F0;"></div>
+            <div class="lane-cell empty" style="background:#FFF8F0;"></div>
+            <div class="lane-cell" style="background:#FFF0DC;">
+              <span class="chip chip-orange">Score = Betrag(40%)</span>
+              <span class="chip chip-orange">+ Datum(30%)</span>
+              <span class="chip chip-orange">+ Text(30%)</span>
+              <div style="font-size:11px;color:#8B4513;margin-top:4px;">≥ 80 % → Auto<br>60–79 % → Vorschlag<br>&lt; 60 % → Offen</div>
+            </div>
+            <div class="lane-cell" style="background:#FFF8F0;">
+              <span class="chip chip-gold">Vorschläge anzeigen</span>
+              <span class="chip chip-gold">Benutzer bestätigt</span>
+              <span class="chip chip-orange">Lerneffekt speichern</span>
+            </div>
+            <div class="lane-cell empty" style="background:#FFF8F0;"></div>
+            <div class="lane-cell empty" style="background:#FFF8F0;"></div>
+            <div class="lane-cell empty" style="background:#FFF8F0;"></div>
+          </div>
+        </div>
+
+        <!-- Lane: zahlungen DB -->
+        <div class="lane">
+          <div class="lane-label">💰 DB: zahlungen</div>
+          <div class="lane-cells">
+            <div class="lane-cell">
+              <span class="chip chip-blue">Auto-Transfer</span>
+              <span class="chip chip-green">INSERT zahlungen</span>
+              <span class="chip chip-grey">konto_typ gesetzt</span>
+            </div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell">
+              <span class="chip chip-green">rechnung_id gesetzt</span>
+            </div>
+            <div class="lane-cell">
+              <span class="chip chip-green">rechnung_id gesetzt</span>
+            </div>
+            <div class="lane-cell">
+              <span class="chip chip-green">Vollständige Buchung</span>
+              <span class="chip chip-blue">belegnr, kategorie</span>
+              <span class="chip chip-purple">abrechnungsrelevant</span>
+            </div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell">
+              <span class="chip chip-purple">Summe pro Kategorie</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Lane: Abrechnung -->
+        <div class="lane">
+          <div class="lane-label" style="color:var(--purple);">📊 Abrechnung<br>NebenkostenPage</div>
+          <div class="lane-cells">
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell empty"></div>
+            <div class="lane-cell" style="background:#F5EEF8;">
+              <span class="chip chip-purple">Positionen nach MEA</span>
+              <span class="chip chip-purple">Wasserkosten Pro-Rata</span>
+              <span class="chip chip-purple">Heizung, Müll, etc.</span>
+              <div class="arrow">↓</div>
+              <span class="chip chip-purple">Einzel-Abrechnung</span>
+              <span class="chip chip-purple">Gesamt-Abrechnung</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Lane: Benutzer -->
+        <div class="lane" style="background:#F0FAF2;">
+          <div class="lane-label" style="background:#D5F5E3;color:#145A32;">👤 Benutzer<br>(Verwalter)</div>
+          <div class="lane-cells">
+            <div class="lane-cell" style="background:#F0FAF2;">
+              <span class="chip chip-green">Datei/Ordner wählen</span>
+              <span class="chip chip-green">Import bestätigen</span>
+            </div>
+            <div class="lane-cell" style="background:#F0FAF2;">
+              <span class="chip chip-green">PDF/XML hochladen</span>
+              <span class="chip chip-green">Felder prüfen</span>
+              <span class="chip chip-green">Speichern</span>
+            </div>
+            <div class="lane-cell" style="background:#F0FAF2;">
+              <span class="chip chip-orange">Auto-Matches prüfen</span>
+              <span class="chip chip-orange">Bestätigen / Ablehnen</span>
+            </div>
+            <div class="lane-cell" style="background:#F0FAF2;">
+              <span class="chip chip-gold">Offene Buchungen<br>manuell zuordnen</span>
+            </div>
+            <div class="lane-cell" style="background:#F0FAF2;">
+              <span class="chip chip-green">Buchung editieren<br>falls nötig</span>
+            </div>
+            <div class="lane-cell" style="background:#F0FAF2;">
+              <span class="chip chip-green">Status prüfen</span>
+            </div>
+            <div class="lane-cell" style="background:#F0FAF2;">
+              <span class="chip chip-purple">Abrechnung erzeugen</span>
+              <span class="chip chip-purple">PDF-Export</span>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /swimlane -->
+    </div><!-- /swimlane-wrap -->
+
+    <div class="info-box warn" style="margin-top:16px;">
+      <strong>✅ Phase 3 (Auto-Matching) implementiert seit v0.24.0</strong>
+      Auto-Matching Engine (<code>_auto_match_alle()</code>), MatchingReviewDialog und kontoauszug_match_log wurden in v0.24.0 umgesetzt. Dashboard zeigt Auto-Match-Rate, offene Rechnungen und Teilbezahlte als KPIs.
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Datenbankverbindungen zwischen den Phasen</div>
+    <table>
+      <tr><th>Von</th><th>Nach</th><th>Verknüpfung</th><th>Status</th></tr>
+      <tr>
+        <td class="td-code">kontoauszug.zahlung_id</td>
+        <td class="td-code">zahlungen.id</td>
+        <td>Bankbuchung ↔ gebuchte Zahlung</td>
+        <td class="td-status-done">✅ Implementiert</td>
+      </tr>
+      <tr>
+        <td class="td-code">zahlungen.rechnung_id</td>
+        <td class="td-code">rechnungen.id</td>
+        <td>Zahlung ↔ Verbindlichkeit (GoB)</td>
+        <td class="td-status-done">✅ Implementiert</td>
+      </tr>
+      <tr>
+        <td class="td-code">kontoauszug.id</td>
+        <td class="td-code">rechnungen.id</td>
+        <td>Direkt: Bankbuchung ↔ Rechnung (Matching)</td>
+        <td class="td-status-miss">⚠️ Fehlt (kein direktes FK)</td>
+      </tr>
+      <tr>
+        <td class="td-code">zahlungen.abrechnungsrelevant</td>
+        <td class="td-code">nebenkosten / abrechnung</td>
+        <td>Buchung fließt in Jahresabrechnung ein</td>
+        <td class="td-status-done">✅ Implementiert</td>
+      </tr>
+      <tr>
+        <td class="td-code">kontoauszug_match_log</td>
+        <td class="td-code">(neue Tabelle)</td>
+        <td>Matching-Protokoll + Lerneffekte speichern</td>
+        <td class="td-status-done">✅ Implementiert (v0.24.0)</td>
+      </tr>
+    </table>
+  </div>
+
+</main>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!--  TAB 3: MATCHING-ALGORITHMUS                                          -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-matching">
+<main>
+
+  <div class="section">
+    <div class="section-title">Matching-Algorithmus: Konzept &amp; Pseudocode</div>
+    <div class="info-box">
+      <strong>Grundprinzip: Weighted Fuzzy Matching mit Confidence Score</strong>
+      Jede offene Rechnung wird gegen jede nicht-zugeordnete Kontoauszugsbuchung bewertet. Der Confidence Score (0–100) ergibt sich aus drei gewichteten Teilscores. Liegt der Score ≥ 80, wird automatisch gebucht. Bei 60–79 wird ein Vorschlag angezeigt, der Benutzer bestätigt. Unter 60 bleibt die Buchung als "Offen" stehen.
+    </div>
+
+    <div class="algo-box">
+<span class="algo-comment"># ── WEG-Hausverwaltung: Auto-Matching-Konzept ─────────────────────────────</span>
+<span class="algo-comment"># Referenzen: SWIFT CGI-MP Best Practices v1.1 · Rillion 3-Way-Matching Guide</span>
+
+<span class="algo-key">def</span> <span class="algo-func">score_kontoauszug_gegen_rechnung</span>(kb: dict, rechnung: dict) -&gt; float:
+    <span class="algo-comment">"""
+    kb       = kontoauszug-Zeile  (datum, betrag, buchungstext, iban)
+    rechnung = rechnungen-Zeile   (rechnungsnummer, rechnungssteller, betrag_brutto,
+                                   faelligkeitsdatum, rechnungsdatum)
+    Rückgabe: Confidence Score 0.0 – 100.0
+    """</span>
+    score = <span class="algo-num">0.0</span>
+
+    <span class="algo-comment"># ── 1. BETRAG-MATCH (Gewicht: 40 Punkte) ─────────────────────────────────</span>
+    kb_betrag  = abs(kb[<span class="algo-str">"betrag"</span>])          <span class="algo-comment"># immer positiv vergleichen</span>
+    rg_betrag  = rechnung[<span class="algo-str">"betrag_brutto"</span>]
+    differenz  = abs(kb_betrag - rg_betrag)
+    toleranz   = rg_betrag * <span class="algo-num">0.01</span>              <span class="algo-comment"># ±1 % (Skonto, Bankgebühren)</span>
+    <span class="algo-key">if</span> differenz == <span class="algo-num">0</span>:
+        score += <span class="algo-num">40</span>                         <span class="algo-comment"># exakter Treffer</span>
+    <span class="algo-key">elif</span> differenz &lt;= toleranz:
+        score += <span class="algo-num">35</span>                         <span class="algo-comment"># innerhalb Toleranz</span>
+    <span class="algo-key">elif</span> differenz &lt;= rg_betrag * <span class="algo-num">0.05</span>:
+        score += <span class="algo-num">20</span>                         <span class="algo-comment"># &lt; 5 % Abweichung (Teilzahlung?)</span>
+    <span class="algo-comment"># &gt; 5 % → kein Betrag-Score</span>
+
+    <span class="algo-comment"># ── 2. DATUM-MATCH (Gewicht: 30 Punkte) ─────────────────────────────────</span>
+    <span class="algo-comment"># Buchungsdatum vs. Fälligkeitsdatum (±5 Werktage)</span>
+    tage = abs((kb[<span class="algo-str">"datum"</span>] - rechnung[<span class="algo-str">"faelligkeitsdatum"</span>]).days)
+    <span class="algo-key">if</span> tage == <span class="algo-num">0</span>:
+        score += <span class="algo-num">30</span>
+    <span class="algo-key">elif</span> tage &lt;= <span class="algo-num">3</span>:
+        score += <span class="algo-num">25</span>
+    <span class="algo-key">elif</span> tage &lt;= <span class="algo-num">7</span>:
+        score += <span class="algo-num">15</span>
+    <span class="algo-key">elif</span> tage &lt;= <span class="algo-num">30</span>:
+        score += <span class="algo-num">5</span>
+    <span class="algo-comment"># &gt; 30 Tage → kein Datum-Score</span>
+
+    <span class="algo-comment"># ── 3. TEXT-MATCH (Gewicht: 30 Punkte) ──────────────────────────────────</span>
+    <span class="algo-comment"># Rechnungsnummer oder Rechnungssteller im Verwendungszweck?</span>
+    vzweck = kb[<span class="algo-str">"buchungstext"</span>].upper()
+    rgnr   = (rechnung[<span class="algo-str">"rechnungsnummer"</span>] or <span class="algo-str">""</span>).upper()
+    steller = (rechnung[<span class="algo-str">"rechnungssteller"</span>] or <span class="algo-str">""</span>).upper()
+
+    <span class="algo-key">if</span> rgnr <span class="algo-key">and</span> rgnr <span class="algo-key">in</span> vzweck:
+        score += <span class="algo-num">30</span>                         <span class="algo-comment"># Rechnungsnummer exakt gefunden</span>
+    <span class="algo-key">elif</span> <span class="algo-func">fuzzy_ratio</span>(rgnr, vzweck) &gt; <span class="algo-num">85</span>:
+        score += <span class="algo-num">20</span>                         <span class="algo-comment"># Rechnungsnummer fuzzy</span>
+    <span class="algo-key">elif</span> steller <span class="algo-key">and</span> any(w <span class="algo-key">in</span> vzweck <span class="algo-key">for</span> w <span class="algo-key">in</span> steller.split() <span class="algo-key">if</span> len(w) &gt; <span class="algo-num">3</span>):
+        score += <span class="algo-num">15</span>                         <span class="algo-comment"># Rechnungssteller erkannt</span>
+
+    <span class="algo-key">return</span> score  <span class="algo-comment"># 0–100</span>
+
+
+<span class="algo-key">def</span> <span class="algo-func">auto_match_alle</span>(conn) -&gt; list[dict]:
+    <span class="algo-comment">"""Führt Matching für alle nicht-zugeordneten Kontoauszugsbuchungen durch."""</span>
+    ergebnisse = []
+    kb_offen = conn.execute(
+        <span class="algo-str">"SELECT * FROM kontoauszug WHERE zugeordnet=0 AND betrag&lt;0 ORDER BY datum"</span>
+    ).fetchall()                                <span class="algo-comment"># nur Ausgaben (betrag negativ)</span>
+
+    rechnungen_offen = conn.execute(
+        <span class="algo-str">"SELECT * FROM rechnungen WHERE status IN ('Offen','Teilbezahlt')"</span>
+    ).fetchall()
+
+    <span class="algo-key">for</span> kb <span class="algo-key">in</span> kb_offen:
+        kandidaten = []
+        <span class="algo-key">for</span> r <span class="algo-key">in</span> rechnungen_offen:
+            s = <span class="algo-func">score_kontoauszug_gegen_rechnung</span>(kb, r)
+            <span class="algo-key">if</span> s &gt;= <span class="algo-num">60</span>:
+                kandidaten.append({<span class="algo-str">"rechnung"</span>: r, <span class="algo-str">"score"</span>: s})
+        kandidaten.sort(key=<span class="algo-key">lambda</span> x: x[<span class="algo-str">"score"</span>], reverse=<span class="algo-key">True</span>)
+
+        <span class="algo-key">if</span> kandidaten:
+            bester = kandidaten[<span class="algo-num">0</span>]
+            <span class="algo-key">if</span> bester[<span class="algo-str">"score"</span>] &gt;= <span class="algo-num">80</span>:
+                <span class="algo-comment"># Auto-Buchung: direkt zuordnen + in zahlungen eintragen</span>
+                <span class="algo-func">_auto_buchen</span>(conn, kb, bester[<span class="algo-str">"rechnung"</span>], bester[<span class="algo-str">"score"</span>])
+            <span class="algo-key">else</span>:
+                <span class="algo-comment"># Vorschlag für Benutzer speichern</span>
+                ergebnisse.append({<span class="algo-str">"kb"</span>: kb, <span class="algo-str">"vorschlaege"</span>: kandidaten[:3]})
+
+    <span class="algo-key">return</span> ergebnisse   <span class="algo-comment"># wird in MatchingReviewDialog angezeigt</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Score-Tabelle: Wann wird was ausgelöst?</div>
+    <table>
+      <tr><th>Score</th><th>Aktion</th><th>Begründung</th><th>Analogie Industry</th></tr>
+      <tr>
+        <td><strong style="color:var(--green);">≥ 80</strong></td>
+        <td>✅ <strong>Auto-Buchung</strong> (ohne Benutzerinteraktion)</td>
+        <td>Betrag + Datum + Rechnungsnummer stimmen überein</td>
+        <td>SAP S/4HANA: "Perfect Match" → automatische Verbuchung</td>
+      </tr>
+      <tr>
+        <td><strong style="color:var(--blue);">60–79</strong></td>
+        <td>💡 <strong>Vorschlag</strong> (Benutzer bestätigt)</td>
+        <td>Betrag stimmt, Text/Datum weicht leicht ab</td>
+        <td>Rillion/Tipalti: "Suggested Match" → 1-Klick-Bestätigung</td>
+      </tr>
+      <tr>
+        <td><strong style="color:var(--orange);">30–59</strong></td>
+        <td>⚠️ <strong>Schwacher Treffer</strong> (manuelle Prüfung)</td>
+        <td>Nur Betrag oder nur Text stimmt</td>
+        <td>HighRadius: "Exception Queue" → AP-Clerk prüft</td>
+      </tr>
+      <tr>
+        <td><strong style="color:var(--red);">&lt; 30</strong></td>
+        <td>❌ <strong>Kein Treffer</strong> (bleibt offen)</td>
+        <td>Keine sinnvolle Übereinstimmung</td>
+        <td>Neuer Vorgang: Rechnung noch nicht erfasst</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Neue DB-Tabelle: kontoauszug_match_log</div>
+    <div class="algo-box">
+<span class="algo-comment">-- Matching-Protokoll: GoB-konformer Audit Trail</span>
+<span class="algo-key">CREATE TABLE IF NOT EXISTS</span> kontoauszug_match_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    kontoauszug_id  INTEGER NOT NULL REFERENCES kontoauszug(id),
+    rechnung_id     INTEGER REFERENCES rechnungen(id),
+    zahlung_id      INTEGER REFERENCES zahlungen(id),
+    score           REAL,                          <span class="algo-comment">-- Confidence Score 0–100</span>
+    methode         TEXT,                          <span class="algo-comment">-- 'auto'|'manuell'|'vorschlag'</span>
+    benutzer        TEXT,
+    erstellt_am     TEXT DEFAULT (datetime('now')),
+    bestaetigt_am   TEXT,
+    abgelehnt       INTEGER DEFAULT 0
+);
+    </div>
+    <p style="font-size:13px;margin-top:8px;color:var(--light);">Diese Tabelle macht jeden Matching-Schritt nachvollziehbar — Pflicht für GoB-konforme Buchführung (§ 239 HGB: Unveränderbarkeit und Nachvollziehbarkeit).</p>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Lerneffekte &amp; Feedback Loop</div>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-head"><span class="card-icon">🧠</span><div><div class="card-title">Aus manuellen Zuordnungen lernen</div></div></div>
+        <p>Wenn der Benutzer eine Buchung manuell einer Rechnung zuordnet, wird das Match-Muster gespeichert. Zukünftige Buchungen vom selben Rechnungssteller mit ähnlichem Betrag erhalten automatisch einen höheren Text-Score.</p>
+        <ul style="margin-top:8px;">
+          <li>Rechnungssteller → bekannte Verwendungszweck-Muster</li>
+          <li>Kategorie-Vorschläge verbessern sich (vorschlag_kategorie)</li>
+          <li>Confidence-Schwellwert anpassbar (Einstellungen)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-icon">📈</span><div><div class="card-title">Match-Rate messen (KPI)</div></div></div>
+        <p>Im Dashboard sollte die Auto-Match-Rate sichtbar sein:</p>
+        <ul style="margin-top:8px;">
+          <li><strong>Auto-Match-Rate</strong>: % Buchungen ≥ 80 Score</li>
+          <li><strong>Offene Positionen</strong>: Kontoauszug ohne Rechnung</li>
+          <li><strong>Unverbucht</strong>: Rechnungen ohne Kontoauszug-Match</li>
+          <li><strong>Durchlaufzeit</strong>: Ø Tage Rechnungseingang → Bezahlt</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!--  TAB 4: IMPLEMENTIERUNG                                               -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-impl">
+<main>
+
+  <div class="section">
+    <div class="section-title">Ist-Zustand: Was ist bereits implementiert?</div>
+    <table>
+      <tr><th>Feature</th><th>Klasse / Funktion</th><th>Status</th><th>Version</th></tr>
+      <tr>
+        <td>CAMT.052 XML Import (Sparkasse)</td>
+        <td class="td-code">KontoauszugPage._import_xml()</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.22.x</td>
+      </tr>
+      <tr>
+        <td>Auto-Kategorisierung Kontoauszug</td>
+        <td class="td-code">vorschlag_kategorie(buchungstext)</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.22.x</td>
+      </tr>
+      <tr>
+        <td>Auto-Transfer: Kontoauszug → Zahlung</td>
+        <td class="td-code">_import_xml() → INSERT zahlungen</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.22.x</td>
+      </tr>
+      <tr>
+        <td>ZUGFeRD / CII XML-Import</td>
+        <td class="td-code">RechnungenPage._parse_zugferd_cii()</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.23.x</td>
+      </tr>
+      <tr>
+        <td>xRechnung UBL-Import</td>
+        <td class="td-code">RechnungenPage._parse_zugferd_cii() (branch)</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.23.x</td>
+      </tr>
+      <tr>
+        <td>KI-OCR Fallback (claude-haiku)</td>
+        <td class="td-code">_ki_ocr_rechnung_static()</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.23.1</td>
+      </tr>
+      <tr>
+        <td>Rechnung → Zahlung FK (rechnung_id)</td>
+        <td class="td-code">zahlungen.rechnung_id → rechnungen.id</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.23.0</td>
+      </tr>
+      <tr>
+        <td>Manuelle Buchungszuordnung</td>
+        <td class="td-code">BuchungZuordnenDialog</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.23.0</td>
+      </tr>
+      <tr>
+        <td>Auto-Status Rechnung (Offen/Teilbezahlt/Bezahlt)</td>
+        <td class="td-code">_auto_update_rechnung_status()</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.23.1</td>
+      </tr>
+      <tr>
+        <td>Nebenkostenabrechnung MEA</td>
+        <td class="td-code">NebenkostenPage</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.20.x</td>
+      </tr>
+      <tr>
+        <td>Wasserkosten Pro-Rata (Mietzeitraum)</td>
+        <td class="td-code">_calc_monate_im_jahr()</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>0.23.0</td>
+      </tr>
+      <tr>
+        <td><strong>Auto-Matching Kontoauszug ↔ Rechnung</strong></td>
+        <td class="td-code">_auto_match_alle()</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>v0.24.0</td>
+      </tr>
+      <tr>
+        <td><strong>MatchingReviewDialog (Vorschläge bestätigen)</strong></td>
+        <td class="td-code">MatchingReviewDialog</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>v0.24.0</td>
+      </tr>
+      <tr>
+        <td><strong>kontoauszug_match_log Tabelle</strong></td>
+        <td class="td-code">DB-Schema (init_db)</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>v0.24.0</td>
+      </tr>
+      <tr>
+        <td><strong>KPI: Auto-Match-Rate im Dashboard</strong></td>
+        <td class="td-code">DashboardPage</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>v0.24.0</td>
+      </tr>
+      <tr>
+        <td><strong>Beleg-Archivierung /Belege/&lt;Jahr&gt;/</strong></td>
+        <td class="td-code">_beleg_archivieren()</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>v0.26.0</td>
+      </tr>
+      <tr>
+        <td><strong>Duplikat-Erkennung Belegablage</strong></td>
+        <td class="td-code">_beleg_archivieren() Duplikat</td>
+        <td class="td-status-done">✅ Fertig</td>
+        <td>v0.26.0</td>
+      </tr>
+      <tr>
+        <td><strong>PDF-Export Jahresabrechnung</strong></td>
+        <td class="td-code">NebenkostenPage (erweitern)</td>
+        <td class="td-status-miss">⚠️ Fehlt</td>
+        <td>→ v0.27</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Implementierungsplan: v0.24 – Auto-Matching</div>
+    <div class="summary-grid">
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--darkblue);">🗄 Schritt 1: DB-Migration</div>
+        <div class="phase-body">
+          <p>Neue Tabelle <code>kontoauszug_match_log</code> anlegen (Migration in <code>init_db()</code>).</p>
+          <ul>
+            <li>id, kontoauszug_id, rechnung_id, zahlung_id</li>
+            <li>score (REAL), methode TEXT, benutzer TEXT</li>
+            <li>erstellt_am, bestaetigt_am, abgelehnt INTEGER</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~30 min</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--orange);">🔗 Schritt 2: Matching-Engine</div>
+        <div class="phase-body">
+          <p>Modul-Level-Funktion <code>auto_match_alle(conn)</code> implementieren:</p>
+          <ul>
+            <li>score_kontoauszug_gegen_rechnung() mit 3 Teilscores</li>
+            <li>Fuzzy-Textsuche (difflib.SequenceMatcher, stdlib)</li>
+            <li>Ergebnis in kontoauszug_match_log speichern</li>
+            <li>Schwellwert aus Einstellungen laden</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~3–4 h</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:#7D6608;color:#fff;">👁 Schritt 3: Review-Dialog</div>
+        <div class="phase-body">
+          <p>Neuer <code>MatchingReviewDialog(BaseDialog)</code>:</p>
+          <ul>
+            <li>Zeigt Kontoauszugsbuchung links, Rechnung rechts</li>
+            <li>Score-Balken visuell (Farbe: grün/gelb/orange)</li>
+            <li>Buttons: ✅ Bestätigen · ❌ Ablehnen · ➕ Neue Rechnung</li>
+            <li>Nächster Vorschlag automatisch laden</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~3–4 h</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--blue);">🔘 Schritt 4: KontoauszugPage-Button</div>
+        <div class="phase-body">
+          <p>Button "🔗 Auto-Matching starten" in KontoauszugPage:</p>
+          <ul>
+            <li>Ruft auto_match_alle() auf</li>
+            <li>Zeigt Fortschrittsbalken (alle Dateien)</li>
+            <li>Öffnet MatchingReviewDialog für Vorschläge</li>
+            <li>Ergebnis-Zusammenfassung: X auto, Y Vorschläge, Z offen</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~2 h</p>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="info-box ok" style="margin-top:16px;">
+      <strong>💡 Keine externen Abhängigkeiten nötig</strong>
+      Fuzzy-Text-Matching lässt sich mit <code>difflib.SequenceMatcher</code> aus der Python-Standardbibliothek implementieren — passend zur "zero-dependency"-Architektur der App. Für komplexere Anforderungen könnte <code>rapidfuzz</code> als optionale Abhängigkeit ergänzt werden.
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Neue GitHub Issues (Vorschlag)</div>
+    <table>
+      <tr><th>#</th><th>Titel</th><th>Priorität</th><th>Aufwand</th></tr>
+      <tr>
+        <td><strong>#69</strong></td>
+        <td>Auto-Matching: Kontoauszug ↔ Rechnung (Weighted Fuzzy Score)</td>
+        <td style="color:var(--red);">🔴 Hoch</td>
+        <td>~8 h</td>
+      </tr>
+      <tr>
+        <td><strong>#70</strong></td>
+        <td>MatchingReviewDialog: Vorschläge visuell bestätigen/ablehnen</td>
+        <td style="color:var(--red);">🔴 Hoch</td>
+        <td>~4 h</td>
+      </tr>
+      <tr>
+        <td><strong>#71</strong></td>
+        <td>kontoauszug_match_log: GoB-konformer Audit Trail</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td>~1 h</td>
+      </tr>
+      <tr>
+        <td><strong>#72</strong></td>
+        <td>Dashboard KPI: Auto-Match-Rate, Offene Positionen</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td>~2 h</td>
+      </tr>
+      <tr>
+        <td><strong>#73</strong></td>
+        <td>PDF-Export: Jahresabrechnung (Einzel + Gesamt)</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td>~6 h</td>
+      </tr>
+      <tr>
+        <td><strong>#74</strong></td>
+        <td>Einstellungen: Matching-Schwellwert konfigurierbar (Standard 80)</td>
+        <td style="color:var(--light);">⚪ Niedrig</td>
+        <td>~1 h</td>
+      </tr>
+    </table>
+  </div>
+
+</main>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!--  TAB 5: ROADMAP                                                       -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-roadmap">
+<main>
+
+  <div class="section">
+    <div class="section-title">Prozess-Reifegrad: Jetzt vs. Ziel</div>
+    <div class="card-grid" style="grid-template-columns: 1fr 1fr;">
+      <div class="card" style="border-top: 3px solid var(--orange);">
+        <div class="card-head"><span class="card-icon">📍</span><div><div class="card-title">Heute (v0.23.1) – manuell-gestützt</div></div></div>
+        <ul>
+          <li>CAMT.052 Import → Auto-Kategorisierung ✅</li>
+          <li>Rechnung importieren (ZUGFeRD/OCR) ✅</li>
+          <li>Buchung manuell einer Rechnung zuordnen ✅</li>
+          <li>Status-Update Offen → Bezahlt ✅</li>
+          <li><strong>Kontoauszug ↔ Rechnung: vollständig manuell ❌</strong></li>
+          <li>Abrechnung: manueller Trigger ✅</li>
+        </ul>
+        <p style="margin-top:10px;font-size:12px;color:var(--orange);">Ca. 15–30 Min. manuelle Arbeit pro Kontoauszugsdatei</p>
+      </div>
+      <div class="card" style="border-top: 3px solid var(--green);">
+        <div class="card-head"><span class="card-icon">🎯</span><div><div class="card-title">Ziel (v0.25) – automatisiert</div></div></div>
+        <ul>
+          <li>CAMT.052 Import → Auto-Matching ≥ 80 % ✨</li>
+          <li>Rechnungen werden automatisch als bezahlt markiert ✨</li>
+          <li>Review-Queue: nur Ausnahmen manuell prüfen ✨</li>
+          <li>Audit Trail: jede Zuordnung protokolliert ✨</li>
+          <li>PDF-Jahresabrechnung auf Knopfdruck ✨</li>
+          <li>Dashboard zeigt Auto-Match-Rate als KPI ✨</li>
+        </ul>
+        <p style="margin-top:10px;font-size:12px;color:var(--green);">Ca. 2–5 Min. Prüfung pro Kontoauszugsdatei</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Entwicklungs-Roadmap</div>
+    <div class="roadmap">
+
+      <div class="roadmap-item">
+        <div class="roadmap-icon">✅</div>
+        <div class="roadmap-text">
+          <h4>v0.23.1 – Rechnungsverwaltung &amp; GoB-Grundlage (abgeschlossen)</h4>
+          <p>ZUGFeRD/xRechnung/KI-OCR Import · rechnung_id FK · Auto-Status · BuchungZuordnenDialog · Wasserkosten Pro-Rata</p>
+        </div>
+        <span class="roadmap-tag tag-done">Fertig</span>
+      </div>
+
+      <div class="roadmap-item">
+        <div class="roadmap-icon">🔗</div>
+        <div class="roadmap-text">
+          <h4>v0.24 – Auto-Matching Engine (Issues #69–#71)</h4>
+          <p>Weighted Fuzzy Score (Betrag 40% · Datum 30% · Text 30%) · MatchingReviewDialog für Vorschläge · kontoauszug_match_log Audit Trail · difflib.SequenceMatcher (stdlib, keine Deps)</p>
+        </div>
+        <span class="roadmap-tag tag-next">Nächste Priorität</span>
+      </div>
+
+      <div class="roadmap-item">
+        <div class="roadmap-icon">📊</div>
+        <div class="roadmap-text">
+          <h4>v0.25 – Berichte &amp; Export (Issues #72–#73)</h4>
+          <p>PDF-Jahresabrechnung Einzel + Gesamt · Dashboard KPI Auto-Match-Rate · Matching-Schwellwert in Einstellungen · Einnahmen/Ausgaben-Jahresübersicht</p>
+        </div>
+        <span class="roadmap-tag tag-next">Geplant</span>
+      </div>
+
+      <div class="roadmap-item">
+        <div class="roadmap-icon">🔮</div>
+        <div class="roadmap-text">
+          <h4>v1.0 – Produktionsreife</h4>
+          <p>Windows-EXE (PyInstaller) · Automatisches SQLite-Backup (OneDrive) · E-Mail-Versand SMTP · DATEV-Export für Steuerberater</p>
+        </div>
+        <span class="roadmap-tag tag-future">Zukunft</span>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Referenzen &amp; Best Practices</div>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-head"><span class="card-icon">📚</span><div><div class="card-title">ISO 20022 / CAMT.052</div></div></div>
+        <ul>
+          <li>SWIFT CGI-MP Best Practices v1.1 (2023-08)</li>
+          <li>CAMT.052 → strukturierte Felder für Auto-Matching ideal</li>
+          <li>Deutschland: Sparkassen ab 2025 auf camt.052.001.08</li>
+          <li>Parallelbetrieb MT940 → camt.052 bis 2025 möglich</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-icon">🏗</span><div><div class="card-title">Three-Way-Matching (AP Best Practice)</div></div></div>
+        <ul>
+          <li>Rillion: Weighted Score-System mit Toleranzschwellen</li>
+          <li>Tipalti: Auto-Match ≥ 95 % Deckungsgrad möglich</li>
+          <li>SAP S/4HANA: "Perfect Match" → vollautomatisch</li>
+          <li>HighRadius: AI lernt aus manuellen Korrekturen</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-icon">⚖️</span><div><div class="card-title">GoB / WEG-Recht</div></div></div>
+        <ul>
+          <li>§ 239 HGB: Unveränderbarkeit, Nachvollziehbarkeit</li>
+          <li>WEG § 28: Jahresabrechnung innerhalb 6 Monate</li>
+          <li>Umlageschlüssel: MEA oder Beschluss (WEG-Reform 2020)</li>
+          <li>Audit Trail: jede Buchung muss rückverfolgbar sein</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<footer>
+  WEG-Hausverwaltung Welte Rapp Bilgery · Konzept-Dokument v0.23.1 · Erstellt April 2026 ·
+  Stack: Python · Tkinter · SQLite · CAMT.052 · ZUGFeRD · KI-OCR
+</footer>
+
+<script>
+function showTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

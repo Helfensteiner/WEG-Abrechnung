@@ -7,6 +7,31 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.26.0] — 2026-04-18
+
+### Behoben
+- **#72 Dialog-Fenstergrößen persistent:** `BaseDialog.destroy()` überschrieben —
+  `_persist_size()` wird jetzt bei jedem Schließen ausgeführt (Speichern-Button,
+  Abbrechen-Button, X-Button). Bisher wurde die Größe nur beim X-Button gespeichert.
+
+### Hinzugefügt
+- **#73 Beleg-Jahresablage:** Neue Funktion `_beleg_archivieren(parent, pfad, datum)`.
+  Nach jedem Speichern einer Rechnung mit Beleg-Dateipfad wird automatisch eine Kopie
+  unter `<app-dir>/Belege/<Jahr>/` abgelegt; der Ordner wird bei Bedarf erstellt.
+  Jahr wird aus `rechnungsdatum` entnommen (Fallback: aktuelles Jahr).
+- **#75 Duplikat-Erkennung Belegablage:** Wenn in `_beleg_archivieren()` eine Datei
+  gleichen Namens bereits in der Jahresablage vorhanden ist, erscheint ein Hinweisfenster
+  (Speichern / Abbrechen). Bei Speichern: Versionierung als `<basis>_duplikat_v<n><ext>`,
+  vorhandene Datei bleibt unberührt.
+
+### Geändert
+- **#74 §35a-Checkbox aus RechnungDialog entfernt:** Die Checkbox
+  „§35a EStG – Handwerkerleistung steuerlich absetzbar" wurde vereinfacht.
+  `handwerker_steuerlich` wird in `_on_save()` automatisch auf `1` gesetzt wenn
+  `lohnanteil > 0`, sonst `0`. Lohnanteil-Feld bleibt mit aktualisiertem Label.
+
+---
+
 ## [0.25.0] — 2026-04-18
 
 ### Hinzugefügt
