@@ -7,6 +7,50 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.23.0] — 2026-04-18
+
+### Hinzugefügt
+- **#64 Wasserkosten – Mietzeiträume (Pro-Rata-Berechnung):**
+  - Neue Hilfsmethode `WasserkostenPage._calc_monate_im_jahr(einzug, auszug, jahr)`:
+    Berechnet anteilige Monate eines Mieters im Abrechnungsjahr tagesgenau
+  - `_import_wohnungen()` komplett neu: Erstellt separate DB-Zeile **pro Mieter**
+    (nicht mehr pro Wohnung); bei Mieterwechsel im Jahr erscheinen beide Mieter
+    mit korrekt berechneten Pro-Rata-Monaten
+  - `_wohnung_dialog()`: Von/Bis-Datum-Felder mit automatischer Monatsberechnung
+    (via `trace_add`); speichert `von_datum`, `bis_datum` in DB
+  - `_load_punkte()`: Anzeige mit Zeitraum-Suffix `[YYYY-MM-DD→YYYY-MM-DD]`
+
+- **#65 Mehrere Buchungen auf eine Rechnung (Abschlagszahlungen):**
+  - Neue DB-Spalte `zahlungen.rechnung_id INTEGER` (FK auf `rechnungen.id`)
+  - `ZahlungDialog`: Neue Sektion „Rechnung zuordnen (optional)" mit Dropdown
+    aller offener/teilbezahlter Rechnungen
+  - `_on_save()` speichert `rechnung_id`, INSERT/UPDATE SQL erweitert
+  - `RechnungenPage`: Tab „Rechnungen zuordnen" mit `BuchungZuordnenDialog`
+    zeigt Soll/Haben/Differenz live-farbkodiert
+
+- **#66 Rechnungsverwaltung (Doppelte Buchführung / GoB):**
+  - Neue DB-Tabelle `rechnungen` (Verbindlichkeiten-Journal): `id`,
+    `rechnungsnummer`, `rechnungssteller`, `rechnungsdatum`, `faelligkeitsdatum`,
+    `betrag_brutto`, `betrag_netto`, `mwst_satz`, `mwst_betrag`, `lohnanteil`,
+    `kategorie`, `beschreibung`, `beleg_dateipfad`, `status`, `zugferd_format`
+  - Neue Seite **`RechnungenPage`** (Navigation: „🧾 Rechnungen"):
+    - Treeview: Nr., Steller, Datum, Brutto €, Gebucht €, Differenz €, Status, Kategorie
+    - Farb-Kodierung: grün (offen/Forderung), rot (Überzahlung), schwarz (bezahlt)
+    - KPI-Leiste: Rechnungen gesamt, Bezahlt, Noch offen, Offene Rechnungen
+    - CRUD: Neu / Bearbeiten / Löschen / Buchung zuordnen / Buchungen anzeigen
+  - Neue Klasse **`RechnungDialog`**: Formular mit allen Rechnungsfeldern,
+    Beleg-Import mit ZUGFeRD/xRechnung-Autoerkennung
+  - Neue Klasse **`BuchungZuordnenDialog`**: Zuordnung von Buchungen zu Rechnungen
+    per Doppelklick; zeigt zugeordnete und nicht zugeordnete Buchungen
+  - **ZUGFeRD (Factur-X / CII)** XML-Parser: `_parse_zugferd_cii(xml_bytes)` —
+    Extraktion aus eingebetteten PDFs via `_extrahiere_zugferd_aus_pdf()`
+  - **xRechnung (UBL 2.1)** XML-Parser: `_parse_xrechnung_ubl(xml_bytes)`
+  - Fallback-Kette: ZUGFeRD XML → xRechnung UBL → KI-OCR → Manuelle Eingabe
+  - WEG Skill `weg-buchfuehrung/SKILL.md` angelegt mit GoB-Grundsätzen,
+    Buchungssätzen, DB-Schema, ZUGFeRD/xRechnung-Namespaces
+
+---
+
 ## [0.22.0] — 2026-04-12
 
 ### Hinzugefügt

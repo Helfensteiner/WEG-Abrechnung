@@ -72,7 +72,14 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.22.0"
+#   0.23.0 — Issues #64, #65, #66: Doppelte Buchführung (GoB) + Rechnungsverwaltung:
+#             #64 Wasserkosten Mietzeiträume: Pro-Rata-Monatsberechnung bei Mieterwechsel;
+#                 _calc_monate_im_jahr(), _import_wohnungen() neu, von_datum/bis_datum in Dialog;
+#             #65 Mehrere Buchungen auf Rechnung: rechnung_id FK in zahlungen; Rechnungen-Tab
+#                 zeigt Soll/Haben/Differenz farbkodiert; BuchungZuordnenDialog;
+#             #66 Rechnungsverwaltung: neue RechnungenPage + RechnungDialog; ZUGFeRD (CII XML)
+#                 und xRechnung (UBL 2.1) Import; KI-OCR Fallback; Navigation "🧾 Rechnungen"
+APP_VERSION = "0.23.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -852,6 +859,8 @@ CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
         "ALTER TABLE zahlungen ADD COLUMN gesamtrechnungsbetrag REAL",  # #58
         "ALTER TABLE zahlungen ADD COLUMN lohnanteil REAL",  # #58
         "ALTER TABLE zahlungen ADD COLUMN handwerker_steuerlich INTEGER DEFAULT 0",  # #58 §35a EStG
+        "ALTER TABLE zahlungen ADD COLUMN rechnung_id INTEGER",  # #65 Mehrere Buchungen auf eine Rechnung
+        "CREATE TABLE IF NOT EXISTS rechnungen (id INTEGER PRIMARY KEY AUTOINCREMENT, rechnungsnummer TEXT, rechnungssteller TEXT NOT NULL, rechnungsdatum DATE, faelligkeitsdatum DATE, betrag_brutto REAL NOT NULL DEFAULT 0, betrag_netto REAL, mwst_satz REAL DEFAULT 19.0, mwst_betrag REAL, lohnanteil REAL, kategorie TEXT, beschreibung TEXT, beleg_dateipfad TEXT, status TEXT DEFAULT 'Offen', zugferd_format TEXT, erstellt_am DATETIME DEFAULT CURRENT_TIMESTAMP)",  # #66
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_min REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_max REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN konfidenz REAL DEFAULT 0.5",
@@ -2900,15 +2909,16 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr,rechnungsdatum,rechnungsnummer,gesamtrechnungsbetrag,lohnanteil,handwerker_steuerlich) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr,rechnungsdatum,rechnungsnummer,gesamtrechnungsbetrag,lohnanteil,handwerker_steuerlich,rechnung_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
                  v.get("status", "Geprüft"), v.get("beleg_dateipfad"),
                  v.get("rechnungssteller") or None, v.get("abrechnungsrelevant", 1),
                  v.get("abrechnungsjahr") or None,
                  v.get("rechnungsdatum") or None,  # #56
                  v.get("rechnungsnummer") or None, v.get("gesamtrechnungsbetrag") or None,
-                 v.get("lohnanteil") or None, v.get("handwerker_steuerlich", 0)))  # #58
+                 v.get("lohnanteil") or None, v.get("handwerker_steuerlich", 0),
+                 v.get("rechnung_id") or None))  # #65
             conn.commit(); conn.close()
             if self._active_tab == "buchungen": self._load_buchungen()
 
@@ -2928,7 +2938,7 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnungsdatum=?,rechnungsnummer=?,gesamtrechnungsbetrag=?,lohnanteil=?,handwerker_steuerlich=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnungsdatum=?,rechnungsnummer=?,gesamtrechnungsbetrag=?,lohnanteil=?,handwerker_steuerlich=?,rechnung_id=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
                  v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"),
@@ -2937,6 +2947,7 @@ class BuchhaltungPage(tk.Frame):
                  v.get("rechnungsdatum") or None,  # #56
                  v.get("rechnungsnummer") or None, v.get("gesamtrechnungsbetrag") or None,
                  v.get("lohnanteil") or None, v.get("handwerker_steuerlich", 0),
+                 v.get("rechnung_id") or None,  # #65
                  int(sel[0])))  # #58
             conn.commit(); conn.close()
             self._load_buchungen()
@@ -3883,6 +3894,46 @@ class ZahlungDialog(BaseDialog):
                        bg=BG_CARD, fg=TEXT, font=FONT_BODY,
                        activebackground=BG_CARD, selectcolor=BG_CARD).pack(anchor="w")  # #58
 
+        # #65 – Rechnung zuordnen
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        rechnung_lbl = tk.Label(self._body, text="Rechnung zuordnen (optional)",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9))
+        rechnung_lbl.pack(padx=20, anchor="w")
+        rechnung_row = tk.Frame(self._body, bg=BG_CARD)
+        rechnung_row.pack(fill="x", padx=20, pady=(2, 4))
+        # Lade Rechnungen für Dropdown
+        try:
+            _conn_r = get_db()
+            _rech_rows = _conn_r.execute(
+                "SELECT id, rechnungsnummer, rechnungssteller, betrag_brutto "
+                "FROM rechnungen WHERE status IN ('Offen','Teilbezahlt') "
+                "ORDER BY rechnungsdatum DESC LIMIT 50"
+            ).fetchall()
+            _conn_r.close()
+        except Exception:
+            _rech_rows = []
+        self._rechnung_map = {0: "– keine –"}
+        rech_options = ["– keine –"]
+        for _rr in _rech_rows:
+            label = f"{_rr['rechnungsnummer'] or _rr['id']} – {_rr['rechnungssteller']} ({fmt_euro(_rr['betrag_brutto'])})"
+            self._rechnung_map[_rr["id"]] = label
+            rech_options.append(label)
+        # Aktuell zugeordnet?
+        _cur_rid = r.get("rechnung_id")
+        _cur_label = self._rechnung_map.get(_cur_rid, "– keine –") if _cur_rid else "– keine –"
+        self._rechnung_var = tk.StringVar(value=_cur_label)
+        self._rechnung_id_val = _cur_rid
+        rech_combo = ttk.Combobox(rechnung_row, textvariable=self._rechnung_var,
+                                  values=rech_options, state="readonly", width=40, font=FONT_BODY)
+        rech_combo.pack(side="left", fill="x", expand=True)
+        def _on_rech_selected(e=None):
+            sel_lbl = self._rechnung_var.get()
+            for rid, lbl in self._rechnung_map.items():
+                if lbl == sel_lbl:
+                    self._rechnung_id_val = rid if rid != 0 else None
+                    break
+        rech_combo.bind("<<ComboboxSelected>>", _on_rech_selected)
+
         # Abrechnungsrelevanz-Checkbox
         abr_frame = tk.Frame(self._body, bg=BG_CARD)
         abr_frame.pack(fill="x", padx=20, pady=(2, 4))
@@ -4260,6 +4311,8 @@ class ZahlungDialog(BaseDialog):
         v["abrechnungsrelevant"] = 1 if self._abr_var.get() else 0
         # §35a EStG (#58)
         v["handwerker_steuerlich"] = 1 if self._steuerlich_var.get() else 0
+        # #65 – Rechnung-Zuordnung
+        v["rechnung_id"] = self._rechnung_id_val if hasattr(self, "_rechnung_id_val") else None
         # Auto-Status: Betrag == Gesamtrechnungsbetrag UND Belegnr == Rechnungsnummer → "Geprüft" (#58)
         try:
             betrag_val = abs(float(str(v.get("betrag", "") or 0).replace(",", ".")))
@@ -4273,6 +4326,693 @@ class ZahlungDialog(BaseDialog):
         except (ValueError, TypeError):
             pass
         self.result = v; self.destroy()
+
+# ── Rechnungen-Seite (#65 / #66 – Doppelte Buchführung) ──────────────────────
+
+class RechnungenPage(tk.Frame):
+    """#65/#66 – Rechnungsverwaltung mit Doppelter-Buchführungs-Prinzip.
+
+    Jede Rechnung ist eine Verbindlichkeit. Buchungen (zahlungen) werden
+    per rechnung_id zugeordnet. Anzeige: Rechnungsbetrag, gebucht, Differenz.
+    ZUGFeRD/xRechnung XML-Import, KI-OCR Fallback, manuelle Eingabe.
+    """
+
+    STATI = ["Offen", "Teilbezahlt", "Bezahlt", "Storniert"]
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG_CARD)
+        self._build()
+
+    # ── Aufbau ────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        section_header(self, "Rechnungen", "＋ Rechnung", self._new_rechnung)
+
+        # Filter-Leiste
+        fr = tk.Frame(self, bg=BG_CARD)
+        fr.pack(fill="x", padx=20, pady=4)
+        tk.Label(fr, text="Status:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._status_var = tk.StringVar(value="Alle")
+        for s in ("Alle", "Offen", "Teilbezahlt", "Bezahlt", "Storniert"):
+            tk.Radiobutton(fr, text=s, variable=self._status_var, value=s,
+                           bg=BG_CARD, fg=TEXT, font=FONT_SMALL,
+                           activebackground=BG_CARD, selectcolor=BG_CARD,
+                           command=self._load).pack(side="left", padx=6)
+
+        # Rechnungstabelle
+        cols = ("Nr.", "Steller", "Datum", "Brutto €", "Gebucht €", "Differenz €", "Status", "Kategorie")
+        f, self.tree = make_table(self, cols, height=14)
+        f.pack(fill="both", expand=True, padx=20, pady=4)
+        for c, w in zip(cols, [90, 160, 90, 90, 90, 100, 90, 120]):
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.column("Brutto €",    anchor="e")
+        self.tree.column("Gebucht €",   anchor="e")
+        self.tree.column("Differenz €", anchor="e")
+        self.tree.bind("<Double-1>", self._edit_rechnung)
+        self.tree.tag_configure("bezahlt",     foreground=SUCCESS)
+        self.tree.tag_configure("offen",       foreground=TEXT)
+        self.tree.tag_configure("ueberzahlt",  foreground=DANGER)
+        self.tree.tag_configure("teilbezahlt", foreground=ACCENT2)
+
+        # Button-Leiste
+        btn_row = tk.Frame(self, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0, 8))
+        if hat_recht("Buchhaltung", "schreiben"):
+            make_btn(btn_row, "✏ Bearbeiten",    self._edit_rechnung,  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+            make_btn(btn_row, "📎 Buchung zuordnen", self._buchung_zuordnen, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+            make_btn(btn_row, "📄 Buchungen anzeigen", self._show_buchungen, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+        if hat_recht("Buchhaltung", "loeschen"):
+            make_btn(btn_row, "🗑 Löschen", self._delete_rechnung, color=DANGER).pack(side="left")
+
+        # KPI-Leiste
+        self._kpi_frame = tk.Frame(self, bg=BG_CARD)
+        self._kpi_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+        self._load()
+
+    # ── Daten laden ───────────────────────────────────────────────────────────
+
+    def _load(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        conn = get_db()
+        try:
+            s = self._status_var.get()
+            where = "WHERE r.status=?" if s != "Alle" else ""
+            params = (s,) if s != "Alle" else ()
+            rechnungen = conn.execute(
+                f"SELECT r.*, "
+                f"  COALESCE((SELECT SUM(ABS(z.betrag)) FROM zahlungen z "
+                f"            WHERE z.rechnung_id=r.id), 0) AS gebucht "
+                f"FROM rechnungen r {where} ORDER BY r.rechnungsdatum DESC, r.id DESC",
+                params
+            ).fetchall()
+        finally:
+            conn.close()
+
+        total_brutto = total_gebucht = 0.0
+        offen_count = 0
+        for r in rechnungen:
+            rd = dict(r)
+            brutto   = rd["betrag_brutto"] or 0
+            gebucht  = rd["gebucht"] or 0
+            differenz = brutto - gebucht
+            total_brutto  += brutto
+            total_gebucht += gebucht
+            if rd["status"] in ("Offen", "Teilbezahlt"):
+                offen_count += 1
+            # Farbtag
+            if abs(differenz) < 0.01:
+                tag = "bezahlt"
+            elif differenz < -0.01:
+                tag = "ueberzahlt"
+            elif gebucht > 0:
+                tag = "teilbezahlt"
+            else:
+                tag = "offen"
+            # Differenz-Farbe: zu wenig = grün (noch offen), zu viel = rot, genau = schwarz
+            diff_str = fmt_euro(differenz)
+            self.tree.insert("", "end", iid=rd["id"], values=(
+                rd["rechnungsnummer"] or "–",
+                rd["rechnungssteller"] or "–",
+                fmt_date(rd["rechnungsdatum"]) if rd["rechnungsdatum"] else "–",
+                fmt_euro(brutto),
+                fmt_euro(gebucht),
+                diff_str,
+                rd["status"] or "–",
+                rd["kategorie"] or "–"
+            ), tags=(tag,))
+        tree_empty_hint(self.tree)
+        self._update_kpi(total_brutto, total_gebucht, offen_count)
+
+    def _update_kpi(self, total_brutto, total_gebucht, offen_count):
+        for w in self._kpi_frame.winfo_children():
+            w.destroy()
+        differenz = total_brutto - total_gebucht
+        items = [
+            ("Rechnungen gesamt", fmt_euro(total_brutto), DANGER),
+            ("Bezahlt", fmt_euro(total_gebucht), SUCCESS),
+            ("Noch offen", fmt_euro(differenz), WARNING if differenz > 0.01 else TEXT),
+            ("Offene Rechnungen", str(offen_count), ACCENT2),
+        ]
+        for lbl, wert, color in items:
+            karte = tk.Frame(self._kpi_frame, bg=BG_INPUT, padx=12, pady=6)
+            karte.pack(side="left", padx=(0, 10))
+            tk.Label(karte, text=lbl, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+            tk.Label(karte, text=wert, bg=BG_INPUT, fg=color, font=FONT_H3).pack(anchor="w")
+
+    # ── CRUD ──────────────────────────────────────────────────────────────────
+
+    def _new_rechnung(self):
+        if not hat_recht("Buchhaltung", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
+        d = RechnungDialog(self)
+        self.wait_window(d)
+        if d.result:
+            v = d.result
+            conn = get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO rechnungen (rechnungsnummer, rechnungssteller, rechnungsdatum, "
+                    "faelligkeitsdatum, betrag_brutto, betrag_netto, mwst_satz, mwst_betrag, "
+                    "lohnanteil, kategorie, beschreibung, beleg_dateipfad, status, zugferd_format) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (v.get("rechnungsnummer"), v.get("rechnungssteller"),
+                     v.get("rechnungsdatum"), v.get("faelligkeitsdatum"),
+                     float(v.get("betrag_brutto") or 0),
+                     float(v.get("betrag_netto") or 0) or None,
+                     float(v.get("mwst_satz") or 19),
+                     float(v.get("mwst_betrag") or 0) or None,
+                     float(v.get("lohnanteil") or 0) or None,
+                     v.get("kategorie"), v.get("beschreibung"),
+                     v.get("beleg_dateipfad"), v.get("status", "Offen"),
+                     v.get("zugferd_format")))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load()
+
+    def _edit_rechnung(self, event=None):
+        if not hat_recht("Buchhaltung", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
+        sel = self.tree.selection()
+        if not sel: return
+        conn = get_db()
+        try:
+            row = conn.execute("SELECT * FROM rechnungen WHERE id=?", (int(sel[0]),)).fetchone()
+        finally:
+            conn.close()
+        if not row: return
+        d = RechnungDialog(self, dict(row))
+        self.wait_window(d)
+        if d.result:
+            v = d.result
+            conn = get_db()
+            try:
+                conn.execute(
+                    "UPDATE rechnungen SET rechnungsnummer=?, rechnungssteller=?, "
+                    "rechnungsdatum=?, faelligkeitsdatum=?, betrag_brutto=?, betrag_netto=?, "
+                    "mwst_satz=?, mwst_betrag=?, lohnanteil=?, kategorie=?, beschreibung=?, "
+                    "beleg_dateipfad=?, status=? WHERE id=?",
+                    (v.get("rechnungsnummer"), v.get("rechnungssteller"),
+                     v.get("rechnungsdatum"), v.get("faelligkeitsdatum"),
+                     float(v.get("betrag_brutto") or 0),
+                     float(v.get("betrag_netto") or 0) or None,
+                     float(v.get("mwst_satz") or 19),
+                     float(v.get("mwst_betrag") or 0) or None,
+                     float(v.get("lohnanteil") or 0) or None,
+                     v.get("kategorie"), v.get("beschreibung"),
+                     v.get("beleg_dateipfad"), v.get("status", "Offen"),
+                     int(sel[0])))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load()
+
+    def _delete_rechnung(self):
+        if not hat_recht("Buchhaltung", "loeschen"):
+            messagebox.showwarning("Berechtigung", "Keine Löschberechtigung.", parent=self); return
+        sel = self.tree.selection()
+        if not sel: return
+        conn = get_db()
+        try:
+            cnt = conn.execute(
+                "SELECT COUNT(*) FROM zahlungen WHERE rechnung_id=?", (int(sel[0]),)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        hinweis = f"\n\n⚠ {cnt} Buchung(en) sind dieser Rechnung zugeordnet." if cnt else ""
+        if not messagebox.askyesno("Löschen",
+            f"Rechnung wirklich löschen?{hinweis}", parent=self):
+            return
+        conn = get_db()
+        try:
+            # Zuordnungen aufheben
+            conn.execute("UPDATE zahlungen SET rechnung_id=NULL WHERE rechnung_id=?", (int(sel[0]),))
+            conn.execute("DELETE FROM rechnungen WHERE id=?", (int(sel[0]),))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load()
+
+    def _buchung_zuordnen(self):
+        """Öffnet Dialog um bestehende Buchung einer Rechnung zuzuordnen."""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Auswahl", "Bitte eine Rechnung auswählen.", parent=self); return
+        rechnung_id = int(sel[0])
+        conn = get_db()
+        try:
+            r = conn.execute("SELECT * FROM rechnungen WHERE id=?", (rechnung_id,)).fetchone()
+        finally:
+            conn.close()
+        if not r: return
+        BuchungZuordnenDialog(self, rechnung_id, r["rechnungssteller"],
+                              r["betrag_brutto"] or 0, self._load)
+
+    def _show_buchungen(self):
+        """Zeigt alle Buchungen zu einer Rechnung."""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Auswahl", "Bitte eine Rechnung auswählen.", parent=self); return
+        rechnung_id = int(sel[0])
+        conn = get_db()
+        try:
+            r = conn.execute("SELECT * FROM rechnungen WHERE id=?", (rechnung_id,)).fetchone()
+            buchungen = conn.execute(
+                "SELECT datum, beschreibung, betrag, belegnr, status "
+                "FROM zahlungen WHERE rechnung_id=? ORDER BY datum",
+                (rechnung_id,)).fetchall()
+        finally:
+            conn.close()
+        if not r: return
+        win = tk.Toplevel(self)
+        win.title(f"Buchungen zu Rechnung {r['rechnungsnummer'] or r['id']}")
+        win.geometry("700x400")
+        win.configure(bg=BG_CARD)
+        win.grab_set()
+        tk.Label(win, text=f"Rechnung: {r['rechnungssteller']} – {fmt_euro(r['betrag_brutto'])}",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(14, 4), anchor="w")
+        cols = ("Datum", "Beschreibung", "Betrag €", "Beleg", "Status")
+        f, tree = make_table(win, cols, height=10)
+        f.pack(fill="both", expand=True, padx=20, pady=8)
+        for c, w in zip(cols, [90, 220, 100, 90, 90]):
+            tree.heading(c, text=c); tree.column(c, width=w, anchor="w")
+        tree.column("Betrag €", anchor="e")
+        total = 0.0
+        for b in buchungen:
+            betrag = b["betrag"] or 0
+            total += abs(betrag)
+            tree.insert("", "end", values=(
+                fmt_date(b["datum"]) if b["datum"] else "–",
+                b["beschreibung"] or "–",
+                fmt_euro(abs(betrag)),
+                b["belegnr"] or "–",
+                b["status"] or "–"
+            ))
+        tree_empty_hint(tree)
+        differenz = (r["betrag_brutto"] or 0) - total
+        diff_color = SUCCESS if abs(differenz) < 0.01 else (DANGER if differenz < -0.01 else ACCENT2)
+        sum_fr = tk.Frame(win, bg=BG_CARD)
+        sum_fr.pack(fill="x", padx=20, pady=(0, 12))
+        tk.Label(sum_fr, text=f"Gebucht: {fmt_euro(total)}   Differenz: {fmt_euro(differenz)}",
+                 bg=BG_CARD, fg=diff_color, font=FONT_H3).pack(side="left")
+        make_btn(win, "Schließen", win.destroy, color=BG_INPUT, fg=TEXT).pack(
+            side="bottom", anchor="e", padx=20, pady=8)
+
+    # ── ZUGFeRD / xRechnung Parser ────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_zugferd_cii(xml_bytes: bytes) -> dict:
+        """Parst ZUGFeRD / Factur-X / xRechnung CII XML."""
+        import xml.etree.ElementTree as ET
+        NS = {
+            "rsm": "urn:un:unece:uncefact:data:standard:CrossIndustryInvoice:100",
+            "ram": "urn:un:unece:uncefact:data:standard:ReusableAggregateBusinessInformationEntity:100",
+            "udt": "urn:un:unece:uncefact:data:standard:UnqualifiedDataType:100",
+        }
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            return {}
+        def _txt(path, ns=NS):
+            el = root.find(path, ns)
+            return el.text.strip() if el is not None and el.text else ""
+        # Rechnungsnummer
+        rnr = _txt(".//rsm:ExchangedDocument/ram:ID")
+        # Datum (YYYYMMDD → YYYY-MM-DD)
+        datum_raw = _txt(".//rsm:ExchangedDocument/ram:IssueDateTime/udt:DateTimeString")
+        rechnungsdatum = f"{datum_raw[:4]}-{datum_raw[4:6]}-{datum_raw[6:8]}" \
+            if len(datum_raw) >= 8 else datum_raw
+        # Steller
+        steller = _txt(".//ram:SellerTradeParty/ram:Name")
+        # Beträge
+        try:
+            brutto = float(_txt(".//ram:GrandTotalAmount") or 0)
+        except ValueError:
+            brutto = 0.0
+        try:
+            netto = float(_txt(".//ram:TaxBasisTotalAmount") or 0)
+        except ValueError:
+            netto = 0.0
+        try:
+            mwst = float(_txt(".//ram:TaxTotalAmount") or 0)
+        except ValueError:
+            mwst = 0.0
+        # Fälligkeit
+        faellig_raw = _txt(".//ram:DueDateDateTime/udt:DateTimeString")
+        faelligkeitsdatum = f"{faellig_raw[:4]}-{faellig_raw[4:6]}-{faellig_raw[6:8]}" \
+            if len(faellig_raw) >= 8 else ""
+        return {
+            "rechnungsnummer": rnr,
+            "rechnungssteller": steller,
+            "rechnungsdatum": rechnungsdatum,
+            "faelligkeitsdatum": faelligkeitsdatum,
+            "betrag_brutto": brutto,
+            "betrag_netto": netto,
+            "mwst_betrag": mwst,
+            "mwst_satz": round(mwst / netto * 100, 1) if netto else 19.0,
+            "zugferd_format": "ZUGFeRD/CII",
+        }
+
+    @staticmethod
+    def _parse_xrechnung_ubl(xml_bytes: bytes) -> dict:
+        """Parst xRechnung UBL 2.1 XML."""
+        import xml.etree.ElementTree as ET
+        NS = {
+            "ubl": "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2",
+            "cac": "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2",
+            "cbc": "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2",
+        }
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            return {}
+        def _txt(path):
+            el = root.find(path, NS)
+            return el.text.strip() if el is not None and el.text else ""
+        try:
+            brutto = float(_txt(".//cac:LegalMonetaryTotal/cbc:PayableAmount") or 0)
+        except ValueError:
+            brutto = 0.0
+        try:
+            netto = float(_txt(".//cac:LegalMonetaryTotal/cbc:TaxExclusiveAmount") or 0)
+        except ValueError:
+            netto = 0.0
+        return {
+            "rechnungsnummer": _txt("cbc:ID"),
+            "rechnungssteller": _txt(".//cac:AccountingSupplierParty/cac:Party/cac:PartyName/cbc:Name"),
+            "rechnungsdatum": _txt("cbc:IssueDate"),
+            "faelligkeitsdatum": _txt(".//cac:PaymentMeans/cbc:PaymentDueDate"),
+            "betrag_brutto": brutto,
+            "betrag_netto": netto,
+            "zugferd_format": "xRechnung-UBL",
+        }
+
+    @staticmethod
+    def _extrahiere_zugferd_aus_pdf(pdf_pfad: str) -> bytes:
+        """Versucht ZUGFeRD-XML aus PDF-Anhang zu extrahieren (ohne externe Libs)."""
+        try:
+            with open(pdf_pfad, "rb") as f:
+                data = f.read()
+            # Suche nach eingebettetem XML (ZUGFeRD/Factur-X)
+            markers = [b"<?xml version", b"<?XML VERSION"]
+            for marker in markers:
+                idx = data.find(marker)
+                while idx != -1:
+                    # Suche Ende des XML-Dokuments
+                    for end_tag in [b"</rsm:CrossIndustryInvoice>",
+                                    b"</CrossIndustryInvoice>",
+                                    b"</Invoice>"]:
+                        end_idx = data.find(end_tag, idx)
+                        if end_idx != -1:
+                            xml_bytes = data[idx:end_idx + len(end_tag)]
+                            if b"CrossIndustryInvoice" in xml_bytes or b"Invoice" in xml_bytes:
+                                return xml_bytes
+                    idx = data.find(marker, idx + 1)
+        except Exception:
+            pass
+        return b""
+
+    def _import_rechnung_aus_datei(self, pfad: str) -> dict:
+        """Liest Rechnungsdaten aus Datei: ZUGFeRD XML, xRechnung, oder KI-OCR."""
+        import os
+        ext = os.path.splitext(pfad)[1].lower()
+        # 1. Direkte XML-Datei
+        if ext == ".xml":
+            try:
+                with open(pfad, "rb") as f:
+                    xml_bytes = f.read()
+                # Versuche CII zuerst, dann UBL
+                if b"CrossIndustryInvoice" in xml_bytes:
+                    return self._parse_zugferd_cii(xml_bytes)
+                elif b"Invoice-2" in xml_bytes or b"urn:oasis:names:specification:ubl" in xml_bytes:
+                    return self._parse_xrechnung_ubl(xml_bytes)
+            except Exception:
+                pass
+        # 2. PDF mit eingebettetem ZUGFeRD-XML
+        if ext == ".pdf":
+            xml_bytes = self._extrahiere_zugferd_aus_pdf(pfad)
+            if xml_bytes:
+                result = self._parse_zugferd_cii(xml_bytes)
+                if result.get("rechnungssteller") or result.get("betrag_brutto"):
+                    return result
+        # 3. KI-OCR Fallback
+        return {}
+
+
+class BuchungZuordnenDialog(tk.Toplevel):
+    """#65 – Dialog um Buchungen einer Rechnung zuzuordnen."""
+
+    def __init__(self, parent, rechnung_id: int, steller: str,
+                 betrag_gesamt: float, callback=None):
+        super().__init__(parent)
+        self.title(f"Buchung zuordnen – {steller}")
+        self.configure(bg=BG_CARD)
+        self.geometry("760x520")
+        self.grab_set()
+        self._rechnung_id = rechnung_id
+        self._betrag_gesamt = betrag_gesamt
+        self._callback = callback
+        self._build()
+        self._load()
+
+    def _build(self):
+        tk.Label(self, text="Buchungen der Rechnung zuordnen",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(14, 2), anchor="w")
+        tk.Label(self,
+                 text="Doppelklick auf eine Buchung um sie dieser Rechnung zuzuordnen "
+                      "(oder Zuordnung aufzuheben).",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, anchor="w")
+
+        # Bereits zugeordnet
+        tk.Label(self, text="✅ Bereits zugeordnete Buchungen:",
+                 bg=BG_CARD, fg=SUCCESS, font=("Segoe UI Semibold", 9)).pack(
+                     padx=20, pady=(10, 2), anchor="w")
+        f1, self._tree_zugeord = make_table(self,
+            ("Datum", "Beschreibung", "Betrag €", "Belegnr."), height=4)
+        f1.pack(fill="x", padx=20)
+        for c, w in zip(("Datum", "Beschreibung", "Betrag €", "Belegnr."), [90, 220, 100, 90]):
+            self._tree_zugeord.heading(c, text=c); self._tree_zugeord.column(c, width=w)
+        self._tree_zugeord.column("Betrag €", anchor="e")
+        self._tree_zugeord.bind("<Double-1>", lambda e: self._toggle(self._tree_zugeord, False))
+
+        # Noch nicht zugeordnet
+        tk.Label(self, text="⬜ Nicht zugeordnete Buchungen (Doppelklick zum Zuordnen):",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(
+                     padx=20, pady=(8, 2), anchor="w")
+        f2, self._tree_offen = make_table(self,
+            ("Datum", "Beschreibung", "Betrag €", "Belegnr."), height=6)
+        f2.pack(fill="both", expand=True, padx=20)
+        for c, w in zip(("Datum", "Beschreibung", "Betrag €", "Belegnr."), [90, 220, 100, 90]):
+            self._tree_offen.heading(c, text=c); self._tree_offen.column(c, width=w)
+        self._tree_offen.column("Betrag €", anchor="e")
+        self._tree_offen.bind("<Double-1>", lambda e: self._toggle(self._tree_offen, True))
+
+        # Summen
+        self._sum_lbl = tk.Label(self, text="", bg=BG_CARD, fg=TEXT, font=FONT_H3)
+        self._sum_lbl.pack(padx=20, pady=(6, 2), anchor="w")
+
+        btn_row = tk.Frame(self, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(btn_row, "Schließen", self._close, color=ACCENT2).pack(side="right")
+
+    def _load(self):
+        for t in (self._tree_zugeord, self._tree_offen):
+            for i in t.get_children(): t.delete(i)
+        conn = get_db()
+        try:
+            zugeordnet = conn.execute(
+                "SELECT id, datum, beschreibung, betrag, belegnr FROM zahlungen "
+                "WHERE rechnung_id=? ORDER BY datum", (self._rechnung_id,)).fetchall()
+            offen = conn.execute(
+                "SELECT id, datum, beschreibung, betrag, belegnr FROM zahlungen "
+                "WHERE rechnung_id IS NULL AND typ='Ausgabe' ORDER BY datum DESC LIMIT 100"
+            ).fetchall()
+        finally:
+            conn.close()
+        total = 0.0
+        for b in zugeordnet:
+            betrag = abs(b["betrag"] or 0)
+            total += betrag
+            self._tree_zugeord.insert("", "end", iid=b["id"], values=(
+                fmt_date(b["datum"]) if b["datum"] else "–",
+                b["beschreibung"] or "–", fmt_euro(betrag), b["belegnr"] or "–"))
+        for b in offen:
+            betrag = abs(b["betrag"] or 0)
+            self._tree_offen.insert("", "end", iid=b["id"], values=(
+                fmt_date(b["datum"]) if b["datum"] else "–",
+                b["beschreibung"] or "–", fmt_euro(betrag), b["belegnr"] or "–"))
+        tree_empty_hint(self._tree_zugeord)
+        tree_empty_hint(self._tree_offen)
+        diff = self._betrag_gesamt - total
+        diff_color = SUCCESS if abs(diff) < 0.01 else (DANGER if diff < -0.01 else ACCENT2)
+        self._sum_lbl.config(
+            text=f"Rechnungsbetrag: {fmt_euro(self._betrag_gesamt)}  "
+                 f"Gebucht: {fmt_euro(total)}  "
+                 f"Differenz: {fmt_euro(diff)}",
+            fg=diff_color)
+
+    def _toggle(self, tree, zuordnen: bool):
+        sel = tree.selection()
+        if not sel: return
+        zahlung_id = int(sel[0])
+        conn = get_db()
+        try:
+            if zuordnen:
+                conn.execute("UPDATE zahlungen SET rechnung_id=? WHERE id=?",
+                             (self._rechnung_id, zahlung_id))
+            else:
+                conn.execute("UPDATE zahlungen SET rechnung_id=NULL WHERE id=?",
+                             (zahlung_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load()
+        if self._callback:
+            self._callback()
+
+    def _close(self):
+        if self._callback:
+            self._callback()
+        self.destroy()
+
+
+class RechnungDialog(BaseDialog):
+    """Dialog zum Anlegen/Bearbeiten einer Rechnung (#66)."""
+
+    def __init__(self, parent, row=None):
+        super().__init__(parent, "Rechnung" + (" bearbeiten" if row else " erfassen"), 580, 720)
+        r = row or {}
+
+        # Grunddaten
+        self._add_field("Rechnungsnummer", "rechnungsnummer", r.get("rechnungsnummer", "") or "")
+        self._add_field("Rechnungssteller *", "rechnungssteller", r.get("rechnungssteller", "") or "")
+        self._add_field("Rechnungsdatum (JJJJ-MM-TT)", "rechnungsdatum",
+                        r.get("rechnungsdatum", date.today().isoformat()) or "")
+        self._add_field("Fälligkeitsdatum (JJJJ-MM-TT)", "faelligkeitsdatum",
+                        r.get("faelligkeitsdatum", "") or "")
+
+        # Beträge
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(self._body, text="Beträge",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(padx=20, anchor="w")
+        self._add_field("Betrag Brutto € *", "betrag_brutto",
+                        r.get("betrag_brutto", "") or "")
+        self._add_field("Betrag Netto €", "betrag_netto",
+                        r.get("betrag_netto", "") or "")
+        self._add_field("MwSt. %", "mwst_satz", r.get("mwst_satz", "19") or "19")
+        self._add_field("MwSt. Betrag €", "mwst_betrag", r.get("mwst_betrag", "") or "")
+        self._add_field("Lohnanteil € (§35a EStG)", "lohnanteil", r.get("lohnanteil", "") or "")
+
+        # Kategorie & Status
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        self._add_field("Kategorie", "kategorie", r.get("kategorie", "") or "",
+                        widget_type="combo", options=BuchhaltungPage.aktive_kategorien())
+        self._add_field("Status", "status", r.get("status", "Offen") or "Offen",
+                        widget_type="combo", options=RechnungenPage.STATI)
+        self._add_field("Beschreibung", "beschreibung", r.get("beschreibung", "") or "",
+                        widget_type="text")
+
+        # Beleg-Datei
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(self._body, text="Beleg / Rechnung (PDF, XML)",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, anchor="w")
+        beleg_row = tk.Frame(self._body, bg=BG_CARD)
+        beleg_row.pack(fill="x", padx=20)
+        self._beleg_var = tk.StringVar(value=r.get("beleg_dateipfad", "") or "")
+        beleg_entry = tk.Entry(beleg_row, textvariable=self._beleg_var,
+                               bg=BG_INPUT, fg=TEXT, font=FONT_BODY,
+                               relief="flat", bd=0, highlightthickness=1,
+                               highlightbackground=BORDER)
+        beleg_entry.pack(side="left", fill="x", expand=True, ipady=5)
+        make_btn(beleg_row, "📂 Durchsuchen", self._browse_und_import,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(6, 0))
+        self._import_lbl = tk.Label(self._body,
+            text=f"Format: {r.get('zugferd_format','–')}" if r.get("zugferd_format") else "",
+            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL)
+        self._import_lbl.pack(padx=20, anchor="w")
+
+    def _browse_und_import(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Rechnung auswählen (PDF, XML)",
+            filetypes=[("Rechnungen", "*.pdf *.xml"), ("Alle", "*.*")]
+        )
+        if not path:
+            return
+        self._beleg_var.set(path)
+        # Versuche automatischen Import
+        try:
+            daten = RechnungenPage._extrahiere_und_parse(path)
+            if daten:
+                self._felder_befuellen(daten)
+                fmt = daten.get("zugferd_format", "Unbekannt")
+                self._import_lbl.config(text=f"✅ Importiert ({fmt})", fg=SUCCESS)
+            else:
+                self._import_lbl.config(
+                    text="ℹ Kein ZUGFeRD/xRechnung erkannt – bitte manuell ausfüllen",
+                    fg=TEXT_LIGHT)
+        except Exception as ex:
+            self._import_lbl.config(text=f"⚠ Fehler: {ex}", fg=DANGER)
+
+    def _felder_befuellen(self, daten: dict):
+        """Befüllt Formularfelder aus importierten Rechnungsdaten."""
+        def _set(key, val):
+            if not val:
+                return
+            w = self._fields.get(key)
+            if not w: return
+            if hasattr(w, "set"): w.set(str(val))
+            elif hasattr(w, "delete"): w.delete(0, "end"); w.insert(0, str(val))
+        for key in ("rechnungsnummer", "rechnungssteller", "rechnungsdatum",
+                    "faelligkeitsdatum", "betrag_brutto", "betrag_netto",
+                    "mwst_satz", "mwst_betrag", "lohnanteil"):
+            _set(key, daten.get(key))
+
+    def _on_save(self):
+        v = self._get_values()
+        if not v.get("rechnungssteller"):
+            messagebox.showwarning("Pflichtfeld", "Rechnungssteller ist erforderlich.", parent=self)
+            return
+        if not v.get("betrag_brutto"):
+            messagebox.showwarning("Pflichtfeld", "Betrag Brutto ist erforderlich.", parent=self)
+            return
+        v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
+        self.result = v
+        self.destroy()
+
+
+# ── Hilfsmethode als Klassenmethode von RechnungenPage ───────────────────────
+
+@staticmethod
+def _extrahiere_und_parse_static(pfad: str) -> dict:
+    """Extrahiert und parst Rechnungsdaten aus Datei (ZUGFeRD/xRechnung/PDF)."""
+    import os
+    ext = os.path.splitext(pfad)[1].lower()
+    if ext == ".xml":
+        try:
+            with open(pfad, "rb") as f:
+                xml_bytes = f.read()
+            if b"CrossIndustryInvoice" in xml_bytes:
+                return RechnungenPage._parse_zugferd_cii(xml_bytes)
+            elif b"Invoice-2" in xml_bytes or b"urn:oasis:names:specification:ubl" in xml_bytes:
+                return RechnungenPage._parse_xrechnung_ubl(xml_bytes)
+        except Exception:
+            pass
+    elif ext == ".pdf":
+        xml_bytes = RechnungenPage._extrahiere_zugferd_aus_pdf(pfad)
+        if xml_bytes:
+            result = RechnungenPage._parse_zugferd_cii(xml_bytes)
+            if result.get("rechnungssteller") or result.get("betrag_brutto"):
+                return result
+    return {}
+
+
+RechnungenPage._extrahiere_und_parse = staticmethod(_extrahiere_und_parse_static)
+
 
 # ── Wartung-Seite ─────────────────────────────────────────────────────────────
 
@@ -7346,8 +8086,13 @@ class WasserkostenPage(tk.Frame):
             basis = (rd["personen"] + rd["spuelmaschinen"] +
                      rd["waschmaschinen"] + rd["trockner_wasserkuehlung"])
             gew = round(basis * (rd["monate"] or 12) / 12, 2)
+            # #64: Wohnungsbezeichnung + Mietername (aus bemerkung) + Zeitraum anzeigen
+            von_str = (rd.get("von_datum") or "")[:10] if rd.get("von_datum") else ""
+            bis_str = (rd.get("bis_datum") or "")[:10] if rd.get("bis_datum") else ""
+            zeitraum = f" [{von_str}→{bis_str}]" if (von_str or bis_str) else ""
+            bez = rd["wohnung_bezeichnung"] + zeitraum
             self.tree_p.insert("", "end", iid=rd["id"], values=(
-                rd["wohnung_bezeichnung"], rd["eigentuemer"] or "",
+                bez, rd["eigentuemer"] or "",
                 rd["personen"], rd["spuelmaschinen"], rd["waschmaschinen"],
                 rd["trockner_wasserkuehlung"], rd["monate"], basis, gew))
 
@@ -7413,34 +8158,52 @@ class WasserkostenPage(tk.Frame):
         r = row or {}
         wohn_v  = lf("Wohnung / Mieter *",             r.get("wohnung_bezeichnung", ""))
         eig_v   = lf("Eigentuemer",                     r.get("eigentuemer", ""))
+        # #64 – Von/Bis-Datum für Mietzeitraum
+        von_v   = lf("Von (JJJJ-MM-TT im Jahr)",       r.get("von_datum", f"{jahr}-01-01") or f"{jahr}-01-01")
+        bis_v   = lf("Bis (JJJJ-MM-TT im Jahr)",       r.get("bis_datum", f"{jahr}-12-31") or f"{jahr}-12-31")
         pers_v  = lf("Personen",                        r.get("personen", 1))
         spuel_v = lf("Spuelmaschinen (je 1 Pkt)",       r.get("spuelmaschinen", 0))
         wasch_v = lf("Waschmaschinen (je 1 Pkt)",       r.get("waschmaschinen", 1))
         trock_v = lf("Trockner Wasserkuehlung (1 Pkt)", r.get("trockner_wasserkuehlung", 0))
-        mon_v   = lf("Monate im Abrechnungsjahr",       r.get("monate", 12))
+        mon_v   = lf("Monate (auto aus Von/Bis)",       r.get("monate", 12))
+        # Auto-Berechnung Monate aus Von/Bis
+        def _auto_monate(*_):
+            mon = WasserkostenPage._calc_monate_im_jahr(
+                von_v.get().strip(), bis_v.get().strip(), jahr)
+            if mon > 0:
+                mon_v.set(str(mon))
+        von_v.trace_add("write", _auto_monate)
+        bis_v.trace_add("write", _auto_monate)
 
         def _save():
             wohn = wohn_v.get().strip()
             if not wohn:
                 messagebox.showwarning("Pflichtfeld", "Wohnung ist erforderlich.", parent=win)
                 return
+            von_str = von_v.get().strip() or None
+            bis_str = bis_v.get().strip() or None
+            monate = max(0.0, min(12.0, self._flt(mon_v.get()) or 12.0))
             conn = get_db()
-            vals = (jahr, wohn, eig_v.get().strip(),
-                    self._int(pers_v.get()), self._int(spuel_v.get()),
-                    self._int(wasch_v.get()), self._int(trock_v.get()),
-                    max(0.0, min(12.0, self._flt(mon_v.get()) or 12.0)))
             if row:
                 conn.execute(
                     "UPDATE wasserkosten_wohnungsdaten SET "
-                    "wohnung_bezeichnung=?, eigentuemer=?, personen=?, spuelmaschinen=?, "
-                    "waschmaschinen=?, trockner_wasserkuehlung=?, monate=? WHERE id=?",
-                    (wohn, vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], row["id"]))
+                    "wohnung_bezeichnung=?, eigentuemer=?, von_datum=?, bis_datum=?, "
+                    "personen=?, spuelmaschinen=?, waschmaschinen=?, "
+                    "trockner_wasserkuehlung=?, monate=? WHERE id=?",
+                    (wohn, eig_v.get().strip(), von_str, bis_str,
+                     self._int(pers_v.get()), self._int(spuel_v.get()),
+                     self._int(wasch_v.get()), self._int(trock_v.get()),
+                     monate, row["id"]))
             else:
                 conn.execute(
                     "INSERT INTO wasserkosten_wohnungsdaten "
-                    "(jahr, wohnung_bezeichnung, eigentuemer, personen, spuelmaschinen, "
-                    "waschmaschinen, trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,?,?,?)",
-                    vals)
+                    "(jahr, wohnung_bezeichnung, eigentuemer, von_datum, bis_datum, "
+                    "personen, spuelmaschinen, waschmaschinen, "
+                    "trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (jahr, wohn, eig_v.get().strip(), von_str, bis_str,
+                     self._int(pers_v.get()), self._int(spuel_v.get()),
+                     self._int(wasch_v.get()), self._int(trock_v.get()),
+                     monate))
             conn.commit()
             conn.close()
             win.destroy()
@@ -7448,61 +8211,145 @@ class WasserkostenPage(tk.Frame):
 
         make_btn(br, "Speichern", _save, color=SUCCESS).pack(side="right")
 
+    @staticmethod
+    def _calc_monate_im_jahr(einzug: str, auszug: str, jahr: int) -> float:
+        """#64 – Berechnet anteilige Monate eines Mieters im Abrechnungsjahr (Pro-Rata)."""
+        from datetime import date as _date
+        j_von = _date(jahr, 1, 1)
+        j_bis = _date(jahr, 12, 31)
+        tage_jahr = 366 if (jahr % 4 == 0 and (jahr % 100 != 0 or jahr % 400 == 0)) else 365
+        try:
+            von_d = max(_date.fromisoformat(einzug), j_von) if einzug else j_von
+        except (ValueError, TypeError):
+            von_d = j_von
+        try:
+            bis_d = min(_date.fromisoformat(auszug), j_bis) if auszug else j_bis
+        except (ValueError, TypeError):
+            bis_d = j_bis
+        if bis_d < von_d:
+            return 0.0
+        tage = (bis_d - von_d).days + 1
+        return round(tage / tage_jahr * 12, 2)
+
     def _import_wohnungen(self):
-        """Uebernimmt Wohnungen aus Stammdaten."""
+        """#64 – Übernimmt Wohnungen aus Stammdaten mit Mietzeitraum-Berücksichtigung."""
+        from datetime import date as _date
         jahr = self._jahr_int()
         if not jahr:
             return
+        j_von = _date(jahr, 1, 1)
+        j_bis = _date(jahr, 12, 31)
         conn = get_db()
-        wohnungen = conn.execute(
-            "SELECT w.bezeichnung, COALESCE(e.name,'') AS eig, "
-            "COALESCE(m.personen,1) AS personen, COALESCE(m.spuelmaschinen,0) AS spuel, "
-            "COALESCE(m.waschmaschinen,1) AS wasch, COALESCE(m.trockner_wasserkuehlung,0) AS trockner "
-            "FROM wohnungen w "
-            "LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id "
-            "LEFT JOIN mieter m ON w.id=m.wohnung_id AND (m.auszug IS NULL OR m.auszug='') "
-            "ORDER BY w.bezeichnung").fetchall()
-        if not wohnungen:
-            messagebox.showinfo("Keine Wohnungen",
-                "Keine Wohnungen in den Stammdaten.\nBitte zuerst Wohnungen anlegen.",
-                parent=self)
+        try:
+            wohnungen_db = conn.execute(
+                "SELECT w.id, w.bezeichnung, COALESCE(e.name,'') AS eig "
+                "FROM wohnungen w "
+                "LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id "
+                "WHERE w.aktiv=1 ORDER BY w.bezeichnung"
+            ).fetchall()
+            if not wohnungen_db:
+                messagebox.showinfo("Keine Wohnungen",
+                    "Keine aktiven Wohnungen in den Stammdaten.", parent=self)
+                return
+            added = updated = 0
+            for w in wohnungen_db:
+                # Alle Mieter laden, die im Abrechnungsjahr in dieser Wohnung waren
+                mieter_rows = conn.execute(
+                    "SELECT m.vorname, m.name, m.einzug, m.auszug, "
+                    "  COALESCE(m.personen,1) AS personen, "
+                    "  COALESCE(m.spuelmaschinen,0) AS spuel, "
+                    "  COALESCE(m.waschmaschinen,1) AS wasch, "
+                    "  COALESCE(m.trockner_wasserkuehlung,0) AS trockner "
+                    "FROM mieter m "
+                    "WHERE m.wohnung_id=? "
+                    "  AND m.einzug <= ? "
+                    "  AND (m.auszug IS NULL OR m.auszug='' OR m.auszug >= ?) "
+                    "ORDER BY m.einzug",
+                    (w["id"], j_bis.isoformat(), j_von.isoformat())
+                ).fetchall()
+
+                if mieter_rows:
+                    for m in mieter_rows:
+                        monate = self._calc_monate_im_jahr(
+                            m["einzug"], m["auszug"] or None, jahr)
+                        if monate <= 0:
+                            continue
+                        mname = f"{m['vorname'] or ''} {m['name']}".strip()
+                        # Von/Bis im Jahr berechnen
+                        try:
+                            von_d = max(_date.fromisoformat(m["einzug"]), j_von)
+                        except (ValueError, TypeError):
+                            von_d = j_von
+                        try:
+                            bis_d = min(_date.fromisoformat(m["auszug"]), j_bis) \
+                                if m["auszug"] else j_bis
+                        except (ValueError, TypeError):
+                            bis_d = j_bis
+                        # Eindeutigkeitsschlüssel: (jahr, bez, von_datum)
+                        existing = conn.execute(
+                            "SELECT id FROM wasserkosten_wohnungsdaten "
+                            "WHERE jahr=? AND wohnung_bezeichnung=? AND von_datum=?",
+                            (jahr, w["bezeichnung"], von_d.isoformat())
+                        ).fetchone()
+                        if existing:
+                            conn.execute(
+                                "UPDATE wasserkosten_wohnungsdaten SET "
+                                "eigentuemer=?, personen=?, spuelmaschinen=?, "
+                                "waschmaschinen=?, trockner_wasserkuehlung=?, "
+                                "bis_datum=?, monate=?, bemerkung=? WHERE id=?",
+                                (w["eig"], m["personen"], m["spuel"], m["wasch"], m["trockner"],
+                                 bis_d.isoformat(), monate, mname, existing["id"]))
+                            updated += 1
+                        else:
+                            conn.execute(
+                                "INSERT INTO wasserkosten_wohnungsdaten "
+                                "(jahr, wohnung_bezeichnung, eigentuemer, von_datum, bis_datum, "
+                                "personen, spuelmaschinen, waschmaschinen, "
+                                "trockner_wasserkuehlung, monate, bemerkung) "
+                                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                                (jahr, w["bezeichnung"], w["eig"],
+                                 von_d.isoformat(), bis_d.isoformat(),
+                                 m["personen"], m["spuel"], m["wasch"], m["trockner"],
+                                 monate, mname))
+                            added += 1
+                else:
+                    # Keine Mieter → Eigentümer als Leerstand, 12 Monate
+                    existing = conn.execute(
+                        "SELECT id FROM wasserkosten_wohnungsdaten "
+                        "WHERE jahr=? AND wohnung_bezeichnung=? AND "
+                        "(von_datum IS NULL OR von_datum=?)",
+                        (jahr, w["bezeichnung"], j_von.isoformat())
+                    ).fetchone()
+                    if existing:
+                        conn.execute(
+                            "UPDATE wasserkosten_wohnungsdaten SET "
+                            "eigentuemer=?, monate=12 WHERE id=?",
+                            (w["eig"], existing["id"]))
+                        updated += 1
+                    else:
+                        conn.execute(
+                            "INSERT INTO wasserkosten_wohnungsdaten "
+                            "(jahr, wohnung_bezeichnung, eigentuemer, von_datum, bis_datum, "
+                            "personen, spuelmaschinen, waschmaschinen, "
+                            "trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,1,0,1,0,12)",
+                            (jahr, w["bezeichnung"], w["eig"],
+                             j_von.isoformat(), j_bis.isoformat()))
+                        added += 1
+            conn.commit()
+        finally:
             conn.close()
-            return
-        # #63 – INSERT neue Zeilen; UPDATE vorhandene Zeilen aus Stammdaten
-        added = updated = 0
-        for w in wohnungen:
-            existing = conn.execute(
-                "SELECT id FROM wasserkosten_wohnungsdaten WHERE jahr=? AND wohnung_bezeichnung=?",
-                (jahr, w["bezeichnung"])).fetchone()
-            if existing:
-                conn.execute(
-                    "UPDATE wasserkosten_wohnungsdaten SET "
-                    "eigentuemer=?, personen=?, spuelmaschinen=?, waschmaschinen=?, "
-                    "trockner_wasserkuehlung=? "
-                    "WHERE jahr=? AND wohnung_bezeichnung=?",
-                    (w["eig"], w["personen"], w["spuel"], w["wasch"], w["trockner"],
-                     jahr, w["bezeichnung"]))
-                updated += 1
-            else:
-                conn.execute(
-                    "INSERT INTO wasserkosten_wohnungsdaten "
-                    "(jahr, wohnung_bezeichnung, eigentuemer, personen, spuelmaschinen, "
-                    "waschmaschinen, trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,?,?,12)",
-                    (jahr, w["bezeichnung"], w["eig"], w["personen"], w["spuel"], w["wasch"], w["trockner"]))
-                added += 1
-        conn.commit()
-        conn.close()
         teile = []
         if added:
             teile.append(f"{added} neu hinzugefügt")
         if updated:
-            teile.append(f"{updated} aus Stammdaten aktualisiert")
+            teile.append(f"{updated} aktualisiert")
         if teile:
             messagebox.showinfo("Aus Stamm übernommen",
-                ", ".join(teile) + ".\nBitte Werte prüfen.", parent=self)
+                ", ".join(teile) + ".\nBei Mieterwechsel wurden separate Zeilen angelegt.",
+                parent=self)
         else:
-            messagebox.showinfo("Keine Wohnungen",
-                "Keine Wohnungen in den Stammdaten gefunden.", parent=self)
+            messagebox.showinfo("Keine Änderungen",
+                "Alle Einträge bereits aktuell.", parent=self)
         self._load_punkte()
 
     # ── Tab 3: Auswertung ─────────────────────────────────────────────────────
@@ -10768,6 +11615,7 @@ class HausverwaltungApp(tk.Tk):
         ("👥", "Mieter",         MieterPage),
         ("🏦", "Kontoauszug",    KontoauszugPage),
         ("💰", "Buchhaltung",    BuchhaltungPage),
+        ("🧾", "Rechnungen",    RechnungenPage),   # #65/#66
         ("🔧", "Wartung",        WartungPage),
         ("📋", "Nebenkosten",    NebenkostenPage),
         ("🔥", "Ista-Wärme",     IstaPage),
