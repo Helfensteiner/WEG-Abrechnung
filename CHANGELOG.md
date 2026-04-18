@@ -7,6 +7,31 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.25.0] — 2026-04-18
+
+### Hinzugefügt
+- **#68 §35a EStG in RechnungDialog:** `handwerker_steuerlich`-Checkbox ist jetzt Teil des
+  Rechnungs-Dialogs (Abschnitt Beträge, nach Lohnanteil). DB-Migration
+  `ALTER TABLE rechnungen ADD COLUMN handwerker_steuerlich INTEGER DEFAULT 0`;
+  `_new_rechnung` INSERT und `_edit_rechnung` UPDATE um das neue Feld erweitert.
+- **#70 Nebenkosten-Unterkategorien Sidebar:** Ista-Wärme, Wasserkosten und Aufteilungen
+  erscheinen als eingerückte Sub-Buttons (↳) unter dem Nebenkosten-Eintrag. Die Sub-Gruppe
+  wird beim Aktivieren von Nebenkosten oder einem Sub-Punkt eingeblendet, bei anderen Seiten
+  ausgeblendet (`_nk_sub_frame` + `pack_forget`/`pack(after=)`-Toggle in `_switch()`).
+
+### Geändert
+- **#69 ZahlungDialog vereinfacht:** Sektion „Rechnungsinformationen" (rechnungsdatum,
+  rechnungsnummer, rechnungssteller, gesamtrechnungsbetrag, lohnanteil, §35a-Checkbox)
+  vollständig entfernt – diese Daten gehören zur Rechnung, nicht zur Zahlungsbuchung.
+  INSERT/UPDATE `zahlungen` auf 11 Kernspalten reduziert. Dialoghöhe 680 → 520 px.
+  Auto-Status-Logik (Betrag == Gesamtbetrag → „Geprüft") entfernt.
+- **#71 Dialog-Größen & Layout-Audit:** `BaseDialog.minsize()` jetzt dynamisch
+  (max(380, width÷2) × max(300, height÷2)); RechnungDialog von 720 auf 660 px gekürzt
+  und Grunddaten/Beträge-Sektion auf 2-Spalten-Layout umgestellt
+  (Rechnungsnummer+Steller, Datum+Fälligkeit, Brutto+Netto, MwSt%+Betrag je Zeile).
+
+---
+
 ## [0.24.0] — 2026-04-18
 
 ### Hinzugefügt

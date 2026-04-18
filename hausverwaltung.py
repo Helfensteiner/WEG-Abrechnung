@@ -94,7 +94,22 @@ from pathlib import Path
 #                 _auto_update_rechnung_status() in _new_zahlung, _edit_buchung, BuchungZuordnenDialog;
 #             #68 KI-OCR Fallback in _extrahiere_und_parse: Anthropic PDF-Vision wenn
 #                 kein ZUGFeRD erkannt (claude-haiku-4-5-20251001 mit PDFs-Beta)
-APP_VERSION = "0.24.0"
+#   0.25.0 — GH Issues #68/#69/#70/#71:
+#             #68 §35a EStG in RechnungDialog verschoben: handwerker_steuerlich
+#                 Checkbox jetzt in RechnungDialog (Beträge-Abschnitt), nicht mehr
+#                 in ZahlungDialog; DB-Migration rechnungen.handwerker_steuerlich;
+#                 INSERT/UPDATE rechnungen um handwerker_steuerlich ergänzt.
+#             #69 ZahlungDialog bereinigt: Rechnungsinformationen-Sektion entfernt
+#                 (rechnungsdatum, rechnungsnummer, rechnungssteller,
+#                 gesamtrechnungsbetrag, lohnanteil, §35a); INSERT/UPDATE zahlungen
+#                 vereinfacht (11 statt 17 Spalten); Dialoghöhe 680→520.
+#             #70 Nebenkosten-Unterkategorien in Sidebar ein-/ausklappbar:
+#                 Ista-Wärme, Wasserkosten, Aufteilungen als eingerückte Sub-Buttons
+#                 unter Nebenkosten; sub_frame wird beim Wechsel ein-/ausgeblendet.
+#             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
+#                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
+#                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
+APP_VERSION = "0.25.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -876,6 +891,7 @@ CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
         "ALTER TABLE zahlungen ADD COLUMN handwerker_steuerlich INTEGER DEFAULT 0",  # #58 §35a EStG
         "ALTER TABLE zahlungen ADD COLUMN rechnung_id INTEGER",  # #65 Mehrere Buchungen auf eine Rechnung
         "CREATE TABLE IF NOT EXISTS rechnungen (id INTEGER PRIMARY KEY AUTOINCREMENT, rechnungsnummer TEXT, rechnungssteller TEXT NOT NULL, rechnungsdatum DATE, faelligkeitsdatum DATE, betrag_brutto REAL NOT NULL DEFAULT 0, betrag_netto REAL, mwst_satz REAL DEFAULT 19.0, mwst_betrag REAL, lohnanteil REAL, kategorie TEXT, beschreibung TEXT, beleg_dateipfad TEXT, status TEXT DEFAULT 'Offen', zugferd_format TEXT, erstellt_am DATETIME DEFAULT CURRENT_TIMESTAMP)",  # #66
+        "ALTER TABLE rechnungen ADD COLUMN handwerker_steuerlich INTEGER DEFAULT 0",  # #68 §35a EStG
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_min REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_max REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN konfidenz REAL DEFAULT 0.5",
@@ -1350,13 +1366,14 @@ class BaseDialog(tk.Toplevel):
             cfg["dialog_sizes"] = cls._size_cache
             save_config(cfg)
 
-    def __init__(self, parent, title, width=500, height=520):
+    def __init__(self, parent, title, width=500, height=520, min_w=None, min_h=None):
         super().__init__(parent)
         self._dialog_key = title  # key for size persistence
         self.title(title)
         self.configure(bg=BG_CARD)
         self.resizable(True, True)
-        self.minsize(380, 300)
+        # #71 – Mindestgröße: mindestens die Hälfte der Standardgröße, min. 380×300
+        self.minsize(max(380, min_w or width // 2), max(300, min_h or height // 2))
         self.grab_set()
         self.result = None
         self._fields = {}
@@ -2967,15 +2984,12 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr,rechnungsdatum,rechnungsnummer,gesamtrechnungsbetrag,lohnanteil,handwerker_steuerlich,rechnung_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,abrechnungsrelevant,abrechnungsjahr,rechnung_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
                  v.get("status", "Geprüft"), v.get("beleg_dateipfad"),
-                 v.get("rechnungssteller") or None, v.get("abrechnungsrelevant", 1),
+                 v.get("abrechnungsrelevant", 1),
                  v.get("abrechnungsjahr") or None,
-                 v.get("rechnungsdatum") or None,  # #56
-                 v.get("rechnungsnummer") or None, v.get("gesamtrechnungsbetrag") or None,
-                 v.get("lohnanteil") or None, v.get("handwerker_steuerlich", 0),
                  v.get("rechnung_id") or None))  # #65
             _auto_update_rechnung_status(conn, v.get("rechnung_id"))  # #67
             conn.commit(); conn.close()
@@ -2998,17 +3012,14 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnungsdatum=?,rechnungsnummer=?,gesamtrechnungsbetrag=?,lohnanteil=?,handwerker_steuerlich=?,rechnung_id=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnung_id=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
                  v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"),
-                 v.get("beleg_dateipfad"), v.get("rechnungssteller") or None,
+                 v.get("beleg_dateipfad"),
                  v.get("abrechnungsrelevant", 1), v.get("abrechnungsjahr") or None,
-                 v.get("rechnungsdatum") or None,  # #56
-                 v.get("rechnungsnummer") or None, v.get("gesamtrechnungsbetrag") or None,
-                 v.get("lohnanteil") or None, v.get("handwerker_steuerlich", 0),
                  v.get("rechnung_id") or None,  # #65
-                 int(sel[0])))  # #58
+                 int(sel[0])))
             # #67 – Status beider Rechnungen aktualisieren (alt + neu)
             _neue_rechnung_id = v.get("rechnung_id") or None
             _auto_update_rechnung_status(conn, _neue_rechnung_id)
@@ -3915,7 +3926,7 @@ class BuchhaltungPage(tk.Frame):
 
 class ZahlungDialog(BaseDialog):
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Buchung", 560, 680)
+        super().__init__(parent, "Buchung", 560, 520)
         r = dict(row) if row else {}
 
         # ── Buchungsdaten (#56: Buchungsdatum klar als solches kennzeichnen) ──
@@ -3933,31 +3944,6 @@ class ZahlungDialog(BaseDialog):
                         widget_type="combo", options=["Neu", "Geprüft", "Freigegeben"])
         self._add_field("Abrechnungsjahr", "abrechnungsjahr",
                         r.get("abrechnungsjahr", "") or "")
-
-        # ── Rechnungsinformationen (#56) ──────────────────────────────────────
-        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
-        tk.Label(self._body, text="Rechnungsinformationen",
-                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(
-                     padx=20, anchor="w")
-        self._add_field("Rechnungsdatum (JJJJ-MM-TT)", "rechnungsdatum",
-                        r.get("rechnungsdatum", "") or "")   # #56
-        self._add_field("Rechnungsnummer", "rechnungsnummer",
-                        r.get("rechnungsnummer", "") or "")  # #58
-        self._add_field("Rechnungssteller", "rechnungssteller",
-                        r.get("rechnungssteller", "") or "")  # #35
-        self._add_field("Gesamtrechnungsbetrag €", "gesamtrechnungsbetrag",
-                        r.get("gesamtrechnungsbetrag", "") or "")  # #58
-        self._add_field("Lohnanteil €", "lohnanteil",
-                        r.get("lohnanteil", "") or "")  # #58
-        # §35a EStG Checkbox
-        steuerlich_frame = tk.Frame(self._body, bg=BG_CARD)
-        steuerlich_frame.pack(fill="x", padx=20, pady=(2, 4))
-        self._steuerlich_var = tk.BooleanVar(value=bool(r.get("handwerker_steuerlich", 0)))
-        tk.Checkbutton(steuerlich_frame,
-                       text="§35a EStG – Handwerkerleistung steuerlich absetzbar",
-                       variable=self._steuerlich_var,
-                       bg=BG_CARD, fg=TEXT, font=FONT_BODY,
-                       activebackground=BG_CARD, selectcolor=BG_CARD).pack(anchor="w")  # #58
 
         # #65 – Rechnung zuordnen
         tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
@@ -4381,22 +4367,8 @@ class ZahlungDialog(BaseDialog):
         v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
         # Abrechnungsrelevanz speichern
         v["abrechnungsrelevant"] = 1 if self._abr_var.get() else 0
-        # §35a EStG (#58)
-        v["handwerker_steuerlich"] = 1 if self._steuerlich_var.get() else 0
         # #65 – Rechnung-Zuordnung
         v["rechnung_id"] = self._rechnung_id_val if hasattr(self, "_rechnung_id_val") else None
-        # Auto-Status: Betrag == Gesamtrechnungsbetrag UND Belegnr == Rechnungsnummer → "Geprüft" (#58)
-        try:
-            betrag_val = abs(float(str(v.get("betrag", "") or 0).replace(",", ".")))
-            gesamtbetrag_str = str(v.get("gesamtrechnungsbetrag", "") or "").replace(",", ".").strip()
-            rgnr = str(v.get("rechnungsnummer", "") or "").strip()
-            belegnr = str(v.get("belegnr", "") or "").strip()
-            if gesamtbetrag_str and rgnr and belegnr:
-                gesamtbetrag_val = abs(float(gesamtbetrag_str))
-                if abs(betrag_val - gesamtbetrag_val) < 0.01 and rgnr == belegnr:
-                    v["status"] = "Geprüft"
-        except (ValueError, TypeError):
-            pass
         self.result = v; self.destroy()
 
 # ── Rechnungen-Hilfsfunktion (#67 – Auto-Status) ─────────────────────────────
@@ -4762,8 +4734,8 @@ class RechnungenPage(tk.Frame):
                 conn.execute(
                     "INSERT INTO rechnungen (rechnungsnummer, rechnungssteller, rechnungsdatum, "
                     "faelligkeitsdatum, betrag_brutto, betrag_netto, mwst_satz, mwst_betrag, "
-                    "lohnanteil, kategorie, beschreibung, beleg_dateipfad, status, zugferd_format) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "lohnanteil, handwerker_steuerlich, kategorie, beschreibung, beleg_dateipfad, status, zugferd_format) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (v.get("rechnungsnummer"), v.get("rechnungssteller"),
                      v.get("rechnungsdatum"), v.get("faelligkeitsdatum"),
                      float(v.get("betrag_brutto") or 0),
@@ -4771,6 +4743,7 @@ class RechnungenPage(tk.Frame):
                      float(v.get("mwst_satz") or 19),
                      float(v.get("mwst_betrag") or 0) or None,
                      float(v.get("lohnanteil") or 0) or None,
+                     v.get("handwerker_steuerlich", 0),  # #68 §35a EStG
                      v.get("kategorie"), v.get("beschreibung"),
                      v.get("beleg_dateipfad"), v.get("status", "Offen"),
                      v.get("zugferd_format")))
@@ -4799,8 +4772,9 @@ class RechnungenPage(tk.Frame):
                 conn.execute(
                     "UPDATE rechnungen SET rechnungsnummer=?, rechnungssteller=?, "
                     "rechnungsdatum=?, faelligkeitsdatum=?, betrag_brutto=?, betrag_netto=?, "
-                    "mwst_satz=?, mwst_betrag=?, lohnanteil=?, kategorie=?, beschreibung=?, "
-                    "beleg_dateipfad=?, status=?, zugferd_format=? WHERE id=?",
+                    "mwst_satz=?, mwst_betrag=?, lohnanteil=?, handwerker_steuerlich=?, "
+                    "kategorie=?, beschreibung=?, beleg_dateipfad=?, status=?, zugferd_format=? "
+                    "WHERE id=?",
                     (v.get("rechnungsnummer"), v.get("rechnungssteller"),
                      v.get("rechnungsdatum"), v.get("faelligkeitsdatum"),
                      float(v.get("betrag_brutto") or 0),
@@ -4808,6 +4782,7 @@ class RechnungenPage(tk.Frame):
                      float(v.get("mwst_satz") or 19),
                      float(v.get("mwst_betrag") or 0) or None,
                      float(v.get("lohnanteil") or 0) or None,
+                     v.get("handwerker_steuerlich", 0),  # #68 §35a EStG
                      v.get("kategorie"), v.get("beschreibung"),
                      v.get("beleg_dateipfad"), v.get("status", "Offen"),
                      v.get("zugferd_format"),  # #66 – bewahrt das Import-Format
@@ -5449,28 +5424,49 @@ class RechnungDialog(BaseDialog):
     """Dialog zum Anlegen/Bearbeiten einer Rechnung (#66)."""
 
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Rechnung" + (" bearbeiten" if row else " erfassen"), 580, 720)
+        super().__init__(parent, "Rechnung" + (" bearbeiten" if row else " erfassen"), 600, 660)
         r = row or {}
 
-        # Grunddaten
-        self._add_field("Rechnungsnummer", "rechnungsnummer", r.get("rechnungsnummer", "") or "")
-        self._add_field("Rechnungssteller *", "rechnungssteller", r.get("rechnungssteller", "") or "")
-        self._add_field("Rechnungsdatum (JJJJ-MM-TT)", "rechnungsdatum",
-                        r.get("rechnungsdatum", date.today().isoformat()) or "")
-        self._add_field("Fälligkeitsdatum (JJJJ-MM-TT)", "faelligkeitsdatum",
-                        r.get("faelligkeitsdatum", "") or "")
+        # Grunddaten – zweispaltig: Rechnungsnummer + Rechnungssteller
+        def _two_col():
+            """Hilfsfunktion: Gibt zwei gleichbreite Spalten-Frames zurück."""
+            f = tk.Frame(self._body, bg=BG_CARD); f.pack(fill="x", padx=20)
+            f.columnconfigure((0, 1), weight=1)
+            l = tk.Frame(f, bg=BG_CARD); l.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+            ri = tk.Frame(f, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6, 0), sticky="ew")
+            return l, ri
 
-        # Beträge
+        l, ri = _two_col()
+        self._add_field("Rechnungsnummer", "rechnungsnummer", r.get("rechnungsnummer", "") or "", row=l)
+        self._add_field("Rechnungssteller *", "rechnungssteller", r.get("rechnungssteller", "") or "", row=ri)
+        l, ri = _two_col()
+        self._add_field("Rechnungsdatum (JJJJ-MM-TT)", "rechnungsdatum",
+                        r.get("rechnungsdatum", date.today().isoformat()) or "", row=l)
+        self._add_field("Fälligkeitsdatum (JJJJ-MM-TT)", "faelligkeitsdatum",
+                        r.get("faelligkeitsdatum", "") or "", row=ri)
+
+        # Beträge – zweispaltig: Brutto/Netto und MwSt-Satz/Betrag #71
         tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
         tk.Label(self._body, text="Beträge",
                  bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(padx=20, anchor="w")
+        l, ri = _two_col()
         self._add_field("Betrag Brutto € *", "betrag_brutto",
-                        r.get("betrag_brutto", "") or "")
+                        r.get("betrag_brutto", "") or "", row=l)
         self._add_field("Betrag Netto €", "betrag_netto",
-                        r.get("betrag_netto", "") or "")
-        self._add_field("MwSt. %", "mwst_satz", r.get("mwst_satz", "19") or "19")
-        self._add_field("MwSt. Betrag €", "mwst_betrag", r.get("mwst_betrag", "") or "")
+                        r.get("betrag_netto", "") or "", row=ri)
+        l, ri = _two_col()
+        self._add_field("MwSt. %", "mwst_satz", r.get("mwst_satz", "19") or "19", row=l)
+        self._add_field("MwSt. Betrag €", "mwst_betrag", r.get("mwst_betrag", "") or "", row=ri)
         self._add_field("Lohnanteil € (§35a EStG)", "lohnanteil", r.get("lohnanteil", "") or "")
+        # §35a EStG Checkbox (#68)
+        steuerlich_frame = tk.Frame(self._body, bg=BG_CARD)
+        steuerlich_frame.pack(fill="x", padx=20, pady=(2, 4))
+        self._steuerlich_var = tk.BooleanVar(value=bool(r.get("handwerker_steuerlich", 0)))
+        tk.Checkbutton(steuerlich_frame,
+                       text="§35a EStG – Handwerkerleistung steuerlich absetzbar",
+                       variable=self._steuerlich_var,
+                       bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                       activebackground=BG_CARD, selectcolor=BG_CARD).pack(anchor="w")
 
         # Kategorie & Status
         tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
@@ -5550,6 +5546,7 @@ class RechnungDialog(BaseDialog):
             return
         v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
         v["zugferd_format"] = getattr(self, "_zugferd_format_val", None)  # #66
+        v["handwerker_steuerlich"] = 1 if self._steuerlich_var.get() else 0  # #68 §35a EStG
         self.result = v
         self.destroy()
 
@@ -12472,22 +12469,51 @@ class HausverwaltungApp(tk.Tk):
 
         tk.Frame(sidebar, bg="#2C3E50", height=1).pack(fill="x", padx=12)
 
-        self._nav_btns = []
+        # #70 – Nebenkosten-Unterkategorien: Ista-Wärme, Wasserkosten, Aufteilungen
+        _NK_SUB_CLASSES = {IstaPage, WasserkostenPage, AufteilungenPage}
+        _nk_idx  = next(i for i, (_, _, c) in enumerate(self.PAGES) if c == NebenkostenPage)
+        _sub_idxs = {i for i, (_, _, c) in enumerate(self.PAGES) if c in _NK_SUB_CLASSES}
+        self._nk_idx   = _nk_idx
+        self._sub_idxs = _sub_idxs
+
+        self._nav_btns = [None] * len(self.PAGES)
         nav_frame = tk.Frame(sidebar, bg=BG_SIDEBAR)
         nav_frame.pack(fill="x", pady=8)
 
+        # Sub-Frame für Nebenkosten-Unterpunkte (wird nach Nebenkosten-Button eingefügt)
+        self._nk_sub_frame = tk.Frame(nav_frame, bg=BG_SIDEBAR)
+
         for i, (icon, label, PageClass) in enumerate(self.PAGES):
-            btn = tk.Button(nav_frame,
-                text=f"  {icon}  {label}",
-                command=lambda idx=i: self._switch(idx),
-                bg=BG_SIDEBAR, fg=SIDEBAR_FG,
-                font=FONT_NAV, relief="flat", bd=0,
-                anchor="w", padx=8, pady=8,
-                activebackground="#253545",
-                activeforeground=TEXT_WHITE,
-                cursor="hand2")
-            btn.pack(fill="x", padx=8, pady=1)
-            self._nav_btns.append(btn)
+            if i in _sub_idxs:
+                # Unterpunkt: kompakteres Layout, eingerückt
+                btn = tk.Button(self._nk_sub_frame,
+                    text=f"    ↳ {icon}  {label}",
+                    command=lambda idx=i: self._switch(idx),
+                    bg=BG_SIDEBAR, fg=SIDEBAR_FG,
+                    font=("Segoe UI", 9), relief="flat", bd=0,
+                    anchor="w", padx=8, pady=6,
+                    activebackground="#253545",
+                    activeforeground=TEXT_WHITE,
+                    cursor="hand2")
+                btn.pack(fill="x", padx=(12, 8), pady=0)
+            else:
+                btn = tk.Button(nav_frame,
+                    text=f"  {icon}  {label}",
+                    command=lambda idx=i: self._switch(idx),
+                    bg=BG_SIDEBAR, fg=SIDEBAR_FG,
+                    font=FONT_NAV, relief="flat", bd=0,
+                    anchor="w", padx=8, pady=8,
+                    activebackground="#253545",
+                    activeforeground=TEXT_WHITE,
+                    cursor="hand2")
+                btn.pack(fill="x", padx=8, pady=1)
+                if i == _nk_idx:
+                    # Sub-Frame direkt nach dem Nebenkosten-Button einsetzen
+                    self._nk_sub_frame.pack(fill="x", after=btn)
+            self._nav_btns[i] = btn
+
+        # Sub-Frame initial ausblenden
+        self._nk_sub_frame.pack_forget()
 
         ver_btn = tk.Button(sidebar, text=f"v{APP_VERSION}  •  SQLite",
                             bg=BG_SIDEBAR, fg="#4A6A80", font=("Segoe UI", 8),
@@ -12511,11 +12537,21 @@ class HausverwaltungApp(tk.Tk):
         self._active = idx
         for i, btn in enumerate(self._nav_btns):
             if btn is None:
-                continue  # ausgeblendete Seite (z.B. Wasserkosten ohne Aufteilung)
+                continue  # ausgeblendete Seite
+            is_sub = hasattr(self, '_sub_idxs') and i in self._sub_idxs
             if i == idx:
                 btn.config(bg="#253545", fg=SIDEBAR_ACT)
+            elif is_sub:
+                btn.config(bg=BG_SIDEBAR, fg=SIDEBAR_FG)
             else:
                 btn.config(bg=BG_SIDEBAR, fg=SIDEBAR_FG)
+        # #70 – Nebenkosten Sub-Frame ein-/ausblenden
+        if hasattr(self, '_nk_sub_frame') and self._nk_sub_frame:
+            nk_active = idx == self._nk_idx or (hasattr(self, '_sub_idxs') and idx in self._sub_idxs)
+            if nk_active:
+                self._nk_sub_frame.pack(fill="x", after=self._nav_btns[self._nk_idx])
+            else:
+                self._nk_sub_frame.pack_forget()
         for w in self._content.winfo_children():
             w.destroy()
         _, _, PageClass = self.PAGES[idx]
