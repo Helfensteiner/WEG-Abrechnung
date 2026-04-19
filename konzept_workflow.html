@@ -227,7 +227,7 @@
     <h1>WEG-Hausverwaltung · Workflow-Konzept</h1>
     <p>Kontoauszug-Upload → Rechnungs-Upload → Zahlungsabgleich → Jahresabrechnung</p>
   </div>
-  <div class="ver-badge">v0.27 ✅ · v0.28 Planung · April 2026</div>
+  <div class="ver-badge">v0.28 ✅ · v0.29 Planung · April 2026</div>
 </header>
 
 <div class="tab-bar">
@@ -1015,7 +1015,7 @@
   </div>
 
   <div class="section">
-    <div class="section-title">Implementierungsplan: v0.28 – CAMT.052 XML + Jahresabrechnung</div>
+    <div class="section-title">Implementierungsplan: v0.28 – Dashboard KPI + CAMT.052 + HTML-Abrechnung</div>
     <div class="summary-grid">
 
       <div class="phase-card">
@@ -1060,6 +1060,75 @@
             <li>Design: WEG-Farben (BG_SIDEBAR, ACCENT), kein externes CSS nötig</li>
           </ul>
           <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~4–5 h</p>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="info-box warn" style="margin-top:16px;">
+      <strong>✅ v0.28.0 vollständig umgesetzt (2026-04-19)</strong>
+      Alle drei Issues (#80–#82) sind implementiert und in Git als <code>v0.28.0</code> getaggt.
+      Dashboard zeigt Backup-KPI · CAMT.052 XML-Import aktiv · HTML-Abrechnung via webbrowser.open().
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Implementierungsplan: v0.29 – BuchungZuordnen-UX + Kostenart-Fix (GitHub Issues)</div>
+    <div class="summary-grid">
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--blue);">🔍 GH#76 Suchfeld „Nicht zugeordnete Buchungen"</div>
+        <div class="phase-body">
+          <p>In <code>BuchungZuordnenDialog</code> zwischen dem Label und dem unteren Treeview ein Suchfeld einfügen.</p>
+          <ul>
+            <li><code>tk.Entry</code> mit <code>StringVar</code> + <code>.trace("w", ...)</code></li>
+            <li>Live-Filter: Datum, Beschreibung (Partial), Betrag, Belegnr</li>
+            <li>Kein Button nötig — filtert bei jeder Tastatureingabe</li>
+            <li>Alle Zeilen aus <code>self._alle_nicht_zugeordnet</code> gecacht, Filter auf Cache</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~1–2 h</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--darkblue);">↕️ GH#77 Click-to-Sort in beiden Treeviews</div>
+        <div class="phase-body">
+          <p>Klick auf Spaltenheader sortiert Treeview aufsteigend/absteigend, Pfeil ▲/▼ zeigt Richtung.</p>
+          <ul>
+            <li>Hilfsfunktion <code>_tv_sort(tv, col, reverse)</code> — generic, für beide Treeviews</li>
+            <li>Beide Trees: „Bereits zugeordnet" + „Nicht zugeordnet"</li>
+            <li>Toggle: zweiter Klick kehrt Richtung um</li>
+            <li>Korrekte numerische/alphanumerische Sortierung nach Spaltentyp</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~1–2 h</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--orange);">⚠️ GH#78 Differenzbeträge – Konzept (defer)</div>
+        <div class="phase-body">
+          <p>Skonto, Teilzahlungen, Währungsabweichungen beim Zuordnen abbilden. Needs Refinement vor Implementierung.</p>
+          <ul>
+            <li>Konzept: Toleranzschwelle (z.B. ≤2 % Differenz = automatisch okay)</li>
+            <li>UI: Differenz-Zeile mit Erklärfeld (Skonto / Rundung / Teilzahlung)</li>
+            <li>DB: neues Feld <code>zuordnung.differenz_betrag + differenz_grund</code></li>
+            <li>→ <strong>Zurückgestellt</strong> bis Akzeptanzkriterien vollständig</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--orange);">Status: Needs Refinement – kein Code in v0.29</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--green);">🏷 GH#79 Umlageschlüssel: Name statt Typ + Tooltip</div>
+        <div class="phase-body">
+          <p>In Buchhaltung → Kostenart → Umlageschlüssel-Dropdown den Aufteilung-<strong>Namen</strong> anzeigen statt des Typs.</p>
+          <ul>
+            <li><code>_umlageschluessel_aus_aufteilungen()</code>: <code>SELECT name, typ FROM aufteilungen</code></li>
+            <li>Dropdown zeigt <code>name</code>; intern wird <code>typ</code> gespeichert (keine DB-Änderung)</li>
+            <li>Tooltip via <code>bind("&lt;Enter&gt;")</code>: <code>tk.Toplevel</code> ohne Deko mit Name + Typ + Beschreibung</li>
+            <li>Tooltip verschwindet bei <code>&lt;Leave&gt;</code></li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~1–2 h</p>
         </div>
       </div>
 
@@ -1189,19 +1258,43 @@
         <td><strong>#80</strong></td>
         <td>Dashboard: Letztes-Backup KPI – Timestamp nach Backup in einstellungen.json, Anzeige in Dashboard-KPI-Karte</td>
         <td style="color:var(--blue);">🔵 Mittel</td>
-        <td class="td-status-miss">⚠️ → v0.28</td>
+        <td class="td-status-done">✅ v0.28.0</td>
       </tr>
       <tr>
         <td><strong>#81</strong></td>
         <td>CAMT.052 XML-Import (Sparkasse Bodensee camt.052.001.08) – KontoauszugPage Button + xml.etree Parser</td>
         <td style="color:var(--red);">🔴 Hoch</td>
-        <td class="td-status-miss">⚠️ → v0.28</td>
+        <td class="td-status-done">✅ v0.28.0</td>
       </tr>
       <tr>
         <td><strong>#82</strong></td>
         <td>HTML-Jahresabrechnung Export – NebenkostenPage Button → HTML-Datei + webbrowser.open() zum Drucken (kein PDF-Lib nötig)</td>
         <td style="color:var(--blue);">🔵 Mittel</td>
-        <td class="td-status-miss">⚠️ → v0.28</td>
+        <td class="td-status-done">✅ v0.28.0</td>
+      </tr>
+      <tr style="background:#FFF8E1;">
+        <td><strong>GH#76</strong></td>
+        <td>BuchungZuordnenDialog – Suchfeld für „Nicht zugeordnete Buchungen" (Filter nach Datum, Beschreibung, Betrag, Belegnr)</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-miss">⚠️ → v0.29</td>
+      </tr>
+      <tr style="background:#FFF8E1;">
+        <td><strong>GH#77</strong></td>
+        <td>BuchungZuordnenDialog – Click-to-Sort (▲/▼) in beiden Treeviews (Bereits zugeordnet + Nicht zugeordnet)</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-miss">⚠️ → v0.29</td>
+      </tr>
+      <tr style="background:#FFF8E1;">
+        <td><strong>GH#78</strong></td>
+        <td>BuchungZuordnenDialog – Differenzbeträge (Skonto, Teilzahlungen, Währungsabweichungen) – Konzept needed</td>
+        <td style="color:var(--orange);">🟠 Needs Refinement</td>
+        <td class="td-status-miss">⚠️ → v0.29+</td>
+      </tr>
+      <tr style="background:#FFF8E1;">
+        <td><strong>GH#79</strong></td>
+        <td>Kostenart: Umlageschlüssel-Dropdown zeigt Aufteilung-<strong>Name</strong> statt Typ + MouseOver-Tooltip mit Details</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-miss">⚠️ → v0.29</td>
       </tr>
     </table>
   </div>
@@ -1406,9 +1499,9 @@ weg_backup_20260419_143022.zip
     <div class="section-title">Prozess-Reifegrad: Jetzt vs. Ziel</div>
     <div class="card-grid" style="grid-template-columns: 1fr 1fr;">
       <div class="card" style="border-top: 3px solid var(--blue);">
-        <div class="card-head"><span class="card-icon">📍</span><div><div class="card-title">Heute (v0.27.0) – GoB-clean + ZIP-Backup</div></div></div>
+        <div class="card-head"><span class="card-icon">📍</span><div><div class="card-title">Heute (v0.28.0) – CAMT.052 XML + HTML-Abrechnung</div></div></div>
         <ul>
-          <li>CAMT.052 Import → Auto-Kategorisierung ✅</li>
+          <li>CAMT.052 XML-Import (Sparkasse) ✅</li>
           <li>Rechnung importieren (ZUGFeRD/OCR/KI) ✅</li>
           <li>Auto-Matching Kontoauszug ↔ Rechnung ✅</li>
           <li>Review-Dialog für Vorschläge ✅</li>
@@ -1416,23 +1509,24 @@ weg_backup_20260419_143022.zip
           <li>Sauberes DB-Schema (6 Waisen-Spalten entfernt) ✅</li>
           <li>Kategorie-Sync Rechnung → Zahlung ✅</li>
           <li>ZIP-Backup inkl. einstellungen.json + SHA256 ✅</li>
-          <li><strong>CAMT.052 XML-Import: noch CSV-only ⚠️</strong></li>
-          <li><strong>PDF-Jahresabrechnung: noch fehlend ❌</strong></li>
+          <li>Dashboard: Letztes-Backup KPI ✅</li>
+          <li>HTML-Jahresabrechnung (Browser-Druck → PDF) ✅</li>
+          <li><strong>BuchungZuordnen-Suchfeld: fehlt ⚠️</strong></li>
+          <li><strong>Umlageschlüssel-Name: fehlt ⚠️</strong></li>
         </ul>
-        <p style="margin-top:10px;font-size:12px;color:var(--blue);">Ca. 3–8 Min. Prüfung pro Kontoauszugsdatei</p>
+        <p style="margin-top:10px;font-size:12px;color:var(--blue);">Ca. 2–3 Min. Prüfung pro Kontoauszugsdatei</p>
       </div>
       <div class="card" style="border-top: 3px solid var(--green);">
-        <div class="card-head"><span class="card-icon">🎯</span><div><div class="card-title">Ziel (v0.28) – CAMT.052 XML + Jahresabrechnung</div></div></div>
+        <div class="card-head"><span class="card-icon">🎯</span><div><div class="card-title">Ziel (v0.29) – BuchungZuordnen-UX + Kostenart-Fix</div></div></div>
         <ul>
-          <li>Sauberes DB-Schema ✅ <em>v0.27</em></li>
-          <li>Kategorie-Sync Rechnung → Zahlung ✅ <em>v0.27</em></li>
-          <li>ZIP-Backup inkl. einstellungen.json ✅ <em>v0.27</em></li>
-          <li>Dashboard: Letztes-Backup KPI ✨ <em>v0.28</em></li>
-          <li>CAMT.052 XML-Import (Sparkasse) ✨ <em>v0.28</em></li>
-          <li>HTML-Jahresabrechnung (Browser-Druck → PDF) ✨ <em>v0.28</em></li>
+          <li>Alle v0.28-Features ✅</li>
+          <li>BuchungZuordnen: Suchfeld (GH#76) ✨ <em>v0.29</em></li>
+          <li>BuchungZuordnen: Click-to-Sort ▲/▼ (GH#77) ✨ <em>v0.29</em></li>
+          <li>Kostenart: Umlageschlüssel-Name + Tooltip (GH#79) ✨ <em>v0.29</em></li>
+          <li>Differenzbeträge / Skonto (GH#78) 🔮 <em>v0.29+</em></li>
           <li>Windows-EXE (PyInstaller) ✨ <em>v1.0</em></li>
         </ul>
-        <p style="margin-top:10px;font-size:12px;color:var(--green);">Ca. 2–3 Min. Prüfung pro Kontoauszugsdatei</p>
+        <p style="margin-top:10px;font-size:12px;color:var(--green);">Bessere UX beim Buchungen zuordnen</p>
       </div>
     </div>
   </div>
@@ -1487,10 +1581,19 @@ weg_backup_20260419_143022.zip
       </div>
 
       <div class="roadmap-item">
-        <div class="roadmap-icon">🔧</div>
+        <div class="roadmap-icon">✅</div>
         <div class="roadmap-text">
           <h4>v0.28.0 – CAMT.052 XML + Jahresabrechnung (Issues #80–#82)</h4>
           <p>#80 Dashboard Backup-KPI · #81 CAMT.052 XML-Import (Sparkasse Bodensee) · #82 HTML-Jahresabrechnung Export (Browser-Druck → PDF)</p>
+        </div>
+        <span class="roadmap-tag tag-done">✅ Fertig</span>
+      </div>
+
+      <div class="roadmap-item">
+        <div class="roadmap-icon">🔧</div>
+        <div class="roadmap-text">
+          <h4>v0.29.0 – BuchungZuordnen-UX + Kostenart-Fix (GitHub GH#76, #77, #79)</h4>
+          <p>GH#76 Suchfeld Nicht-zugeordnete Buchungen · GH#77 Click-to-Sort ▲/▼ beide Treeviews · GH#79 Umlageschlüssel zeigt Name + Tooltip · GH#78 Differenzbeträge (defer)</p>
         </div>
         <span class="roadmap-tag tag-next">🔵 Nächste Priorität</span>
       </div>
@@ -1544,8 +1647,8 @@ weg_backup_20260419_143022.zip
 </div>
 
 <footer>
-  WEG-Hausverwaltung Welte Rapp Bilgery · Konzept-Dokument v0.28 Planung · Aktualisiert April 2026 ·
-  Stack: Python · Tkinter · SQLite · CAMT.052 · ZUGFeRD · KI-OCR · v0.27 ✅ · Issues #80–#82 geplant
+  WEG-Hausverwaltung Welte Rapp Bilgery · Konzept-Dokument v0.29 Planung · Aktualisiert April 2026 ·
+  Stack: Python · Tkinter · SQLite · CAMT.052 · ZUGFeRD · KI-OCR · v0.28 ✅ · GH Issues #76–#79 geplant
 </footer>
 
 <script>

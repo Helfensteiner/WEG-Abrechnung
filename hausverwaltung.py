@@ -94,6 +94,20 @@ from pathlib import Path
 #                 _auto_update_rechnung_status() in _new_zahlung, _edit_buchung, BuchungZuordnenDialog;
 #             #68 KI-OCR Fallback in _extrahiere_und_parse: Anthropic PDF-Vision wenn
 #                 kein ZUGFeRD erkannt (claude-haiku-4-5-20251001 mit PDFs-Beta)
+#   0.29.0 — GitHub Issues GH#76/GH#77/GH#79 (BuchungZuordnen-UX + Kostenart-Fix):
+#             GH#76 Suchfeld "Nicht zugeordnete Buchungen": BuchungZuordnenDialog
+#                 hat jetzt ein Live-Suchfeld (StringVar.trace) über dem unteren
+#                 Treeview; filtert nach Datum, Beschreibung, Betrag, Belegnr;
+#                 Cache self._alle_offen bleibt nach Reload erhalten.
+#             GH#77 Click-to-Sort in beiden Treeviews: _setup_sort() richtet
+#                 Spalten-Header mit ▲/▼-Pfeil ein; _sort_tree() sortiert
+#                 numerisch (Betrag €) oder alphabetisch; toggle per zweitem Klick.
+#             GH#78 Differenzbeträge: Konzept dokumentiert in konzept_workflow.html;
+#                 Implementierung zurückgestellt (Needs Refinement).
+#             GH#79 Umlageschlüssel zeigt Name statt Typ: _umlageschluessel_aus_aufteilungen()
+#                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
+#                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
+#                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
 #   0.28.0 — GH Issues #80/#81/#82:
 #             #80 Dashboard Backup-KPI: Timestamp nach ZIP-Backup in
 #                 einstellungen.json speichern (cfg["letztes_backup"]);
@@ -146,7 +160,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.28.0"
+APP_VERSION = "0.29.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -1223,6 +1237,42 @@ def tree_empty_hint(tree, text="(Keine Einträge vorhanden)"):
         vals = [text] + [""] * (len(cols) - 1)
         tree.insert("", "end", iid="__empty__", values=vals, tags=("empty",))
         tree.tag_configure("empty", foreground=TEXT_LIGHT)
+
+
+def make_tooltip(widget, text_oder_func):
+    """GH#79 – Einfaches Tooltip-Popup (gelbes Label) für beliebige Tkinter-Widgets.
+
+    text_oder_func: str oder callable → wird bei <Enter> ausgewertet.
+    """
+    _tip = [None]
+
+    def _show(event):
+        txt = text_oder_func() if callable(text_oder_func) else text_oder_func
+        if not txt:
+            return
+        if _tip[0]:
+            return
+        tw = tk.Toplevel(widget)
+        tw.wm_overrideredirect(True)
+        x = widget.winfo_rootx() + 20
+        y = widget.winfo_rooty() + widget.winfo_height() + 4
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(tw, text=txt, bg="#FFFBE6", fg=TEXT, relief="solid", bd=1,
+                 font=FONT_SMALL, justify="left", padx=8, pady=5).pack()
+        _tip[0] = tw
+
+    def _hide(event):
+        if _tip[0]:
+            try:
+                _tip[0].destroy()
+            except Exception:
+                pass
+            _tip[0] = None
+
+    widget.bind("<Enter>", _show, add="+")
+    widget.bind("<Leave>", _hide, add="+")
+    widget.bind("<FocusOut>", _hide, add="+")
+
 
 # ── Dialog-Basis ──────────────────────────────────────────────────────────────
 
@@ -3823,25 +3873,55 @@ class BuchhaltungPage(tk.Frame):
         self._tree_wg.tag_configure("minus", foreground=DANGER)
 
     @staticmethod
-    def _umlageschluessel_aus_aufteilungen() -> list:
-        """#57 – Lädt verfügbare Umlageschlüssel aus der aufteilungen-Tabelle
-        (aktive Einträge, nach Typ geordnet). Fällt auf Basis-Liste zurück."""
-        basis = ["MEA", "Wohnfläche", "Verbrauch", "Verbrauch/Wohnfläche",
-                 "HeizKV", "Kopfanzahl", "Wasserkosten nach Punkten", "–"]
+    def _umlageschluessel_aus_aufteilungen() -> tuple:
+        """#57/#GH79 – Lädt Umlageschlüssel aus aufteilungen-Tabelle.
+
+        Gibt (namen, name_zu_typ, typ_zu_name, tooltips) zurück:
+        - namen:       Liste der Anzeige-Namen (aufteilungen.name, Basis-Typen als Fallback)
+        - name_zu_typ: dict name → typ (für Speichern)
+        - typ_zu_name: dict typ → name (für Vorbelegen beim Bearbeiten)
+        - tooltips:    dict name → Tooltip-Text (Typ + Beschreibung)
+
+        Der gespeicherte Schlüssel ist immer der Typ (für _berechne_umlageanteil).
+        """
+        basis_typen = ["MEA", "Wohnfläche", "Verbrauch", "Verbrauch/Wohnfläche",
+                       "HeizKV", "Kopfanzahl", "Wasserkosten nach Punkten", "–"]
         try:
             conn = get_db()
             try:
                 rows = conn.execute(
-                    "SELECT DISTINCT typ FROM aufteilungen WHERE aktiv=1 ORDER BY typ"
+                    "SELECT name, typ, beschreibung FROM aufteilungen WHERE aktiv=1 ORDER BY name"
                 ).fetchall()
             finally:
                 conn.close()
-            db_typen = [r["typ"] for r in rows if r["typ"]]
-            # Basis-Schlüssel + DB-Einträge (ohne Duplikate, Reihenfolge: Basis zuerst)
-            gesamt = list(dict.fromkeys(basis + db_typen))
-            return gesamt
+            name_zu_typ: dict = {}
+            typ_zu_name: dict = {}
+            tooltips: dict = {}
+            namen: list = []
+            for r in rows:
+                name = (r["name"] or "").strip() or r["typ"]
+                typ = (r["typ"] or "").strip() or name
+                desc = (r["beschreibung"] or "").strip()
+                name_zu_typ[name] = typ
+                typ_zu_name[typ] = name
+                tip = f"Typ: {typ}"
+                if desc:
+                    tip += f"\n{desc}"
+                tooltips[name] = tip
+                if name not in namen:
+                    namen.append(name)
+            # Basis-Typen ergänzen (als name = typ, falls nicht schon vorhanden)
+            for t in basis_typen:
+                if t not in typ_zu_name:
+                    name_zu_typ[t] = t
+                    typ_zu_name[t] = t
+                    tooltips[t] = f"Standard-Schlüssel: {t}"
+                    if t not in namen:
+                        namen.append(t)
+            return namen or basis_typen, name_zu_typ, typ_zu_name, tooltips
         except Exception:
-            return basis
+            basis_map = {t: t for t in basis_typen}
+            return basis_typen, basis_map, basis_map.copy(), {t: f"Standard-Schlüssel: {t}" for t in basis_typen}
 
     def _new_kostenart(self):
         """Neue benutzerdefinierte Kategorie hinzufügen."""
@@ -3866,9 +3946,13 @@ class BuchhaltungPage(tk.Frame):
         ttk.Combobox(body, textvariable=ober_var, values=ober_vals, font=FONT_BODY).pack(fill="x", ipady=4)
         tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
         schluessel_var = tk.StringVar(value="MEA")
-        ttk.Combobox(body, textvariable=schluessel_var,
-                     values=self._umlageschluessel_aus_aufteilungen(),  # #57 dynamisch aus aufteilungen
-                     font=FONT_BODY).pack(fill="x", ipady=4)
+        _namen, _name_zu_typ, _typ_zu_name, _tooltips = self._umlageschluessel_aus_aufteilungen()  # #GH79
+        schluessel_cb = ttk.Combobox(body, textvariable=schluessel_var,
+                     values=_namen,  # #GH79: zeigt Name statt Typ
+                     font=FONT_BODY)
+        schluessel_cb.pack(fill="x", ipady=4)
+        make_tooltip(schluessel_cb,  # #GH79: Tooltip mit Typ + Beschreibung
+                     lambda: _tooltips.get(schluessel_var.get(), ""))
         uml_var = tk.BooleanVar(value=False)
         tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
                        fg=TEXT, font=FONT_BODY, activebackground=BG_CARD).pack(anchor="w", pady=(8,0))
@@ -3880,18 +3964,21 @@ class BuchhaltungPage(tk.Frame):
             if name in self.KATEGORIEN:
                 messagebox.showwarning("Duplikat", f"Kategorie '{name}' existiert bereits.", parent=win)
                 return
+            # #GH79: Anzeige-Name → internen Typ übersetzen
+            angezeigter_name = schluessel_var.get()
+            typ_schluessel = _name_zu_typ.get(angezeigter_name, angezeigter_name)
             # Dynamisch hinzufügen
             self.KATEGORIEN.insert(-1, name)  # Vor "Kategorie offen"
             self.KOSTENARTEN[name] = {
                 "kategorie": ober_var.get(),
                 "umlagefaehig": uml_var.get(),
-                "schluessel": schluessel_var.get()
+                "schluessel": typ_schluessel
             }
             # Persistieren in Config
             cfg = load_config()
             custom = cfg.get("custom_kategorien", [])
             custom.append({"name": name, "kategorie": ober_var.get(),
-                          "umlagefaehig": uml_var.get(), "schluessel": schluessel_var.get()})
+                          "umlagefaehig": uml_var.get(), "schluessel": typ_schluessel})
             cfg["custom_kategorien"] = custom
             save_config(cfg)
             win.destroy()
@@ -3926,19 +4013,29 @@ class BuchhaltungPage(tk.Frame):
         ober_vals = sorted(set(m.get("kategorie", "Sonstiges") for m in self.KOSTENARTEN.values()))
         ttk.Combobox(body, textvariable=ober_var, values=ober_vals, font=FONT_BODY).pack(fill="x", ipady=4)
         tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        schluessel_var = tk.StringVar(value=meta.get("schluessel", "MEA"))
-        ttk.Combobox(body, textvariable=schluessel_var,
-                     values=self._umlageschluessel_aus_aufteilungen(),  # #57 dynamisch aus aufteilungen
-                     font=FONT_BODY).pack(fill="x", ipady=4)
+        _namen_e, _name_zu_typ_e, _typ_zu_name_e, _tooltips_e = self._umlageschluessel_aus_aufteilungen()  # #GH79
+        # #GH79: gespeicherten Typ → Anzeige-Name umrechnen (z.B. "MEA" → "Miteigentumsanteil")
+        gespeicherter_typ = meta.get("schluessel", "MEA")
+        anzeige_start = _typ_zu_name_e.get(gespeicherter_typ, gespeicherter_typ)
+        schluessel_var = tk.StringVar(value=anzeige_start)
+        schluessel_cb_e = ttk.Combobox(body, textvariable=schluessel_var,
+                     values=_namen_e,  # #GH79: zeigt Name statt Typ
+                     font=FONT_BODY)
+        schluessel_cb_e.pack(fill="x", ipady=4)
+        make_tooltip(schluessel_cb_e,  # #GH79: Tooltip mit Typ + Beschreibung
+                     lambda: _tooltips_e.get(schluessel_var.get(), ""))
         uml = meta.get("umlagefaehig", False)
         uml_var = tk.BooleanVar(value=uml if isinstance(uml, bool) else False)
         tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
                        fg=TEXT, font=FONT_BODY, activebackground=BG_CARD).pack(anchor="w", pady=(8,0))
         def _save():
+            # #GH79: Anzeige-Name → internen Typ übersetzen
+            angezeigter_name = schluessel_var.get()
+            typ_schluessel = _name_zu_typ_e.get(angezeigter_name, angezeigter_name)
             self.KOSTENARTEN[kat_name] = {
                 "kategorie": ober_var.get(),
                 "umlagefaehig": uml_var.get(),
-                "schluessel": schluessel_var.get()
+                "schluessel": typ_schluessel
             }
             win.destroy()
             self._load_kostenarten()
@@ -4831,20 +4928,31 @@ class RechnungenPage(tk.Frame):
 
 
 class BuchungZuordnenDialog(tk.Toplevel):
-    """#65 – Dialog um Buchungen einer Rechnung zuzuordnen."""
+    """#65 – Dialog um Buchungen einer Rechnung zuzuordnen.
+
+    GH#76: Suchfeld für „Nicht zugeordnete Buchungen" (Filter nach Datum/Beschreibung/Betrag/Belegnr).
+    GH#77: Click-to-Sort (▲/▼) in beiden Treeviews.
+    """
+
+    _COLS = ("Datum", "Beschreibung", "Betrag €", "Belegnr.")
+    _COL_W = (90, 220, 100, 90)
 
     def __init__(self, parent, rechnung_id: int, steller: str,
                  betrag_gesamt: float, callback=None):
         super().__init__(parent)
         self.title(f"Buchung zuordnen – {steller}")
         self.configure(bg=BG_CARD)
-        self.geometry("760x520")
+        self.geometry("780x560")
         self.grab_set()
         self._rechnung_id = rechnung_id
         self._betrag_gesamt = betrag_gesamt
         self._callback = callback
+        self._alle_offen: list = []          # #GH76: Cache für Suchfilter
+        self._such_var = tk.StringVar()      # #GH76: Suchtext
         self._build()
         self._load()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build(self):
         tk.Label(self, text="Buchungen der Rechnung zuordnen",
@@ -4854,37 +4962,116 @@ class BuchungZuordnenDialog(tk.Toplevel):
                       "(oder Zuordnung aufzuheben).",
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, anchor="w")
 
-        # Bereits zugeordnet
+        # ── Bereits zugeordnet ────────────────────────────────────────────────
         tk.Label(self, text="✅ Bereits zugeordnete Buchungen:",
                  bg=BG_CARD, fg=SUCCESS, font=("Segoe UI Semibold", 9)).pack(
                      padx=20, pady=(10, 2), anchor="w")
-        f1, self._tree_zugeord = make_table(self,
-            ("Datum", "Beschreibung", "Betrag €", "Belegnr."), height=4)
+        f1, self._tree_zugeord = make_table(self, self._COLS, height=4)
         f1.pack(fill="x", padx=20)
-        for c, w in zip(("Datum", "Beschreibung", "Betrag €", "Belegnr."), [90, 220, 100, 90]):
-            self._tree_zugeord.heading(c, text=c); self._tree_zugeord.column(c, width=w)
+        for c, w in zip(self._COLS, self._COL_W):
+            self._tree_zugeord.column(c, width=w)
         self._tree_zugeord.column("Betrag €", anchor="e")
-        self._tree_zugeord.bind("<Double-1>", lambda e: self._toggle(self._tree_zugeord, False))
+        self._tree_zugeord.bind("<Double-1>",
+                                lambda e: self._toggle(self._tree_zugeord, False))
+        # #GH77: Sortierung für zugeordnete Tabelle einrichten
+        self._setup_sort(self._tree_zugeord)
 
-        # Noch nicht zugeordnet
-        tk.Label(self, text="⬜ Nicht zugeordnete Buchungen (Doppelklick zum Zuordnen):",
-                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(
-                     padx=20, pady=(8, 2), anchor="w")
-        f2, self._tree_offen = make_table(self,
-            ("Datum", "Beschreibung", "Betrag €", "Belegnr."), height=6)
-        f2.pack(fill="both", expand=True, padx=20)
-        for c, w in zip(("Datum", "Beschreibung", "Betrag €", "Belegnr."), [90, 220, 100, 90]):
-            self._tree_offen.heading(c, text=c); self._tree_offen.column(c, width=w)
+        # ── Suchfeld (GH#76) ──────────────────────────────────────────────────
+        such_row = tk.Frame(self, bg=BG_CARD)
+        such_row.pack(fill="x", padx=20, pady=(8, 0))
+        tk.Label(such_row, text="⬜ Nicht zugeordnete Buchungen (Doppelklick zum Zuordnen):",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(side="left")
+        tk.Frame(such_row, bg=BG_CARD).pack(side="left", expand=True, fill="x")
+        tk.Label(such_row, text="🔍", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_BODY).pack(side="left", padx=(0, 2))
+        such_entry = tk.Entry(such_row, textvariable=self._such_var,
+                              width=20, font=FONT_BODY, relief="solid", bd=1)
+        such_entry.pack(side="left", pady=2)
+        self._such_var.trace("w", lambda *_: self._filter_offen())  # #GH76
+
+        # ── Nicht zugeordnet ──────────────────────────────────────────────────
+        f2, self._tree_offen = make_table(self, self._COLS, height=6)
+        f2.pack(fill="both", expand=True, padx=20, pady=(2, 0))
+        for c, w in zip(self._COLS, self._COL_W):
+            self._tree_offen.column(c, width=w)
         self._tree_offen.column("Betrag €", anchor="e")
-        self._tree_offen.bind("<Double-1>", lambda e: self._toggle(self._tree_offen, True))
+        self._tree_offen.bind("<Double-1>",
+                              lambda e: self._toggle(self._tree_offen, True))
+        # #GH77: Sortierung für offene Tabelle einrichten
+        self._setup_sort(self._tree_offen)
 
-        # Summen
+        # ── Summen & Buttons ──────────────────────────────────────────────────
         self._sum_lbl = tk.Label(self, text="", bg=BG_CARD, fg=TEXT, font=FONT_H3)
         self._sum_lbl.pack(padx=20, pady=(6, 2), anchor="w")
 
         btn_row = tk.Frame(self, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0, 12))
         make_btn(btn_row, "Schließen", self._close, color=ACCENT2).pack(side="right")
+
+    # ── GH#77: Sortierung einrichten ──────────────────────────────────────────
+
+    def _setup_sort(self, tv):
+        """GH#77 – Richtet Click-to-Sort-Handler für alle Spalten des Treeviews ein."""
+        for col in self._COLS:
+            tv.heading(col, text=col,
+                       command=lambda c=col, t=tv: self._sort_tree(t, c, False))
+
+    def _sort_tree(self, tv, col, reverse):
+        """GH#77 – Sortiert den Treeview nach Spalte col (asc/desc toggle)."""
+        children = tv.get_children("")
+        # Leere-Hinweis-Zeile herausfiltern
+        data = [(tv.set(k, col), k) for k in children if k != "__empty__"]
+        if not data:
+            return
+        if col == "Betrag €":
+            def _num_key(t):
+                try:
+                    return float(
+                        t[0].replace(".", "").replace(",", ".").replace("€", "").strip()
+                    )
+                except ValueError:
+                    return 0.0
+            data.sort(key=_num_key, reverse=reverse)
+        else:
+            data.sort(key=lambda t: t[0].lower(), reverse=reverse)
+        for idx, (_, k) in enumerate(data):
+            tv.move(k, "", idx)
+        # Headings: aktive Spalte mit Pfeil, andere zurücksetzen
+        arrow_up = " ▲"
+        arrow_down = " ▼"
+        for c in self._COLS:
+            if c == col:
+                tv.heading(c, text=c + (arrow_up if not reverse else arrow_down),
+                           command=lambda c2=c, t2=tv: self._sort_tree(t2, c2, not reverse))
+            else:
+                tv.heading(c, text=c,
+                           command=lambda c2=c, t2=tv: self._sort_tree(t2, c2, False))
+
+    # ── GH#76: Suchfilter ─────────────────────────────────────────────────────
+
+    def _filter_offen(self):
+        """GH#76 – Filtert den 'Nicht zugeordnet'-Treeview nach Suchtext."""
+        for k in self._tree_offen.get_children():
+            self._tree_offen.delete(k)
+        suchtext = self._such_var.get().strip().lower()
+        for b in self._alle_offen:
+            betrag = abs(b["betrag"] or 0)
+            datum_str = fmt_date(b["datum"]) if b["datum"] else "–"
+            desc_str = b["beschreibung"] or "–"
+            belegnr_str = b["belegnr"] or "–"
+            betrag_str = fmt_euro(betrag)
+            if suchtext and not any(
+                suchtext in s.lower()
+                for s in (datum_str, desc_str, belegnr_str, betrag_str)
+            ):
+                continue
+            self._tree_offen.insert("", "end", iid=b["id"], values=(
+                datum_str, desc_str, betrag_str, belegnr_str))
+        tree_empty_hint(self._tree_offen,
+                        "(Keine Buchungen)" if not suchtext else "(Keine Treffer)")
+        self._setup_sort(self._tree_offen)  # Sort-Handler nach Neubefüllung neu einrichten
+
+    # ── Daten laden ───────────────────────────────────────────────────────────
 
     def _load(self):
         for t in (self._tree_zugeord, self._tree_offen):
@@ -4894,12 +5081,14 @@ class BuchungZuordnenDialog(tk.Toplevel):
             zugeordnet = conn.execute(
                 "SELECT id, datum, beschreibung, betrag, belegnr FROM zahlungen "
                 "WHERE rechnung_id=? ORDER BY datum", (self._rechnung_id,)).fetchall()
-            offen = conn.execute(
+            offen_raw = conn.execute(
                 "SELECT id, datum, beschreibung, betrag, belegnr FROM zahlungen "
                 "WHERE rechnung_id IS NULL AND typ='Ausgabe' ORDER BY datum DESC LIMIT 100"
             ).fetchall()
         finally:
             conn.close()
+        # #GH76: Cache für Suchfilter
+        self._alle_offen = [dict(r) for r in offen_raw]
         total = 0.0
         for b in zugeordnet:
             betrag = abs(b["betrag"] or 0)
@@ -4907,13 +5096,9 @@ class BuchungZuordnenDialog(tk.Toplevel):
             self._tree_zugeord.insert("", "end", iid=b["id"], values=(
                 fmt_date(b["datum"]) if b["datum"] else "–",
                 b["beschreibung"] or "–", fmt_euro(betrag), b["belegnr"] or "–"))
-        for b in offen:
-            betrag = abs(b["betrag"] or 0)
-            self._tree_offen.insert("", "end", iid=b["id"], values=(
-                fmt_date(b["datum"]) if b["datum"] else "–",
-                b["beschreibung"] or "–", fmt_euro(betrag), b["belegnr"] or "–"))
         tree_empty_hint(self._tree_zugeord)
-        tree_empty_hint(self._tree_offen)
+        self._setup_sort(self._tree_zugeord)  # #GH77: Sort-Handler nach Laden
+        self._filter_offen()  # #GH76: gefiltert (re-)laden (behält Suchtext nach Reload)
         diff = self._betrag_gesamt - total
         diff_color = SUCCESS if abs(diff) < 0.01 else (DANGER if diff < -0.01 else ACCENT2)
         self._sum_lbl.config(

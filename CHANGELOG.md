@@ -7,6 +7,31 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.29.0] — 2026-04-19
+
+### Hinzugefügt
+- **GH#76 Suchfeld „Nicht zugeordnete Buchungen":** `BuchungZuordnenDialog` hat jetzt
+  ein Live-Suchfeld direkt über dem unteren Treeview. Filterung nach Datum, Beschreibung,
+  Betrag und Belegnr. bei jeder Tastatureingabe (`StringVar.trace`). Daten werden im
+  Cache `self._alle_offen` gehalten, sodass der Suchtext nach einem Reload bestehen bleibt.
+- **GH#77 Click-to-Sort in beiden Treeviews:** Klick auf einen Spalten-Header sortiert
+  den Treeview auf- oder absteigend; aktive Spalte zeigt Pfeil ▲/▼. Funktioniert in
+  beiden Tables des `BuchungZuordnenDialog` (bereits zugeordnet + nicht zugeordnet).
+  Betrags-Spalte wird numerisch sortiert, alle anderen alphanumerisch.
+- **GH#79 Umlageschlüssel: Name statt Typ + Tooltip:** `_umlageschluessel_aus_aufteilungen()`
+  gibt jetzt ein 4-Tupel `(namen, name_zu_typ, typ_zu_name, tooltips)` zurück. Die
+  Comboboxen in „Neue Kostenkategorie" und „Kategorie bearbeiten" zeigen den `name`
+  der Aufteilung (statt bisher `typ`); beim Speichern wird der `typ` intern gespeichert,
+  sodass `_berechne_umlageanteil()` unverändert funktioniert. Neues `make_tooltip()`-
+  Hilfsfunktion: Hover über die Combobox zeigt Typ + Beschreibung in einem gelben Popup.
+
+### Konzept (kein Code)
+- **GH#78 Differenzbeträge:** Skonto, Teilzahlungen und Währungsabweichungen beim
+  Buchungen-Zuordnen dokumentiert in `konzept_workflow.html`. Implementierung zurückgestellt
+  bis Akzeptanzkriterien vollständig spezifiziert sind (Needs Refinement).
+
+---
+
 ## [0.28.0] — 2026-04-19
 
 ### Hinzugefügt
