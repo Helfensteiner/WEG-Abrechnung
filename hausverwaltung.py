@@ -94,6 +94,18 @@ from pathlib import Path
 #                 _auto_update_rechnung_status() in _new_zahlung, _edit_buchung, BuchungZuordnenDialog;
 #             #68 KI-OCR Fallback in _extrahiere_und_parse: Anthropic PDF-Vision wenn
 #                 kein ZUGFeRD erkannt (claude-haiku-4-5-20251001 mit PDFs-Beta)
+#   0.28.0 — GH Issues #80/#81/#82:
+#             #80 Dashboard Backup-KPI: Timestamp nach ZIP-Backup in
+#                 einstellungen.json speichern (cfg["letztes_backup"]);
+#                 DashboardPage Zeile 3 "Datensicherung" mit Datum (grün) oder
+#                 "Kein Backup" (orange) als KPI-Kachel.
+#             #81 CAMT.052 XML-Import: bereits vollständig implementiert
+#                 (_import_xml + _parse_camt); nur Konzept-Aktualisierung.
+#             #82 HTML-Jahresabrechnung: neuer Button "🌐 HTML Export" in
+#                 NebenkostenPage §28-Tab; _export_html_weg() generiert
+#                 druckfertiges HTML (kein reportlab nötig) mit KPI-Grid,
+#                 Ausgaben- und Eigentümer-Tabelle; speichert nach
+#                 Dokumente/Abrechnungen/; öffnet automatisch im Browser.
 #   0.27.0 — GH Issues #76/#77/#78/#79:
 #             #76 DB-Cleanup: 6 Waisen-Spalten aus zahlungen entfernt
 #                 (rechnungssteller, rechnungsdatum, rechnungsnummer,
@@ -134,7 +146,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.27.0"
+APP_VERSION = "0.28.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -1700,6 +1712,34 @@ class DashboardPage(tk.Frame):
             card2.pack(side="left", padx=(0, 8), pady=4, ipadx=12, ipady=8)
             tk.Label(card2, text=wert, bg=BG_INPUT, fg=farbe, font=FONT_H2).pack()
             tk.Label(card2, text=text, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack()
+
+        # Zeile 3: #80 Backup-KPI
+        letztes_backup_raw = load_config().get("letztes_backup")
+        if letztes_backup_raw:
+            try:
+                from datetime import datetime as _dt
+                backup_dt = _dt.fromisoformat(letztes_backup_raw)
+                backup_text = backup_dt.strftime("%d.%m.%Y %H:%M")
+                backup_farbe = SUCCESS
+                backup_icon = "💾"
+            except Exception:
+                backup_text = "Fehler"
+                backup_farbe = DANGER
+                backup_icon = "⚠️"
+        else:
+            backup_text = "Kein Backup!"
+            backup_farbe = WARNING
+            backup_icon = "⚠️"
+
+        frame3 = tk.Frame(parent, bg=BG_CARD)
+        frame3.grid(row=3, column=0, columnspan=2, sticky="ew", padx=(0, 8), pady=(4, 0), ipady=6)
+        tk.Label(frame3, text="Datensicherung", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=12)
+        kpis3_frame = tk.Frame(frame3, bg=BG_CARD)
+        kpis3_frame.pack(fill="x", padx=12)
+        card3 = tk.Frame(kpis3_frame, bg=BG_INPUT, bd=0, relief="flat")
+        card3.pack(side="left", padx=(0, 8), pady=4, ipadx=12, ipady=8)
+        tk.Label(card3, text=f"{backup_icon} {backup_text}", bg=BG_INPUT, fg=backup_farbe, font=FONT_H2).pack()
+        tk.Label(card3, text="Letztes Backup", bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack()  # #80
 
 # ── Mieter-Seite ──────────────────────────────────────────────────────────────
 
@@ -5841,6 +5881,8 @@ class NebenkostenPage(tk.Frame):
         make_btn(yr_row, "🔄 Auswertung", self._load_weg).pack(side="left")
         make_btn(yr_row, "📄 PDF Export", self._export_pdf_weg,
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(8, 0))
+        make_btn(yr_row, "🌐 HTML Export", self._export_html_weg,  # #82
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(4, 0))
         make_btn(yr_row, "🔒 Abrechnung feststellen", self._abrechnung_feststellen).pack(side="left", padx=(6, 0))
         make_btn(yr_row, "📋 Festgestellte Abrechnungen", self._show_abrechnungen,
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(6, 0))
@@ -6949,6 +6991,158 @@ class NebenkostenPage(tk.Frame):
         except Exception as exc:
             messagebox.showerror("PDF-Fehler", f"PDF konnte nicht erstellt werden:\n{exc}",
                                  parent=self)
+
+    def _export_html_weg(self):
+        """#82 – HTML-Export §28 WEG Jahresabrechnung (kein reportlab nötig).
+        Erstellt eine druckfertige HTML-Datei → Browser → Strg+P → Als PDF speichern.
+        """
+        import webbrowser, tempfile
+
+        try:
+            jahr = int(self._weg_jahr.get())
+        except (ValueError, AttributeError):
+            messagebox.showwarning("Jahr", "Bitte zuerst eine Auswertung laden.", parent=self)
+            return
+
+        conn = get_db()
+        try:
+            ausgaben_rows = conn.execute(
+                "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
+                "WHERE typ='Ausgabe' AND strftime('%Y', datum)=? "
+                "GROUP BY kategorie ORDER BY s DESC", (str(jahr),)).fetchall()
+            hausgeld_rows = conn.execute(
+                "SELECT eigentuemer_id, SUM(betrag) as s FROM zahlungen "
+                "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y', datum)=? "
+                "GROUP BY eigentuemer_id", (str(jahr),)).fetchall()
+            hausgeld_gesamt = conn.execute(
+                "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
+                "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y', datum)=?",
+                (str(jahr),)).fetchone()[0] or 0
+            eigentuemer = conn.execute(
+                "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        weg_name = self._get_weg_name()
+        hg_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hausgeld_rows}
+        total_ausgaben = sum(r["s"] or 0 for r in ausgaben_rows)
+        total_einlagen = sum(r["s"] or 0 for r in ausgaben_rows
+                             if (r["kategorie"] or "") in WEG_EINLAGE_KATEGORIEN)
+        total_betrieb  = total_ausgaben - total_einlagen
+        saldo_gesamt   = hausgeld_gesamt - total_ausgaben
+        erstellt_am    = date.today().strftime("%d.%m.%Y")
+
+        def td(t, align="left", bold=False, color=""):
+            style = f"text-align:{align};"
+            if bold:   style += "font-weight:bold;"
+            if color:  style += f"color:{color};"
+            return f'<td style="{style}">{t}</td>'
+
+        # ── Ausgaben-Tabelle ──────────────────────────────────────────────────
+        ausgaben_html = ""
+        for r in ausgaben_rows:
+            kat  = r["kategorie"] or "Kategorie offen"
+            meta = WEG_KATEGORIEN.get(kat, ("Sonstiges", False, "–"))
+            typ  = "Rücklage-Einlage" if kat in WEG_EINLAGE_KATEGORIEN else "Betriebskosten"
+            ausgaben_html += f"<tr>{td(kat)}{td(meta[0])}{td(fmt_euro(r['s'] or 0), 'right')}{td(typ)}</tr>\n"
+        ausgaben_html += (f"<tr style='background:#EEEAE3;font-weight:bold'>"
+                          f"{td('Gesamt')}{td('')}{td(fmt_euro(total_ausgaben),'right',True)}{td('')}</tr>")
+
+        # ── Eigentümer-Tabelle ────────────────────────────────────────────────
+        eig_html = ""
+        for e in eigentuemer:
+            anteil_pct   = parse_float(e["anteil_prozent"]) or 0
+            kostenanteil = total_ausgaben * anteil_pct / 100
+            hg_ist       = hg_map.get(e["id"], 0)
+            saldo        = hg_ist - kostenanteil
+            name         = f"{e['vorname'] or ''} {e['name']}".strip()
+            farbe        = "#3A7D44" if saldo >= 0 else "#C0392B"
+            eig_html += (f"<tr>{td(name)}{td(f'{anteil_pct:.1f}%','right')}"
+                         f"{td(fmt_euro(kostenanteil),'right')}{td(fmt_euro(hg_ist),'right')}"
+                         f"{td(fmt_euro(saldo),'right',color=farbe)}</tr>\n")
+
+        html = f"""<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>{weg_name} – §28 WEG Jahresabrechnung {jahr}</title>
+<style>
+  @page {{ size: A4; margin: 2cm; }}
+  body {{ font-family: 'Segoe UI', Arial, sans-serif; font-size: 11pt;
+          color: #2C2C2C; background: #fff; }}
+  h1 {{ font-size: 18pt; color: #1C2B3A; margin-bottom: 4px; }}
+  h2 {{ font-size: 13pt; color: #1C2B3A; margin-top: 24px; margin-bottom: 8px;
+        border-bottom: 2px solid #C8A96E; padding-bottom: 4px; }}
+  .meta {{ color: #777; font-size: 9pt; margin-bottom: 20px; }}
+  table {{ width: 100%; border-collapse: collapse; margin-bottom: 16px; }}
+  th {{ background: #1C2B3A; color: #fff; padding: 6px 10px; text-align: left; font-size: 10pt; }}
+  td {{ padding: 5px 10px; border-bottom: 1px solid #E0DDD7; font-size: 10pt; }}
+  tr:nth-child(even) td {{ background: #F7F5F0; }}
+  .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }}
+  .kpi {{ background: #F7F5F0; border-left: 4px solid #C8A96E; padding: 10px 14px; }}
+  .kpi .val {{ font-size: 14pt; font-weight: bold; color: #1C2B3A; }}
+  .kpi .lbl {{ font-size: 9pt; color: #777; margin-top: 2px; }}
+  .saldo-pos {{ color: #3A7D44; }}
+  .saldo-neg {{ color: #C0392B; }}
+  @media print {{
+    .no-print {{ display: none; }}
+    body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+  }}
+  .print-btn {{ position: fixed; bottom: 24px; right: 24px; background: #2E6DA4;
+                color: #fff; border: none; padding: 10px 20px; border-radius: 6px;
+                cursor: pointer; font-size: 12pt; box-shadow: 0 2px 8px rgba(0,0,0,.2); }}
+</style>
+</head>
+<body>
+<h1>{weg_name}</h1>
+<h2 style="border-bottom:3px solid #C8A96E;margin-top:8px;">§28 WEG – Jahresabrechnung {jahr}</h2>
+<p class="meta">Erstellt am {erstellt_am} · Alle Beträge in Euro inkl. MwSt.</p>
+
+<div class="kpi-grid">
+  <div class="kpi"><div class="val">{fmt_euro(total_betrieb)}</div><div class="lbl">Bewirtschaftungskosten</div></div>
+  <div class="kpi"><div class="val">{fmt_euro(total_einlagen)}</div><div class="lbl">Rücklage-Einlagen</div></div>
+  <div class="kpi"><div class="val">{fmt_euro(hausgeld_gesamt)}</div><div class="lbl">Hausgeld-Einnahmen</div></div>
+  <div class="kpi"><div class="val {'saldo-pos' if saldo_gesamt >= 0 else 'saldo-neg'}">{fmt_euro(saldo_gesamt)}</div><div class="lbl">Saldo</div></div>
+</div>
+
+<h2>Ausgaben nach Kategorie</h2>
+<table>
+  <tr><th>Kategorie</th><th>Gruppe</th><th style="text-align:right">Betrag</th><th>Typ</th></tr>
+  {ausgaben_html}
+</table>
+
+<h2>Anteil pro Eigentümer (nach MEA)</h2>
+<table>
+  <tr><th>Eigentümer</th><th style="text-align:right">MEA %</th>
+      <th style="text-align:right">Kostenanteil</th>
+      <th style="text-align:right">Hausgeld (Ist)</th>
+      <th style="text-align:right">Saldo</th></tr>
+  {eig_html}
+</table>
+
+<button class="print-btn no-print" onclick="window.print()">🖨 Drucken / Als PDF speichern</button>
+</body>
+</html>"""
+
+        # Ziel-Ordner: Dokumente/Abrechnungen/
+        try:
+            abr_dir = get_pfad("pfad_dokumente", "Dokumente") / "Abrechnungen"
+            abr_dir.mkdir(parents=True, exist_ok=True)
+            pfad = abr_dir / f"WEG_§28_Jahresabrechnung_{jahr}.html"
+        except Exception:
+            # Fallback: temporäre Datei
+            tf = tempfile.NamedTemporaryFile(suffix=".html", delete=False,
+                                             prefix=f"WEG_{jahr}_")
+            pfad = Path(tf.name)
+            tf.close()
+
+        pfad.write_text(html, encoding="utf-8")
+        webbrowser.open(pfad.as_uri())
+        messagebox.showinfo("HTML Export",
+            f"Jahresabrechnung {jahr} geöffnet im Browser:\n{pfad}\n\n"
+            "Zum Speichern als PDF: Strg+P → Drucker = 'Als PDF speichern'",
+            parent=self)
 
     def _export_pdf_bgb(self):
         """PDF-Export §556 BGB Mieter-Betriebskostenabrechnung."""
@@ -10242,6 +10436,14 @@ class EinstellungenPage(tk.Frame):
                     }
                 # SHA256-Manifest
                 zf.writestr("backup_meta.json", _json.dumps(meta, ensure_ascii=False, indent=2))
+
+            # #80 – Timestamp in einstellungen.json speichern (für Dashboard-KPI)
+            try:
+                cfg = load_config()
+                cfg["letztes_backup"] = datetime.now().isoformat()
+                save_config(cfg)
+            except Exception:
+                pass
 
             messagebox.showinfo("Backup erstellt",
                 f"ZIP-Backup gespeichert:\n{zip_ziel}\n\n"

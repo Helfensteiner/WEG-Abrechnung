@@ -7,6 +7,27 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.28.0] — 2026-04-19
+
+### Hinzugefügt
+- **#80 Dashboard Backup-KPI:** Nach jedem erfolgreichen ZIP-Backup wird der
+  Zeitstempel in `einstellungen.json` unter `letztes_backup` (ISO-Format) gespeichert.
+  Dashboard zeigt eine neue Zeile „Datensicherung" mit Datum und Uhrzeit des letzten
+  Backups (grün) oder „⚠️ Kein Backup!" (orange) als KPI-Kachel.
+- **#82 HTML-Jahresabrechnung Export:** Neuer Button „🌐 HTML Export" in
+  `NebenkostenPage` Tab §28 WEG. `_export_html_weg()` generiert eine druckfertige
+  HTML-Seite (kein `reportlab` nötig) mit KPI-Grid (Bewirtschaftungskosten /
+  Rücklage-Einlagen / Hausgeld / Saldo), Ausgaben-Tabelle nach Kategorie und
+  Eigentümer-Anteil-Tabelle. Datei wird nach `Dokumente/Abrechnungen/` gespeichert
+  und öffnet automatisch im Browser. Drucken → Als PDF speichern via Browser (Strg+P).
+
+### Bestätigt vorhanden (kein neuer Code nötig)
+- **#81 CAMT.052 XML-Import:** Vollständig implementiert seit früherer Version.
+  `_import_xml()` + `_parse_camt()` unterstützen `camt.052.001.08` (Sparkasse Bodensee).
+  Button „📥 CAMT.052 XML" in KontoauszugPage bereits vorhanden.
+
+---
+
 ## [0.27.0] — 2026-04-19
 
 ### Geändert

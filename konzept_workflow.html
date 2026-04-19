@@ -227,7 +227,7 @@
     <h1>WEG-Hausverwaltung · Workflow-Konzept</h1>
     <p>Kontoauszug-Upload → Rechnungs-Upload → Zahlungsabgleich → Jahresabrechnung</p>
   </div>
-  <div class="ver-badge">v0.23.1 · April 2026</div>
+  <div class="ver-badge">v0.27 ✅ · v0.28 Planung · April 2026</div>
 </header>
 
 <div class="tab-bar">
@@ -235,6 +235,7 @@
   <button class="tab-btn" onclick="showTab('swimlane')">🏊 Swimlane-Prozess</button>
   <button class="tab-btn" onclick="showTab('matching')">🔗 Matching-Algorithmus</button>
   <button class="tab-btn" onclick="showTab('impl')">🛠 Implementierung</button>
+  <button class="tab-btn" onclick="showTab('schema')">🗄 Schema-Analyse</button>
   <button class="tab-btn" onclick="showTab('roadmap')">🗺 Roadmap</button>
 </div>
 
@@ -915,7 +916,154 @@
         <td class="td-status-miss">⚠️ Fehlt</td>
         <td>→ v0.27</td>
       </tr>
+      <tr>
+        <td><strong>#76 DB-Cleanup: Waisen-Spalten aus zahlungen entfernen</strong></td>
+        <td class="td-code">init_db() Migration + DROP COLUMN</td>
+        <td class="td-status-miss">⚠️ Geplant</td>
+        <td>→ v0.27</td>
+      </tr>
+      <tr>
+        <td><strong>#77 Beleg-Feld aus ZahlungDialog entfernen</strong></td>
+        <td class="td-code">ZahlungDialog.__init__()</td>
+        <td class="td-status-miss">⚠️ Geplant</td>
+        <td>→ v0.27</td>
+      </tr>
+      <tr>
+        <td><strong>#78 Kategorie-Sync: Rechnung → Zahlung beim Zuordnen</strong></td>
+        <td class="td-code">_uebernehmen() / BuchungZuordnenDialog</td>
+        <td class="td-status-miss">⚠️ Geplant</td>
+        <td>→ v0.27</td>
+      </tr>
+      <tr>
+        <td><strong>#79 Backup v2: ZIP mit DB + einstellungen.json</strong></td>
+        <td class="td-code">EinstellungenPage._db_backup()</td>
+        <td class="td-status-miss">⚠️ Geplant</td>
+        <td>→ v0.27</td>
+      </tr>
     </table>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Implementierungsplan: v0.27 – Schema-Bereinigung &amp; Backup</div>
+    <div class="summary-grid">
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--red);">🗑 #76 DB-Cleanup: Waisen-Spalten entfernen</div>
+        <div class="phase-body">
+          <p>In <code>zahlungen</code> existieren noch 6 Spalten aus der Ära vor v0.25 (nie mehr über UI befüllt):</p>
+          <ul>
+            <li><code>rechnungssteller</code> → jetzt in <code>rechnungen</code></li>
+            <li><code>rechnungsdatum</code> → jetzt in <code>rechnungen</code></li>
+            <li><code>rechnungsnummer</code> → jetzt in <code>rechnungen</code></li>
+            <li><code>gesamtrechnungsbetrag</code> → jetzt <code>rechnungen.betrag_brutto</code></li>
+            <li><code>lohnanteil</code> → jetzt in <code>rechnungen</code></li>
+            <li><code>handwerker_steuerlich</code> → jetzt in <code>rechnungen</code></li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Migration: SQLite &lt; 3.35 braucht CREATE TABLE new + INSERT + DROP + RENAME. SQLite ≥ 3.35 hat ALTER TABLE DROP COLUMN.</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--orange);">🧾 #77 Beleg-Feld aus ZahlungDialog entfernen</div>
+        <div class="phase-body">
+          <p>Entscheidung: Beleg-Datei lebt nur noch in <code>rechnungen.beleg_dateipfad</code>.</p>
+          <ul>
+            <li><code>ZahlungDialog</code>: Beleg-Frame + KI-Analyse-Button entfernen</li>
+            <li><code>zahlungen.beleg_dateipfad</code>: Spalte in DB bleibt (alte Daten), aber kein neuer Eintrag möglich</li>
+            <li>Buchungen ohne Rechnung: Beleg über Rechnung erfassen, dann zuordnen</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~1 h</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--blue);">🔄 #78 Kategorie-Sync Rechnung → Zahlung</div>
+        <div class="phase-body">
+          <p>Beim Zuordnen einer Rechnung zu einer Zahlung wird die Kategorie automatisch übernommen:</p>
+          <ul>
+            <li>In <code>_uebernehmen()</code> (Buchungen übernehmen aus Vorschlägen)</li>
+            <li>In <code>BuchungZuordnenDialog._on_save()</code></li>
+            <li>In <code>ZahlungDialog._on_save()</code> wenn rechnung_id gesetzt</li>
+            <li>Nur wenn <code>zahlung.kategorie</code> leer oder "Kategorie offen"</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~1–2 h</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--darkblue);">💾 #79 Backup v2: ZIP mit DB + Einstellungen</div>
+        <div class="phase-body">
+          <p>Erweitertes Backup, das alle kritischen Konfigurationsdaten enthält:</p>
+          <ul>
+            <li><code>hausverwaltung.db</code> (SQLite-Datenbank, alle Tabellen)</li>
+            <li><code>einstellungen.json</code> (IBAN, Pfade, KI-Modell, etc.)</li>
+            <li>ZIP-Archiv: <code>weg_backup_YYYYMMDD_HHMMSS.zip</code></li>
+            <li>Restore: ZIP entpacken → DB + JSON an richtige Stelle</li>
+            <li>Dashboard zeigt "Letztes Backup: TT.MM.JJJJ HH:MM"</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~2 h</p>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="info-box warn" style="margin-top:16px;">
+      <strong>✅ v0.27.0 vollständig umgesetzt (2026-04-19)</strong>
+      Alle vier Issues (#76–#79) sind implementiert und in Git als <code>v0.27.0</code> getaggt.
+      SQLite DROP COLUMN lief problemlos (SQLite 3.38+ auf Python 3.11).
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Implementierungsplan: v0.28 – CAMT.052 XML + Jahresabrechnung</div>
+    <div class="summary-grid">
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--darkblue);">💾 #80 Dashboard: Letztes-Backup KPI</div>
+        <div class="phase-body">
+          <p>Nach jedem Backup-ZIP-Erstellen wird der Timestamp in <code>einstellungen.json</code> gespeichert:</p>
+          <ul>
+            <li><code>_db_backup()</code>: nach erfolgreichem ZIP → <code>config["letztes_backup"] = datetime.now().isoformat()</code> + <code>save_config()</code></li>
+            <li>Dashboard-KPI-Karte: "💾 Letztes Backup: TT.MM.JJJJ HH:MM" (grün) oder "⚠️ Kein Backup" (orange)</li>
+            <li>KPI liest Wert aus <code>load_config().get("letztes_backup")</code></li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~30 Min.</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--red);">📄 #81 CAMT.052 XML-Import</div>
+        <div class="phase-body">
+          <p>Sparkasse Bodensee liefert Kontoauszüge als <code>camt.052.001.08</code> XML (kein CSV!).</p>
+          <ul>
+            <li>KontoauszugPage: Button "📄 CAMT.052 XML" neben bestehenden Import-Buttons</li>
+            <li>Parser: <code>xml.etree.ElementTree</code> (Stdlib, keine externen Abhängigkeiten)</li>
+            <li>Namespace: <code>urn:iso:std:iso:20022:tech:xsd:camt.052.001.08</code></li>
+            <li>Felder: <code>Ntry/Amt</code>, <code>CdtDbtInd</code>, <code>BookgDt/Dt</code>, <code>Dbtr/Nm</code>, <code>RmtInf/Ustrd</code>, IBAN aus <code>Acct/Id/IBAN</code></li>
+            <li>Duplikat-Check vor INSERT (gleiche IBAN + Datum + Betrag)</li>
+            <li>Konto-Typ aus IBAN ableiten (Rücklagen- vs. Wohngeldkonto)</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~3 h</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--green);">📊 #82 HTML-Jahresabrechnung Export</div>
+        <div class="phase-body">
+          <p>Vollständige Jahresabrechnung als HTML-Datei, druckbar als PDF via Browser (Strg+P → Als PDF speichern).</p>
+          <ul>
+            <li>NebenkostenPage: Button "📊 Jahresabrechnung exportieren"</li>
+            <li>Jahres-Picker im Dialog (aktuelles Jahr vorbelegt)</li>
+            <li>HTML-Inhalt: Einnahmen/Ausgaben pro Kategorie · Vorauszahlungs-Soll vs. Haben pro Eigentümer · Differenz/Nachzahlung</li>
+            <li>Datei speichern nach <code>Dokumente/Abrechnungen/WEG_Abrechnung_&lt;Jahr&gt;.html</code></li>
+            <li><code>webbrowser.open()</code> öffnet Datei automatisch im Browser</li>
+            <li>Design: WEG-Farben (BG_SIDEBAR, ACCENT), kein externes CSS nötig</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--light);">Aufwand: ~4–5 h</p>
+        </div>
+      </div>
+
+    </div>
   </div>
 
   <div class="section">
@@ -986,44 +1134,74 @@
   </div>
 
   <div class="section">
-    <div class="section-title">Neue GitHub Issues (Vorschlag)</div>
+    <div class="section-title">GitHub Issues: Abgeschlossen &amp; Geplant</div>
     <table>
-      <tr><th>#</th><th>Titel</th><th>Priorität</th><th>Aufwand</th></tr>
+      <tr><th>#</th><th>Titel</th><th>Priorität</th><th>Status</th></tr>
       <tr>
-        <td><strong>#69</strong></td>
-        <td>Auto-Matching: Kontoauszug ↔ Rechnung (Weighted Fuzzy Score)</td>
-        <td style="color:var(--red);">🔴 Hoch</td>
-        <td>~8 h</td>
-      </tr>
-      <tr>
-        <td><strong>#70</strong></td>
-        <td>MatchingReviewDialog: Vorschläge visuell bestätigen/ablehnen</td>
-        <td style="color:var(--red);">🔴 Hoch</td>
-        <td>~4 h</td>
-      </tr>
-      <tr>
-        <td><strong>#71</strong></td>
-        <td>kontoauszug_match_log: GoB-konformer Audit Trail</td>
-        <td style="color:var(--blue);">🔵 Mittel</td>
-        <td>~1 h</td>
+        <td><strong>#69–#71</strong></td>
+        <td>Auto-Matching Engine + MatchingReviewDialog + kontoauszug_match_log</td>
+        <td>🔴 Hoch</td>
+        <td class="td-status-done">✅ v0.24.0</td>
       </tr>
       <tr>
         <td><strong>#72</strong></td>
         <td>Dashboard KPI: Auto-Match-Rate, Offene Positionen</td>
-        <td style="color:var(--blue);">🔵 Mittel</td>
-        <td>~2 h</td>
+        <td>🔴 Hoch</td>
+        <td class="td-status-done">✅ v0.24.0</td>
       </tr>
       <tr>
-        <td><strong>#73</strong></td>
-        <td>PDF-Export: Jahresabrechnung (Einzel + Gesamt)</td>
-        <td style="color:var(--blue);">🔵 Mittel</td>
-        <td>~6 h</td>
+        <td><strong>#68–#71 (v0.25)</strong></td>
+        <td>Dialog-Bereinigung: Rechnungsfelder aus Zahlung, Nebenkosten-Nav, Fenstergrößen</td>
+        <td>🔵 Mittel</td>
+        <td class="td-status-done">✅ v0.25.0</td>
       </tr>
       <tr>
-        <td><strong>#74</strong></td>
-        <td>Einstellungen: Matching-Schwellwert konfigurierbar (Standard 80)</td>
-        <td style="color:var(--light);">⚪ Niedrig</td>
-        <td>~1 h</td>
+        <td><strong>#72–#75 (v0.26)</strong></td>
+        <td>Beleg-Archivierung, §35a Auto-Erkennung, Duplikat-Erkennung, Dialog-Größen fix</td>
+        <td>🔵 Mittel</td>
+        <td class="td-status-done">✅ v0.26.0</td>
+      </tr>
+      <tr>
+        <td><strong>#76</strong></td>
+        <td>DB-Cleanup: 6 Waisen-Spalten aus zahlungen entfernen (rechnungssteller, rechnungsdatum, rechnungsnummer, gesamtrechnungsbetrag, lohnanteil, handwerker_steuerlich)</td>
+        <td style="color:var(--red);">🔴 Hoch</td>
+        <td class="td-status-done">✅ v0.27.0</td>
+      </tr>
+      <tr>
+        <td><strong>#77</strong></td>
+        <td>ZahlungDialog: Beleg-Feld + KI-Analyse entfernen (Beleg nur über Rechnung)</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-done">✅ v0.27.0</td>
+      </tr>
+      <tr>
+        <td><strong>#78</strong></td>
+        <td>Kategorie-Sync: Beim Zuordnen einer Rechnung → kategorie auto-übernehmen via _sync_kategorie_von_rechnung()</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-done">✅ v0.27.0</td>
+      </tr>
+      <tr>
+        <td><strong>#79</strong></td>
+        <td>Backup v2: ZIP-Archiv mit DB + einstellungen.json + backup_meta.json (SHA256-Verifikation) – _db_restore() liest .zip und .db</td>
+        <td style="color:var(--red);">🔴 Hoch</td>
+        <td class="td-status-done">✅ v0.27.0</td>
+      </tr>
+      <tr>
+        <td><strong>#80</strong></td>
+        <td>Dashboard: Letztes-Backup KPI – Timestamp nach Backup in einstellungen.json, Anzeige in Dashboard-KPI-Karte</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-miss">⚠️ → v0.28</td>
+      </tr>
+      <tr>
+        <td><strong>#81</strong></td>
+        <td>CAMT.052 XML-Import (Sparkasse Bodensee camt.052.001.08) – KontoauszugPage Button + xml.etree Parser</td>
+        <td style="color:var(--red);">🔴 Hoch</td>
+        <td class="td-status-miss">⚠️ → v0.28</td>
+      </tr>
+      <tr>
+        <td><strong>#82</strong></td>
+        <td>HTML-Jahresabrechnung Export – NebenkostenPage Button → HTML-Datei + webbrowser.open() zum Drucken (kein PDF-Lib nötig)</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-miss">⚠️ → v0.28</td>
       </tr>
     </table>
   </div>
@@ -1032,7 +1210,194 @@
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════ -->
-<!--  TAB 5: ROADMAP                                                       -->
+<!--  TAB 5: SCHEMA-ANALYSE                                                -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-schema">
+<main>
+
+  <div class="section">
+    <div class="section-title">Analyse: Kontoauszug · Buchung · Rechnung – Redundanzen &amp; Entscheidungen</div>
+    <div class="info-box">
+      <strong>Grundprinzip (Three-Way-Matching)</strong>
+      Jede der drei Entitäten hat eine klar abgegrenzte Aufgabe: <strong>Kontoauszug</strong> = realer Bankbeleg, <strong>Rechnung</strong> = Verbindlichkeit (Soll-Buchung), <strong>Zahlung</strong> = Buchung im System (Ist-Buchung). Funktionen und Felder sollen <em>genau einmal</em> existieren — ohne Redundanz.
+    </div>
+
+    <table style="margin-top:16px;">
+      <tr><th>Feld / Funktion</th><th>Kontoauszug</th><th>Rechnung (rechnungen)</th><th>Buchung (zahlungen)</th><th>Entscheidung</th></tr>
+      <tr>
+        <td><strong>Betrag</strong></td>
+        <td class="td-code">betrag (Bankbuchung)</td>
+        <td class="td-code">betrag_brutto / netto / mwst</td>
+        <td class="td-code">betrag (abs. Wert)</td>
+        <td class="td-status-done">✅ Verschiedene Zwecke – alle behalten</td>
+      </tr>
+      <tr>
+        <td><strong>Datum</strong></td>
+        <td class="td-code">datum (Buchungstag Bank)</td>
+        <td class="td-code">rechnungsdatum, faelligkeitsdatum</td>
+        <td class="td-code">datum (Buchungsdatum)</td>
+        <td class="td-status-done">✅ Verschiedene Zwecke – alle behalten</td>
+      </tr>
+      <tr>
+        <td><strong>Beleg-Datei (PDF)</strong></td>
+        <td>–</td>
+        <td class="td-code">beleg_dateipfad (Rechnungs-PDF)</td>
+        <td class="td-code" style="text-decoration:line-through;color:var(--red);">beleg_dateipfad ← entfernen</td>
+        <td style="color:var(--red);font-weight:700;">🗑 #77: Beleg nur in rechnungen</td>
+      </tr>
+      <tr>
+        <td><strong>KI-Analyse Beleg</strong></td>
+        <td>–</td>
+        <td class="td-code">_browse_und_import() ZUGFeRD/OCR</td>
+        <td class="td-code" style="text-decoration:line-through;color:var(--red);">_ki_analyse_starten() ← entfernen</td>
+        <td style="color:var(--red);font-weight:700;">🗑 #77: KI-Analyse nur über Rechnung</td>
+      </tr>
+      <tr>
+        <td><strong>Kategorie</strong></td>
+        <td>vorschlag_kategorie (auto)</td>
+        <td class="td-code">kategorie</td>
+        <td class="td-code">kategorie</td>
+        <td style="color:var(--blue);font-weight:700;">🔄 #78: Bei Rechnungszuordnung auto-sync</td>
+      </tr>
+      <tr>
+        <td><strong>Beschreibung</strong></td>
+        <td class="td-code">buchungstext (Verwendungszweck)</td>
+        <td class="td-code">beschreibung</td>
+        <td class="td-code">beschreibung</td>
+        <td class="td-status-done">✅ Verschiedene Quellen – alle behalten</td>
+      </tr>
+      <tr>
+        <td><strong>rechnungssteller</strong></td>
+        <td>–</td>
+        <td class="td-code">rechnungssteller ✅</td>
+        <td class="td-code" style="text-decoration:line-through;color:var(--red);">rechnungssteller ← DROP</td>
+        <td class="td-status-done">✅ #76: Entfernt in v0.27.0</td>
+      </tr>
+      <tr>
+        <td><strong>rechnungsdatum</strong></td>
+        <td>–</td>
+        <td class="td-code">rechnungsdatum ✅</td>
+        <td class="td-code" style="text-decoration:line-through;color:var(--red);">rechnungsdatum ← DROP</td>
+        <td class="td-status-done">✅ #76: Entfernt in v0.27.0</td>
+      </tr>
+      <tr>
+        <td><strong>rechnungsnummer</strong></td>
+        <td>–</td>
+        <td class="td-code">rechnungsnummer ✅</td>
+        <td class="td-code" style="text-decoration:line-through;color:var(--red);">rechnungsnummer ← DROP</td>
+        <td class="td-status-done">✅ #76: Entfernt in v0.27.0</td>
+      </tr>
+      <tr>
+        <td><strong>gesamtrechnungsbetrag</strong></td>
+        <td>–</td>
+        <td class="td-code">betrag_brutto ✅</td>
+        <td class="td-code" style="text-decoration:line-through;color:var(--red);">gesamtrechnungsbetrag ← DROP</td>
+        <td class="td-status-done">✅ #76: Entfernt in v0.27.0</td>
+      </tr>
+      <tr>
+        <td><strong>lohnanteil / handwerker_steuerlich</strong></td>
+        <td>–</td>
+        <td class="td-code">lohnanteil, handwerker_steuerlich ✅</td>
+        <td class="td-code" style="text-decoration:line-through;color:var(--red);">lohnanteil, handwerker_steuerlich ← DROP</td>
+        <td class="td-status-done">✅ #76: Entfernt in v0.27.0</td>
+      </tr>
+      <tr>
+        <td><strong>Status</strong></td>
+        <td class="td-code">buchung_status (importiert/vorschlag/…)</td>
+        <td class="td-code">status (Offen/Teilbezahlt/Bezahlt/Storniert)</td>
+        <td class="td-code">status (Neu/Geprüft/Freigegeben)</td>
+        <td class="td-status-done">✅ Verschiedene Zwecke – alle behalten</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Backup-Analyse: Was wird gesichert?</div>
+    <table>
+      <tr><th>Asset</th><th>Inhalt</th><th>Aktueller Status</th><th>v0.27 Plan</th></tr>
+      <tr>
+        <td><strong>hausverwaltung.db</strong></td>
+        <td>Alle 30+ Tabellen: Eigentümer, Mieter, Zahlungen, Rechnungen, Kontoauszug, Matching-Log, …</td>
+        <td class="td-status-done">✅ In Backup (.db-Datei)</td>
+        <td class="td-status-done">✅ Im ZIP enthalten</td>
+      </tr>
+      <tr>
+        <td><strong>einstellungen.json</strong></td>
+        <td>IBAN, Dateipfade, KI-Modell, API-Keys, Matching-Schwellwert, custom Kategorien, Dialog-Größen</td>
+        <td class="td-status-miss">⚠️ Nicht gesichert!</td>
+        <td class="td-status-done">✅ #79: Im ZIP enthalten (v0.27.0)</td>
+      </tr>
+      <tr>
+        <td><strong>Belege/ Ordner</strong></td>
+        <td>Archivierte Rechnungs-PDFs, nach Jahr sortiert</td>
+        <td class="td-status-miss">⚠️ Nicht gesichert!</td>
+        <td style="color:var(--light);">Manuell sichern (zu groß für ZIP)</td>
+      </tr>
+      <tr>
+        <td><strong>Dokumente/ Ordner</strong></td>
+        <td>WEG-Dokumente (Protokolle, Verträge, etc.)</td>
+        <td class="td-status-miss">⚠️ Nicht gesichert!</td>
+        <td style="color:var(--light);">Manuell sichern (zu groß für ZIP)</td>
+      </tr>
+      <tr>
+        <td><strong>Kontoauszüge/ Ordner</strong></td>
+        <td>CAMT.052 XML-Quelldateien</td>
+        <td class="td-status-miss">⚠️ Nicht gesichert!</td>
+        <td style="color:var(--light);">Originale bei Bank verfügbar</td>
+      </tr>
+      <tr>
+        <td><strong>hausverwaltung.py</strong></td>
+        <td>Gesamter App-Code</td>
+        <td style="color:var(--blue);font-weight:700;">🔵 In Git gesichert</td>
+        <td style="color:var(--blue);font-weight:700;">Git reicht aus</td>
+      </tr>
+    </table>
+
+    <div class="info-box" style="margin-top:16px;border-left-color:var(--green);">
+      <strong>✅ Behoben in v0.27.0: einstellungen.json jetzt im ZIP-Backup</strong>
+      Die einstellungen.json enthält IBAN-Konfiguration, API-Keys und alle Pfad-Einstellungen.
+      Sie wird seit v0.27.0 mit SHA256-Verifikation im ZIP-Backup gesichert. _db_restore()
+      stellt beide Dateien automatisch wieder her.
+      Belege/ und Dokumente/ sollten weiterhin separat auf NAS/Cloud gesichert werden.
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Backup v2: ZIP-Format Konzept</div>
+    <div class="algo-box">
+<span class="algo-comment"># Backup ZIP-Struktur</span>
+weg_backup_20260419_143022.zip
+├── hausverwaltung.db          <span class="algo-comment"># SQLite-Datenbank</span>
+├── einstellungen.json         <span class="algo-comment"># App-Konfiguration</span>
+└── backup_meta.json           <span class="algo-comment"># Version, Datum, DB-Hash zur Verifikation</span>
+
+<span class="algo-comment"># backup_meta.json Inhalt</span>
+{
+  <span class="algo-str">"app_version"</span>: <span class="algo-str">"0.27.0"</span>,
+  <span class="algo-str">"erstellt_am"</span>: <span class="algo-str">"2026-04-19T14:30:22"</span>,
+  <span class="algo-str">"db_groesse_bytes"</span>: <span class="algo-num">204800</span>,
+  <span class="algo-str">"db_sha256"</span>: <span class="algo-str">"a1b2c3..."</span>
+}
+
+<span class="algo-comment"># Restore-Prozess</span>
+<span class="algo-key">def</span> <span class="algo-func">restore_backup</span>(zip_pfad: str):
+    <span class="algo-comment"># 1. Sicherheitskopie der aktuellen DB</span>
+    shutil.copy2(db_pfad, db_pfad + <span class="algo-str">".vor_restore.bak"</span>)
+    <span class="algo-comment"># 2. ZIP entpacken</span>
+    <span class="algo-key">with</span> zipfile.ZipFile(zip_pfad) <span class="algo-key">as</span> zf:
+        zf.extract(<span class="algo-str">"hausverwaltung.db"</span>, db_pfad.parent)
+        zf.extract(<span class="algo-str">"einstellungen.json"</span>, config_pfad.parent)
+    <span class="algo-comment"># 3. Verifikation: SHA256-Hash prüfen</span>
+    meta = json.loads(zf.read(<span class="algo-str">"backup_meta.json"</span>))
+    assert _sha256(db_pfad) == meta[<span class="algo-str">"db_sha256"</span>]
+    </div>
+  </div>
+
+</main>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!--  TAB 6: ROADMAP                                                       -->
 <!-- ══════════════════════════════════════════════════════════════════════ -->
 <div class="tab-content" id="tab-roadmap">
 <main>
@@ -1040,29 +1405,34 @@
   <div class="section">
     <div class="section-title">Prozess-Reifegrad: Jetzt vs. Ziel</div>
     <div class="card-grid" style="grid-template-columns: 1fr 1fr;">
-      <div class="card" style="border-top: 3px solid var(--orange);">
-        <div class="card-head"><span class="card-icon">📍</span><div><div class="card-title">Heute (v0.23.1) – manuell-gestützt</div></div></div>
+      <div class="card" style="border-top: 3px solid var(--blue);">
+        <div class="card-head"><span class="card-icon">📍</span><div><div class="card-title">Heute (v0.27.0) – GoB-clean + ZIP-Backup</div></div></div>
         <ul>
           <li>CAMT.052 Import → Auto-Kategorisierung ✅</li>
-          <li>Rechnung importieren (ZUGFeRD/OCR) ✅</li>
-          <li>Buchung manuell einer Rechnung zuordnen ✅</li>
-          <li>Status-Update Offen → Bezahlt ✅</li>
-          <li><strong>Kontoauszug ↔ Rechnung: vollständig manuell ❌</strong></li>
-          <li>Abrechnung: manueller Trigger ✅</li>
+          <li>Rechnung importieren (ZUGFeRD/OCR/KI) ✅</li>
+          <li>Auto-Matching Kontoauszug ↔ Rechnung ✅</li>
+          <li>Review-Dialog für Vorschläge ✅</li>
+          <li>Beleg-Archivierung /Belege/&lt;Jahr&gt;/ ✅</li>
+          <li>Sauberes DB-Schema (6 Waisen-Spalten entfernt) ✅</li>
+          <li>Kategorie-Sync Rechnung → Zahlung ✅</li>
+          <li>ZIP-Backup inkl. einstellungen.json + SHA256 ✅</li>
+          <li><strong>CAMT.052 XML-Import: noch CSV-only ⚠️</strong></li>
+          <li><strong>PDF-Jahresabrechnung: noch fehlend ❌</strong></li>
         </ul>
-        <p style="margin-top:10px;font-size:12px;color:var(--orange);">Ca. 15–30 Min. manuelle Arbeit pro Kontoauszugsdatei</p>
+        <p style="margin-top:10px;font-size:12px;color:var(--blue);">Ca. 3–8 Min. Prüfung pro Kontoauszugsdatei</p>
       </div>
       <div class="card" style="border-top: 3px solid var(--green);">
-        <div class="card-head"><span class="card-icon">🎯</span><div><div class="card-title">Ziel (v0.25) – automatisiert</div></div></div>
+        <div class="card-head"><span class="card-icon">🎯</span><div><div class="card-title">Ziel (v0.28) – CAMT.052 XML + Jahresabrechnung</div></div></div>
         <ul>
-          <li>CAMT.052 Import → Auto-Matching ≥ 80 % ✨</li>
-          <li>Rechnungen werden automatisch als bezahlt markiert ✨</li>
-          <li>Review-Queue: nur Ausnahmen manuell prüfen ✨</li>
-          <li>Audit Trail: jede Zuordnung protokolliert ✨</li>
-          <li>PDF-Jahresabrechnung auf Knopfdruck ✨</li>
-          <li>Dashboard zeigt Auto-Match-Rate als KPI ✨</li>
+          <li>Sauberes DB-Schema ✅ <em>v0.27</em></li>
+          <li>Kategorie-Sync Rechnung → Zahlung ✅ <em>v0.27</em></li>
+          <li>ZIP-Backup inkl. einstellungen.json ✅ <em>v0.27</em></li>
+          <li>Dashboard: Letztes-Backup KPI ✨ <em>v0.28</em></li>
+          <li>CAMT.052 XML-Import (Sparkasse) ✨ <em>v0.28</em></li>
+          <li>HTML-Jahresabrechnung (Browser-Druck → PDF) ✨ <em>v0.28</em></li>
+          <li>Windows-EXE (PyInstaller) ✨ <em>v1.0</em></li>
         </ul>
-        <p style="margin-top:10px;font-size:12px;color:var(--green);">Ca. 2–5 Min. Prüfung pro Kontoauszugsdatei</p>
+        <p style="margin-top:10px;font-size:12px;color:var(--green);">Ca. 2–3 Min. Prüfung pro Kontoauszugsdatei</p>
       </div>
     </div>
   </div>
@@ -1074,35 +1444,62 @@
       <div class="roadmap-item">
         <div class="roadmap-icon">✅</div>
         <div class="roadmap-text">
-          <h4>v0.23.1 – Rechnungsverwaltung &amp; GoB-Grundlage (abgeschlossen)</h4>
+          <h4>v0.23.1 – Rechnungsverwaltung &amp; GoB-Grundlage</h4>
           <p>ZUGFeRD/xRechnung/KI-OCR Import · rechnung_id FK · Auto-Status · BuchungZuordnenDialog · Wasserkosten Pro-Rata</p>
         </div>
-        <span class="roadmap-tag tag-done">Fertig</span>
+        <span class="roadmap-tag tag-done">✅ Fertig</span>
       </div>
 
       <div class="roadmap-item">
-        <div class="roadmap-icon">🔗</div>
+        <div class="roadmap-icon">✅</div>
         <div class="roadmap-text">
-          <h4>v0.24 – Auto-Matching Engine (Issues #69–#71)</h4>
-          <p>Weighted Fuzzy Score (Betrag 40% · Datum 30% · Text 30%) · MatchingReviewDialog für Vorschläge · kontoauszug_match_log Audit Trail · difflib.SequenceMatcher (stdlib, keine Deps)</p>
+          <h4>v0.24.0 – Auto-Matching Engine</h4>
+          <p>Weighted Fuzzy Score (Betrag 40% · Datum 30% · Text 30%) · MatchingReviewDialog · kontoauszug_match_log Audit Trail · Dashboard KPI</p>
         </div>
-        <span class="roadmap-tag tag-next">Nächste Priorität</span>
+        <span class="roadmap-tag tag-done">✅ Fertig</span>
       </div>
 
       <div class="roadmap-item">
-        <div class="roadmap-icon">📊</div>
+        <div class="roadmap-icon">✅</div>
         <div class="roadmap-text">
-          <h4>v0.25 – Berichte &amp; Export (Issues #72–#73)</h4>
-          <p>PDF-Jahresabrechnung Einzel + Gesamt · Dashboard KPI Auto-Match-Rate · Matching-Schwellwert in Einstellungen · Einnahmen/Ausgaben-Jahresübersicht</p>
+          <h4>v0.25.0 – Dialog-Bereinigung (Issues #68–#71)</h4>
+          <p>Rechnungsfelder aus ZahlungDialog entfernt · §35a in RechnungDialog verschoben · Nebenkosten-Unternavigation · Dialog-Größen dynamisch</p>
         </div>
-        <span class="roadmap-tag tag-next">Geplant</span>
+        <span class="roadmap-tag tag-done">✅ Fertig</span>
+      </div>
+
+      <div class="roadmap-item">
+        <div class="roadmap-icon">✅</div>
+        <div class="roadmap-text">
+          <h4>v0.26.0 – Beleg-Archivierung (Issues #72–#75)</h4>
+          <p>Dialog-Größen persistent · _beleg_archivieren() /Belege/&lt;Jahr&gt;/ · §35a auto-Erkennung aus Lohnanteil · Duplikat-Erkennung mit Versionierung</p>
+        </div>
+        <span class="roadmap-tag tag-done">✅ Fertig</span>
+      </div>
+
+      <div class="roadmap-item">
+        <div class="roadmap-icon">✅</div>
+        <div class="roadmap-text">
+          <h4>v0.27.0 – Schema-Bereinigung &amp; Backup (Issues #76–#79)</h4>
+          <p>#76 DB-Cleanup: 6 Waisen-Spalten aus zahlungen entfernt · #77 Beleg-Feld aus ZahlungDialog · #78 Kategorie-Sync Rechnung→Zahlung · #79 Backup-ZIP mit DB + einstellungen.json + SHA256</p>
+        </div>
+        <span class="roadmap-tag tag-done">✅ Fertig</span>
+      </div>
+
+      <div class="roadmap-item">
+        <div class="roadmap-icon">🔧</div>
+        <div class="roadmap-text">
+          <h4>v0.28.0 – CAMT.052 XML + Jahresabrechnung (Issues #80–#82)</h4>
+          <p>#80 Dashboard Backup-KPI · #81 CAMT.052 XML-Import (Sparkasse Bodensee) · #82 HTML-Jahresabrechnung Export (Browser-Druck → PDF)</p>
+        </div>
+        <span class="roadmap-tag tag-next">🔵 Nächste Priorität</span>
       </div>
 
       <div class="roadmap-item">
         <div class="roadmap-icon">🔮</div>
         <div class="roadmap-text">
           <h4>v1.0 – Produktionsreife</h4>
-          <p>Windows-EXE (PyInstaller) · Automatisches SQLite-Backup (OneDrive) · E-Mail-Versand SMTP · DATEV-Export für Steuerberater</p>
+          <p>Windows-EXE (PyInstaller) · Automatisches geplantes Backup · E-Mail-Versand SMTP · DATEV-Export für Steuerberater</p>
         </div>
         <span class="roadmap-tag tag-future">Zukunft</span>
       </div>
@@ -1147,8 +1544,8 @@
 </div>
 
 <footer>
-  WEG-Hausverwaltung Welte Rapp Bilgery · Konzept-Dokument v0.23.1 · Erstellt April 2026 ·
-  Stack: Python · Tkinter · SQLite · CAMT.052 · ZUGFeRD · KI-OCR
+  WEG-Hausverwaltung Welte Rapp Bilgery · Konzept-Dokument v0.28 Planung · Aktualisiert April 2026 ·
+  Stack: Python · Tkinter · SQLite · CAMT.052 · ZUGFeRD · KI-OCR · v0.27 ✅ · Issues #80–#82 geplant
 </footer>
 
 <script>
