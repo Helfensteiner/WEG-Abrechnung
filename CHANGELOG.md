@@ -7,6 +7,36 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.27.0] — 2026-04-19
+
+### Geändert
+- **#76 DB-Cleanup – Waisen-Spalten entfernt:** Sechs Spalten in `zahlungen`, die seit
+  v0.25 nie mehr über die UI befüllt wurden (`rechnungssteller`, `rechnungsdatum`,
+  `rechnungsnummer`, `gesamtrechnungsbetrag`, `lohnanteil`, `handwerker_steuerlich`),
+  werden per Migration (`ALTER TABLE … DROP COLUMN`) entfernt. SQLite ≥ 3.35.0 vorausgesetzt;
+  bei älteren Versionen wird die Migration übersprungen (try/except).
+  `NebenkostenPage`-Detailansicht stellt `rechnungssteller` jetzt per `LEFT JOIN rechnungen`
+  bereit. Ista-INSERT vereinfacht (kein redundantes `rechnungssteller`-Feld mehr).
+- **#77 ZahlungDialog bereinigt:** Beleg-Datei-Auswahl und KI-Analyse-Sektion vollständig
+  entfernt. Beleg lebt ausschließlich in `RechnungDialog` (`rechnungen.beleg_dateipfad`).
+  `INSERT`/`UPDATE zahlungen` ohne `beleg_dateipfad`. Alle KI-Hilfsmethoden entfernt
+  (`_ki_analyse_starten`, `_ki_analyse_thread`, `_ki_felder_befuellen`,
+  `_beleg_dateiname_generieren`, `_ki_fehler`).
+
+### Hinzugefügt
+- **#78 Kategorie-Sync Rechnung → Zahlung:** Neue Hilfsfunktion
+  `_sync_kategorie_von_rechnung(conn, zahlung_id, rechnung_id)` — kopiert die Kategorie
+  der zugeordneten Rechnung in die Zahlung, wenn die Zahlung noch keine eigene Kategorie hat.
+  Wird aufgerufen nach `_new_zahlung()`, `_edit_buchung()` und
+  `BuchungZuordnenDialog._toggle()` (nur bei zuordnen=True).
+- **#79 Backup v2 – ZIP-Archiv:** `_db_backup()` erstellt jetzt ein `.zip`-Archiv mit
+  `hausverwaltung.db`, `einstellungen.json` und `backup_meta.json` (JSON mit SHA256-Hashes
+  aller Dateien, Timestamp, App-Version). `_db_restore()` ist abwärtskompatibel und
+  verarbeitet sowohl `.zip`- (v2) als auch `.db`-Dateien (v1). Bei ZIP-Restore wird
+  SHA256-Integrität vor dem Schreiben geprüft.
+
+---
+
 ## [0.26.0] — 2026-04-18
 
 ### Behoben

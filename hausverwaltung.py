@@ -94,6 +94,19 @@ from pathlib import Path
 #                 _auto_update_rechnung_status() in _new_zahlung, _edit_buchung, BuchungZuordnenDialog;
 #             #68 KI-OCR Fallback in _extrahiere_und_parse: Anthropic PDF-Vision wenn
 #                 kein ZUGFeRD erkannt (claude-haiku-4-5-20251001 mit PDFs-Beta)
+#   0.27.0 — GH Issues #76/#77/#78/#79:
+#             #76 DB-Cleanup: 6 Waisen-Spalten aus zahlungen entfernt
+#                 (rechnungssteller, rechnungsdatum, rechnungsnummer,
+#                 gesamtrechnungsbetrag, lohnanteil, handwerker_steuerlich);
+#                 NebenkostenPage-Query auf LEFT JOIN rechnungen umgestellt;
+#                 Ista-INSERT vereinfacht.
+#             #77 ZahlungDialog: Beleg-Datei-Feld + KI-Analyse entfernt;
+#                 INSERT/UPDATE zahlungen ohne beleg_dateipfad.
+#             #78 Kategorie-Sync: _sync_kategorie_von_rechnung() kopiert Kategorie
+#                 der Rechnung in die Zahlung wenn Zahlung keine Kategorie hat
+#                 (aufgerufen aus _new_zahlung, _edit_buchung, BuchungZuordnenDialog).
+#             #79 Backup v2: ZIP-Archiv mit DB + einstellungen.json + backup_meta.json
+#                 (SHA256-Prüfsumme); _db_restore liest .zip und .db (abwaertskompatibel).
 #   0.26.0 — GH Issues #72/#73/#74/#75:
 #             #72 Dialog-Größen persistent: BaseDialog.destroy() überschrieben →
 #                 _persist_size() wird immer aufgerufen (auch bei Speichern/Abbrechen,
@@ -121,7 +134,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.26.0"
+APP_VERSION = "0.27.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -940,6 +953,14 @@ CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
             bestaetigt_am   TEXT,
             abgelehnt       INTEGER DEFAULT 0
         )""",
+        # v0.27.0 – #76 DB-Cleanup: Waisen-Spalten aus zahlungen entfernen
+        # (Felder existieren jetzt korrekt in rechnungen; in zahlungen nie mehr befüllt seit v0.25)
+        "ALTER TABLE zahlungen DROP COLUMN rechnungssteller",
+        "ALTER TABLE zahlungen DROP COLUMN rechnungsdatum",
+        "ALTER TABLE zahlungen DROP COLUMN rechnungsnummer",
+        "ALTER TABLE zahlungen DROP COLUMN gesamtrechnungsbetrag",
+        "ALTER TABLE zahlungen DROP COLUMN lohnanteil",
+        "ALTER TABLE zahlungen DROP COLUMN handwerker_steuerlich",
     ]:
         try:
             c.execute(sql)
@@ -3000,13 +3021,15 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,abrechnungsrelevant,abrechnungsjahr,rechnung_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,abrechnungsrelevant,abrechnungsjahr,rechnung_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
-                 v.get("status", "Geprüft"), v.get("beleg_dateipfad"),
+                 v.get("status", "Geprüft"),
                  v.get("abrechnungsrelevant", 1),
                  v.get("abrechnungsjahr") or None,
-                 v.get("rechnung_id") or None))  # #65
+                 v.get("rechnung_id") or None))  # #65 | #77 beleg_dateipfad entfernt
+            zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            _sync_kategorie_von_rechnung(conn, zahlung_id, v.get("rechnung_id"))  # #78
             _auto_update_rechnung_status(conn, v.get("rechnung_id"))  # #67
             conn.commit(); conn.close()
             if self._active_tab == "buchungen": self._load_buchungen()
@@ -3028,16 +3051,16 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnung_id=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnung_id=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
                  v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"),
-                 v.get("beleg_dateipfad"),
                  v.get("abrechnungsrelevant", 1), v.get("abrechnungsjahr") or None,
-                 v.get("rechnung_id") or None,  # #65
+                 v.get("rechnung_id") or None,  # #65 | #77 beleg_dateipfad entfernt
                  int(sel[0])))
             # #67 – Status beider Rechnungen aktualisieren (alt + neu)
             _neue_rechnung_id = v.get("rechnung_id") or None
+            _sync_kategorie_von_rechnung(conn, int(sel[0]), _neue_rechnung_id)  # #78
             _auto_update_rechnung_status(conn, _neue_rechnung_id)
             if _alte_rechnung_id and _alte_rechnung_id != _neue_rechnung_id:
                 _auto_update_rechnung_status(conn, _alte_rechnung_id)
@@ -4016,362 +4039,8 @@ class ZahlungDialog(BaseDialog):
                        variable=self._abr_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
                        activebackground=BG_CARD, selectcolor=BG_CARD).pack(anchor="w")
 
-        # ── Beleg-Datei + KI-Analyse (#35) ───────────────────────────────────
-        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
-        beleg_frame = tk.Frame(self._body, bg=BG_CARD)
-        beleg_frame.pack(fill="x", padx=20, pady=(0, 4))
-        tk.Label(beleg_frame, text="Beleg-Datei", bg=BG_CARD, fg=TEXT_LIGHT,
-                 font=FONT_SMALL).pack(anchor="w")
-        row_f = tk.Frame(beleg_frame, bg=BG_CARD)
-        row_f.pack(fill="x")
-        self._beleg_var = tk.StringVar(value=r.get("beleg_dateipfad", "") or "")
-        beleg_entry = tk.Entry(row_f, textvariable=self._beleg_var,
-                               bg=BG_INPUT, fg=TEXT, font=FONT_BODY,
-                               relief="flat", bd=0, highlightthickness=1,
-                               highlightbackground=BORDER, highlightcolor=ACCENT2)
-        beleg_entry.pack(side="left", fill="x", expand=True, ipady=5)
-        make_btn(row_f, "📂 Durchsuchen", self._browse_beleg,
-                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(6, 0))
-
-        # KI-Analyse-Button (nur sichtbar wenn KI-Assistent-Recht vorhanden)
-        # KI-Analyse-Button (#35): immer anzeigen, aber disabled wenn kein Recht (#7 fix)
-        ki_row = tk.Frame(beleg_frame, bg=BG_CARD)
-        ki_row.pack(fill="x", pady=(4, 0))
-        ki_hat_recht = hat_recht("KI-Assistent", "lesen")
-        self._ki_btn = make_btn(ki_row, "🤖 KI-Analyse starten",
-                                self._ki_analyse_starten, color=ACCENT2)
-        self._ki_btn.pack(side="left")
-        if not ki_hat_recht:
-            self._ki_btn.config(state="disabled")
-        # Modell-Auswahl (#37): Dropdown für KI-Modell direkt im Dialog
-        _cfg_tmp = load_config()
-        _modelle = KIAssistentPage._alle_ki_modelle(_cfg_tmp)
-        _aktiv = _cfg_tmp.get("ki_aktives_modell", "")
-        self._ki_modell_var = tk.StringVar(value=_aktiv if _aktiv in _modelle else (_modelle[0] if _modelle else ""))
-        _modell_combo = ttk.Combobox(ki_row, textvariable=self._ki_modell_var,
-                                     values=_modelle, state="readonly", width=30,
-                                     font=FONT_SMALL)
-        _modell_combo.pack(side="left", padx=(8, 0))
-        if not ki_hat_recht:
-            _modell_combo.config(state="disabled")
-        self._ki_status_lbl = tk.Label(ki_row,
-            text="" if ki_hat_recht else "🔒 Kein Recht für KI-Assistent",
-            bg=BG_CARD, fg=TEXT_LIGHT if ki_hat_recht else DANGER, font=FONT_SMALL)
-        self._ki_status_lbl.pack(side="left", padx=(10, 0))
-
-    def _browse_beleg(self):
-        from tkinter import filedialog
-        import shutil, os
-        # Startordner = konfigurierter Rechnungsbeleg-Ordner (#47)
-        init_dir = get_pfad("pfad_belege", "Belege")
-        path = filedialog.askopenfilename(
-            parent=self,
-            title="Beleg-Datei auswählen",
-            initialdir=str(init_dir),
-            filetypes=[
-                ("PDF-Dateien", "*.pdf"),
-                ("Bilder", "*.png *.jpg *.jpeg *.tif *.tiff"),
-                ("Alle Dateien", "*.*"),
-            ]
-        )
-        if path:
-            # Datei in den Beleg-Ordner kopieren, falls sie nicht schon dort liegt (#47)
-            beleg_ordner = str(get_pfad("pfad_belege", "Belege"))
-            if os.path.normpath(os.path.dirname(path)) != os.path.normpath(beleg_ordner):
-                ziel = os.path.join(beleg_ordner, os.path.basename(path))
-                try:
-                    if not os.path.exists(ziel):
-                        shutil.copy2(path, ziel)
-                    path = ziel
-                except Exception:
-                    pass  # Original-Pfad beibehalten wenn Kopieren fehlschlägt
-            self._beleg_var.set(path)
-
-    # ── KI-Analyse (#35) ──────────────────────────────────────────────────────
-
-    def _ki_analyse_starten(self):
-        """Startet KI-Analyse der Beleg-Datei im Hintergrund-Thread (#35)."""
-        pfad = self._beleg_var.get().strip()
-        if not pfad:
-            messagebox.showwarning("Kein Beleg", "Bitte zuerst eine Beleg-Datei auswählen.",
-                                   parent=self)
-            return
-        import os
-        if not os.path.isfile(pfad):
-            messagebox.showwarning("Datei nicht gefunden",
-                                   f"Datei nicht gefunden:\n{pfad}", parent=self)
-            return
-        # Größenprüfung: max. 20 MB (#13 fix)
-        if os.path.getsize(pfad) > 20 * 1024 * 1024:
-            messagebox.showwarning("Datei zu groß",
-                                   "Die Beleg-Datei ist zu groß (max. 20 MB für KI-Analyse).",
-                                   parent=self)
-            return
-        cfg = load_config()
-        # Modell ermitteln: zuerst aus Dialog-Dropdown (#37), dann ki_aktives_modell, dann Fallback
-        modell_auswahl = getattr(self, "_ki_modell_var", None)
-        modell_auswahl_str = modell_auswahl.get().strip() if modell_auswahl else ""
-        if modell_auswahl_str:
-            anbieter, modell = KIAssistentPage._parse_modell_auswahl(modell_auswahl_str)
-        else:
-            aktiv = cfg.get("ki_aktives_modell", "")
-            if aktiv:
-                anbieter, modell = KIAssistentPage._parse_modell_auswahl(aktiv)
-            else:
-                anbieter = cfg.get("ki_anbieter", "anthropic")
-                modell = cfg.get("ki_modell", "claude-opus-4-6") if anbieter == "anthropic" \
-                         else cfg.get("ollama_modell", "llama3.2")
-
-        if hasattr(self, "_ki_status_lbl"):
-            self._ki_status_lbl.config(text="⏳ KI analysiert …", fg=TEXT_LIGHT)
-        if hasattr(self, "_ki_btn"):
-            self._ki_btn.config(state="disabled")
-
-        threading.Thread(target=self._ki_analyse_thread,
-                         args=(pfad, anbieter, modell, cfg), daemon=True).start()
-
-    def _ki_analyse_thread(self, pfad: str, anbieter: str, modell: str, cfg: dict):
-        """Hintergrund-Thread: liest Datei, sendet an KI, parst Ergebnis (#35)."""
-        import os, base64, time as _time
-        _t0 = _time.time()
-        # KI-Training laden (#46)
-        _feld_hinweise, _system_zusatz = _lade_ki_training("Beleg-Analyse")
-        kategorien = BuchhaltungPage.aktive_kategorien()
-        ext = os.path.splitext(pfad)[1].lower()
-        try:
-            # ── Datei-Inhalt vorbereiten ──────────────────────────────────
-            if ext == ".pdf":
-                # PDF als Text extrahieren (pypdf)
-                try:
-                    import pypdf
-                    with open(pfad, "rb") as fh:
-                        reader = pypdf.PdfReader(fh)
-                        seiten_text = "\n".join(p.extract_text() or "" for p in reader.pages)
-                    inhalt_typ = "text"
-                    inhalt = seiten_text[:6000]  # max 6000 Zeichen
-                except ImportError:
-                    inhalt_typ = "text"
-                    inhalt = "(PDF konnte nicht gelesen werden – pypdf nicht installiert)"
-            elif ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
-                with open(pfad, "rb") as fh:
-                    raw = fh.read()
-                inhalt_typ = "image"
-                inhalt = base64.b64encode(raw).decode()
-                mime = "image/jpeg" if ext in (".jpg", ".jpeg") else \
-                       ("image/png" if ext == ".png" else "image/tiff")
-            else:
-                inhalt_typ = "text"
-                with open(pfad, "r", errors="replace") as fh:
-                    inhalt = fh.read(4000)
-
-            # ── KI-Prompt ────────────────────────────────────────────────
-            kat_liste = ", ".join(f'"{k}"' for k in kategorien[:30])
-            prompt = (
-                "Analysiere diesen Buchungsbeleg und extrahiere folgende Felder als JSON.\n"
-                "Antworte NUR mit einem JSON-Objekt – kein Text davor oder danach.\n\n"
-                "Felder:\n"
-                '  "datum": Rechnungsdatum im Format JJJJ-MM-TT (falls nicht gefunden: "")\n'
-                '  "belegnr": Rechnungs- oder Belegnummer (falls nicht gefunden: "")\n'
-                '  "beschreibung": kurze Beschreibung der Leistung (max. 80 Zeichen)\n'
-                f'  "kategorie": passendste Kategorie aus dieser Liste: [{kat_liste}] (oder "")\n'
-                '  "rechnungssteller": Name des Absenders/Lieferanten\n'
-                '  "betrag": Gesamtbetrag als Dezimalzahl ohne Währungssymbol (z.B. 123.45)\n\n'
-            )
-            if inhalt_typ == "text":
-                prompt += f"Belegtext:\n{inhalt}"
-            # KI-Training-Hinweise anhängen (#46)
-            if _feld_hinweise:
-                prompt += f"\n\nZusätzliche Hinweise:\n{_feld_hinweise}"
-            if _system_zusatz:
-                prompt = _system_zusatz + "\n\n" + prompt
-
-            # ── API-Aufruf ────────────────────────────────────────────────
-            antwort_text = ""
-            if anbieter == "anthropic":
-                key = cfg.get("anthropic_api_key", "").strip()
-                if not key:
-                    raise ValueError("Kein Anthropic API-Key konfiguriert.")
-                if inhalt_typ == "image":
-                    messages = [{"role": "user", "content": [
-                        {"type": "image", "source": {
-                            "type": "base64", "media_type": mime, "data": inhalt}},
-                        {"type": "text", "text": prompt}
-                    ]}]
-                else:
-                    messages = [{"role": "user", "content": prompt}]
-                payload = json.dumps({
-                    "model": modell, "max_tokens": 512,
-                    "messages": messages
-                }).encode("utf-8")
-                req = urllib.request.Request(
-                    "https://api.anthropic.com/v1/messages", data=payload,
-                    headers={"x-api-key": key, "anthropic-version": "2023-06-01",
-                             "content-type": "application/json"})
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read().decode())
-                # Robuste Fehlerbehandlung Anthropic (#18 fix)
-                try:
-                    antwort_text = data["content"][0]["text"]
-                except (KeyError, IndexError) as e:
-                    raise ValueError(f"Unerwartetes Anthropic-Antwortformat: {data}") from e
-            else:
-                # Ollama: keine Bild-Unterstützung für einfache Modelle
-                base_url = cfg.get("ollama_url", "http://localhost:11434").strip().rstrip("/")
-                # URL-Schema validieren (SSRF-Prävention, #14 fix)
-                import urllib.parse as _urlparse
-                parsed = _urlparse.urlparse(base_url)
-                if parsed.scheme not in ("http", "https"):
-                    raise ValueError(f"Ungültige Ollama-URL (nur http/https erlaubt): {base_url}")
-                msgs = [{"role": "user", "content": prompt}]
-                payload = json.dumps({"model": modell, "messages": msgs,
-                                      "stream": False}).encode("utf-8")
-                req = urllib.request.Request(f"{base_url}/api/chat", data=payload,
-                    headers={"content-type": "application/json"})
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    data = json.loads(resp.read().decode())
-                try:
-                    antwort_text = data["message"]["content"]
-                except KeyError as e:
-                    raise ValueError(f"Unerwartetes Ollama-Antwortformat: {data}") from e
-
-            # ── JSON parsen (#15 fix: Regex für verschachtelte Objekte) ────
-            import re
-            # Versuche direktes JSON-Parsing zuerst
-            try:
-                ki_daten = json.loads(antwort_text.strip())
-            except (json.JSONDecodeError, ValueError):
-                # Fallback: JSON-Block aus Fließtext extrahieren
-                json_match = re.search(r'\{.*\}', antwort_text, re.DOTALL)
-                if not json_match:
-                    raise ValueError(f"KI-Antwort enthält kein JSON:\n{antwort_text[:300]}")
-                ki_daten = json.loads(json_match.group())
-            # Keys normalisieren (Groß-/Kleinschreibung, #20 fix)
-            ki_daten = {k.lower(): v for k, v in ki_daten.items()}
-            # KI-Protokoll (#45)
-            ki_log("Beleg-Analyse", "Analyse",
-                   os.path.basename(pfad), str(ki_daten)[:500],
-                   modell, anbieter, int((_time.time() - _t0) * 1000))
-            # Widget-Check vor after()-Aufruf (#3 fix)
-            if self.winfo_exists():
-                self.after(0, lambda d=ki_daten: self._ki_felder_befuellen(d))
-
-        except Exception as ex:
-            ki_log("Beleg-Analyse", "Fehler",
-                   os.path.basename(pfad), "",
-                   modell, anbieter, int((_time.time() - _t0) * 1000), str(ex))
-            msg = str(ex)
-            if self.winfo_exists():
-                self.after(0, lambda m=msg: self._ki_fehler(m))
-
-    def _ki_felder_befuellen(self, daten: dict):
-        """Füllt Dialog-Felder mit KI-extrahierten Daten (#35)."""
-        def _set(key, val):
-            if not val:
-                return
-            w = self._fields.get(key)
-            if not w:
-                return
-            if hasattr(w, "set"):
-                w.set(str(val))
-            elif hasattr(w, "delete"):
-                w.delete(0, "end")
-                w.insert(0, str(val))
-
-        if daten.get("datum"):
-            # #58: Datum nur befüllen wenn noch leer
-            _datum_w = self._fields.get("datum")
-            _datum_aktuell = ""
-            if _datum_w and hasattr(_datum_w, "get"):
-                _datum_aktuell = _datum_w.get().strip() if not hasattr(_datum_w, "index") \
-                                 else _datum_w.get("1.0", "end-1c").strip()
-            if not _datum_aktuell:
-                # ISO-Format (YYYY-MM-DD) direkt übernehmen, kein parse_datum nötig (#16 fix)
-                raw_datum = str(daten["datum"]).strip()
-                import re as _re
-                if _re.match(r'^\d{4}-\d{2}-\d{2}$', raw_datum):
-                    _set("datum", raw_datum)
-                else:
-                    # Fallback: parse_datum für andere Formate
-                    _set("datum", parse_datum(raw_datum) or raw_datum)
-        if daten.get("belegnr"):
-            _set("belegnr", daten["belegnr"])
-        # Beschreibung NUR befüllen wenn Feld leer (#37: nicht überschreiben)
-        if daten.get("beschreibung"):
-            w_beschr = self._fields.get("beschreibung")
-            aktuell = ""
-            if w_beschr and hasattr(w_beschr, "get"):
-                aktuell = w_beschr.get().strip() if not hasattr(w_beschr, "index") \
-                          else w_beschr.get("1.0", "end-1c").strip()
-            if not aktuell:
-                _set("beschreibung", daten["beschreibung"])
-        if daten.get("kategorie"):
-            kat = str(daten["kategorie"])
-            if kat in BuchhaltungPage.aktive_kategorien():
-                _set("kategorie", kat)
-        if daten.get("rechnungssteller"):
-            _set("rechnungssteller", daten["rechnungssteller"])
-            # Lernfunktion: Buchungsregel anlegen (#35, #5 fix: Typ aus Formular lesen)
-            typ_w = self._fields.get("typ")
-            buchungs_typ = typ_w.get() if typ_w and hasattr(typ_w, "get") else "Ausgabe"
-            lerne_buchung(daten["rechnungssteller"],
-                          daten.get("kategorie", ""),
-                          buchungs_typ,
-                          "Wohngeldkonto",
-                          ist_korrektur=False)
-            # Dateiname generieren: YYYY-MM-TT_Rechnungssteller_Zähler
-            self._beleg_dateiname_generieren(daten)
-        if daten.get("betrag"):
-            # #58: Betrag nur befüllen wenn noch leer (0 zählt als leer)
-            _betrag_w = self._fields.get("betrag")
-            _betrag_aktuell = ""
-            if _betrag_w and hasattr(_betrag_w, "get"):
-                _betrag_aktuell = _betrag_w.get().strip() if not hasattr(_betrag_w, "index") \
-                                  else _betrag_w.get("1.0", "end-1c").strip()
-            if not _betrag_aktuell or _betrag_aktuell in ("0", "0.0", "0,0", "0.00", "0,00"):
-                try:
-                    _set("betrag", abs(float(str(daten["betrag"]).replace(",", "."))))
-                except Exception:
-                    pass
-
-        if hasattr(self, "_ki_status_lbl"):
-            self._ki_status_lbl.config(text="✅ KI-Analyse abgeschlossen", fg=SUCCESS)
-        if hasattr(self, "_ki_btn"):
-            self._ki_btn.config(state="normal")
-
-    def _beleg_dateiname_generieren(self, daten: dict):
-        """Generiert Dateiname: YYYY-MM-TT_Rechnungssteller_N (#35).
-        Zielordner ist der konfigurierte Beleg-Ordner (#47)."""
-        import os, re
-        pfad = self._beleg_var.get().strip()
-        if not pfad:
-            return
-        datum = daten.get("datum", date.today().isoformat()) or date.today().isoformat()
-        steller = re.sub(r'[^\w\- ]', '', daten.get("rechnungssteller", "Unbekannt"))
-        steller = steller.strip().replace(" ", "_")[:30]
-        # Zielordner: konfigurierter Beleg-Ordner (#47), Fallback: Ordner der Quelldatei
-        beleg_ordner = str(get_pfad("pfad_belege", "Belege"))
-        verz = beleg_ordner if os.path.isdir(beleg_ordner) else os.path.dirname(pfad)
-        ext = os.path.splitext(pfad)[1]
-        zaehler = 1
-        while True:
-            neu = os.path.join(verz, f"{datum}_{steller}_{zaehler:02d}{ext}")
-            if not os.path.exists(neu) or neu == pfad:
-                break
-            zaehler += 1
-        try:
-            if pfad != neu:
-                import shutil
-                shutil.copy2(pfad, neu)
-            self._beleg_var.set(neu)
-        except Exception:
-            pass  # Umbenennung optional
-
-    def _ki_fehler(self, msg: str):
-        if hasattr(self, "_ki_status_lbl"):
-            self._ki_status_lbl.config(text=f"❌ Fehler: {msg[:60]}", fg=DANGER)
-        if hasattr(self, "_ki_btn"):
-            self._ki_btn.config(state="normal")
-        messagebox.showerror("KI-Fehler", f"KI-Analyse fehlgeschlagen:\n{msg}", parent=self)
+        # #77 – Beleg-Feld + KI-Analyse entfernt: Beleg lebt jetzt ausschließlich in
+        # RechnungDialog (rechnungen.beleg_dateipfad). Zahlung hat keinen eigenen Beleg mehr.
 
     def _on_save(self):
         v = self._get_values()
@@ -4380,7 +4049,6 @@ class ZahlungDialog(BaseDialog):
         # Normalisiere Datum
         if v.get("datum"):
             v["datum"] = parse_datum(v["datum"])
-        v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
         # Abrechnungsrelevanz speichern
         v["abrechnungsrelevant"] = 1 if self._abr_var.get() else 0
         # #65 – Rechnung-Zuordnung
@@ -4471,6 +4139,29 @@ def _auto_update_rechnung_status(conn, rechnung_id):
                      (neuer_status, rechnung_id))
     except Exception:
         pass  # Fehler beim Status-Update sollen die Hauptoperation nicht blockieren
+
+
+def _sync_kategorie_von_rechnung(conn, zahlung_id, rechnung_id):
+    """#78 – Übernimmt die Kategorie der Rechnung in die Zahlung, falls die Zahlung
+    noch keine eigene Kategorie hat.
+
+    Wird aufgerufen nach INSERT/UPDATE von zahlungen.rechnung_id, damit Buchungen
+    die Kostenart der verknüpften Rechnung erben (GoB-Konformität: gleiche Konten).
+    """
+    if not zahlung_id or not rechnung_id:
+        return
+    try:
+        z_row = conn.execute(
+            "SELECT kategorie FROM zahlungen WHERE id=?", (zahlung_id,)).fetchone()
+        r_row = conn.execute(
+            "SELECT kategorie FROM rechnungen WHERE id=?", (rechnung_id,)).fetchone()
+        if not z_row or not r_row:
+            return
+        if not (z_row["kategorie"] or "").strip() and (r_row["kategorie"] or "").strip():
+            conn.execute("UPDATE zahlungen SET kategorie=? WHERE id=?",
+                         (r_row["kategorie"], zahlung_id))
+    except Exception:
+        pass  # Kategorie-Sync soll die Hauptoperation nie blockieren
 
 
 # ── Auto-Matching (#69/#70/#71) ───────────────────────────────────────────────
@@ -5200,6 +4891,7 @@ class BuchungZuordnenDialog(tk.Toplevel):
             if zuordnen:
                 conn.execute("UPDATE zahlungen SET rechnung_id=? WHERE id=?",
                              (self._rechnung_id, zahlung_id))
+                _sync_kategorie_von_rechnung(conn, zahlung_id, self._rechnung_id)  # #78
             else:
                 conn.execute("UPDATE zahlungen SET rechnung_id=NULL WHERE id=?",
                              (zahlung_id,))
@@ -7016,9 +6708,12 @@ class NebenkostenPage(tk.Frame):
         conn = get_db()
         try:
             rows = conn.execute(
-                "SELECT datum, beschreibung, rechnungssteller, betrag, abrechnungsrelevant "
-                "FROM zahlungen WHERE typ='Ausgabe' AND kategorie=? AND strftime('%Y',datum)=? "
-                "ORDER BY datum",
+                "SELECT z.datum, z.beschreibung, "
+                "  COALESCE(r.rechnungssteller, '') AS rechnungssteller, "
+                "  z.betrag, z.abrechnungsrelevant "
+                "FROM zahlungen z LEFT JOIN rechnungen r ON z.rechnung_id = r.id "
+                "WHERE z.typ='Ausgabe' AND z.kategorie=? AND strftime('%Y',z.datum)=? "
+                "ORDER BY z.datum",
                 (kategorie, str(jahr))
             ).fetchall()
         finally:
@@ -10498,51 +10193,144 @@ class EinstellungenPage(tk.Frame):
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.\n" + str(CONFIG_PATH))
 
     def _db_backup(self):
-        """#30 Backup erstellen: Datenbank in Backup-Ordner kopieren."""
-        import shutil
+        """#79 Backup v2: ZIP-Archiv mit DB + einstellungen.json + SHA256-Metadaten."""
+        import hashlib, zipfile, json as _json
         backup_ordner = self._vars.get("pfad_backup", tk.StringVar()).get().strip()
         if not backup_ordner:
             backup_ordner = str(Path.home())
             messagebox.showinfo("Backup-Ordner",
                 "Kein Backup-Ordner konfiguriert. Backup wird im Home-Verzeichnis gespeichert.",
                 parent=self)
+
+        db_path = Path(get_db_path())
+        einst_path = CONFIG_PATH  # Path-Objekt
+
+        def sha256_of(path):
+            h = hashlib.sha256()
+            try:
+                with open(path, "rb") as f:
+                    for chunk in iter(lambda: f.read(65536), b""):
+                        h.update(chunk)
+                return h.hexdigest()
+            except Exception:
+                return None
+
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            ziel = os.path.join(backup_ordner, f"hausverwaltung_backup_{ts}.db")
-            shutil.copy2(str(get_db_path()), ziel)
+            zip_name = f"hausverwaltung_backup_{ts}.zip"
+            zip_ziel = os.path.join(backup_ordner, zip_name)
+
+            meta = {
+                "erstellt": datetime.now().isoformat(),
+                "app_version": APP_VERSION,
+                "dateien": {}
+            }
+
+            with zipfile.ZipFile(zip_ziel, "w", zipfile.ZIP_DEFLATED) as zf:
+                # Datenbank
+                zf.write(str(db_path), arcname="hausverwaltung.db")
+                meta["dateien"]["hausverwaltung.db"] = {
+                    "sha256": sha256_of(db_path),
+                    "groesse": db_path.stat().st_size
+                }
+                # Einstellungen (optional – kann fehlen)
+                if einst_path.exists():
+                    zf.write(str(einst_path), arcname="einstellungen.json")
+                    meta["dateien"]["einstellungen.json"] = {
+                        "sha256": sha256_of(einst_path),
+                        "groesse": einst_path.stat().st_size
+                    }
+                # SHA256-Manifest
+                zf.writestr("backup_meta.json", _json.dumps(meta, ensure_ascii=False, indent=2))
+
             messagebox.showinfo("Backup erstellt",
-                f"Datenbank-Backup gespeichert:\n{ziel}", parent=self)
+                f"ZIP-Backup gespeichert:\n{zip_ziel}\n\n"
+                f"Enthält: {', '.join(meta['dateien'].keys())} + backup_meta.json",
+                parent=self)
         except Exception as exc:
             messagebox.showerror("Backup-Fehler",
                 f"Backup konnte nicht erstellt werden:\n{exc}", parent=self)
 
     def _db_restore(self):
-        """#30 Wiederherstellen: Datenbank aus Backup-Datei ersetzen."""
-        import shutil
+        """#79 Wiederherstellen: unterstützt sowohl .zip (v2) als auch .db (v1)."""
+        import shutil, hashlib, zipfile, json as _json
+
         if not messagebox.askyesno(
             "⚠ Warnung",
             "Die aktuelle Datenbank wird durch die Backup-Datei ersetzt!\n"
             "Alle nicht gesicherten Änderungen gehen verloren.\n\n"
             "Fortfahren?", icon="warning", parent=self):
             return
+
         quelle = filedialog.askopenfilename(
             parent=self, title="Backup-Datei wählen",
-            filetypes=[("Datenbank-Backup", "*.db"), ("Alle Dateien", "*.*")])
+            filetypes=[("Backup-Archiv", "*.zip *.db"), ("ZIP-Backup (v2)", "*.zip"),
+                       ("Datenbank-Backup (v1)", "*.db"), ("Alle Dateien", "*.*")])
         if not quelle:
             return
-        # Erst eigenes Backup anlegen
+
+        db_path = Path(get_db_path())
+
+        # Eigenes Sicherheits-Backup der aktuellen DB
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            auto_backup = str(get_db_path()) + f".vor_restore_{ts}.bak"
-            shutil.copy2(str(get_db_path()), auto_backup)
+            auto_backup = str(db_path) + f".vor_restore_{ts}.bak"
+            shutil.copy2(str(db_path), auto_backup)
         except Exception:
             auto_backup = None
+
         try:
-            shutil.copy2(quelle, str(get_db_path()))
-            info = f"Datenbank erfolgreich wiederhergestellt aus:\n{quelle}"
+            quelle_lower = quelle.lower()
+            if quelle_lower.endswith(".zip"):
+                # ── ZIP v2 ──────────────────────────────────────────────────
+                with zipfile.ZipFile(quelle, "r") as zf:
+                    namen = zf.namelist()
+                    if "hausverwaltung.db" not in namen:
+                        messagebox.showerror("Ungültiges Backup",
+                            "Die ZIP-Datei enthält keine hausverwaltung.db.", parent=self)
+                        return
+
+                    # SHA256 prüfen falls Manifest vorhanden
+                    pruef_info = ""
+                    if "backup_meta.json" in namen:
+                        meta_raw = zf.read("backup_meta.json").decode("utf-8")
+                        meta = _json.loads(meta_raw)
+                        db_data = zf.read("hausverwaltung.db")
+                        ist_hash = hashlib.sha256(db_data).hexdigest()
+                        soll_hash = meta.get("dateien", {}).get("hausverwaltung.db", {}).get("sha256")
+                        if soll_hash and ist_hash != soll_hash:
+                            messagebox.showerror("Integritätsfehler",
+                                "SHA256-Prüfsumme stimmt nicht überein!\n"
+                                "Das Backup könnte beschädigt sein.", parent=self)
+                            return
+                        erstellt = meta.get("erstellt", "unbekannt")
+                        version = meta.get("app_version", "?")
+                        pruef_info = f"\nBackup vom: {erstellt}\nApp-Version: v{version}\n✓ SHA256-Prüfsumme OK"
+
+                    # Dateien extrahieren
+                    zf.extract("hausverwaltung.db", path=str(db_path.parent))
+                    # Extrahierte Datei an den richtigen Ort bewegen
+                    extracted = db_path.parent / "hausverwaltung.db"
+                    if extracted != db_path:
+                        shutil.move(str(extracted), str(db_path))
+
+                    # einstellungen.json wiederherstellen (optional)
+                    if "einstellungen.json" in namen:
+                        zf.extract("einstellungen.json", path=str(CONFIG_PATH.parent))
+                        extracted_einst = CONFIG_PATH.parent / "einstellungen.json"
+                        if extracted_einst != CONFIG_PATH:
+                            shutil.move(str(extracted_einst), str(CONFIG_PATH))
+
+                info = f"Datenbank erfolgreich wiederhergestellt aus:\n{quelle}{pruef_info}"
+            else:
+                # ── .db v1 (Rückwärtskompatibilität) ────────────────────────
+                shutil.copy2(quelle, str(db_path))
+                info = f"Datenbank erfolgreich wiederhergestellt aus:\n{quelle}"
+
             if auto_backup:
-                info += f"\n\nAutomatisches Sicherheits-Backup der alten Datenbank:\n{auto_backup}"
+                info += f"\n\nSicherheits-Backup der alten Datenbank:\n{auto_backup}"
             messagebox.showinfo("Wiederhergestellt", info, parent=self)
+
         except Exception as exc:
             messagebox.showerror("Fehler",
                 f"Wiederherstellung fehlgeschlagen:\n{exc}", parent=self)
@@ -11474,15 +11262,15 @@ class IstaPage(tk.Frame):
                 if (pos["heizkosten_gesamt"] or 0) > 0:
                     conn2.execute(
                         "INSERT INTO zahlungen (datum, betrag, typ, kategorie, beschreibung, "
-                        "konto_typ, status, eigentuemer_id, abrechnungsrelevant, abrechnungsjahr, "
-                        "rechnungssteller) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        "konto_typ, status, eigentuemer_id, abrechnungsrelevant, abrechnungsjahr) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
                         (
                             abr["abrechnungszeitraum_bis"] or f"{abr['abrechnungsjahr']}-12-31",
                             -abs(pos["heizkosten_gesamt"]),
                             "Ausgabe", "Heizung",
                             f"Ista Heizkosten {abr['abrechnungsjahr']} – {pos['ista_einheit_bezeichnung'] or pos['ista_einheit_nr'] or ''}",
                             "Wohngeldkonto", "Geprüft",
-                            None, 1, abr["abrechnungsjahr"], "Ista GmbH"
+                            None, 1, abr["abrechnungsjahr"]
                         )
                     )
                     conn2.commit()
@@ -11492,15 +11280,15 @@ class IstaPage(tk.Frame):
                 if (pos["warmwasserkosten_gesamt"] or 0) > 0:
                     conn2.execute(
                         "INSERT INTO zahlungen (datum, betrag, typ, kategorie, beschreibung, "
-                        "konto_typ, status, eigentuemer_id, abrechnungsrelevant, abrechnungsjahr, "
-                        "rechnungssteller) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        "konto_typ, status, eigentuemer_id, abrechnungsrelevant, abrechnungsjahr) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
                         (
                             abr["abrechnungszeitraum_bis"] or f"{abr['abrechnungsjahr']}-12-31",
                             -abs(pos["warmwasserkosten_gesamt"]),
                             "Ausgabe", "Warmwasser",
                             f"Ista Warmwasserkosten {abr['abrechnungsjahr']} – {pos['ista_einheit_bezeichnung'] or pos['ista_einheit_nr'] or ''}",
                             "Wohngeldkonto", "Geprüft",
-                            None, 1, abr["abrechnungsjahr"], "Ista GmbH"
+                            None, 1, abr["abrechnungsjahr"]
                         )
                     )
                     conn2.commit()
