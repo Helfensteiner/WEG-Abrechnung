@@ -7,6 +7,42 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.30.0] — 2026-04-20
+
+### Geändert
+- **#83 Kontoauszug-Vorschläge → KontoauszugPage verschoben:** Der Tab „🔔 Kontoauszug
+  Vorschläge" wurde aus BuchhaltungPage entfernt und in KontoauszugPage integriert.
+  KontoauszugPage wurde von einer Einzelseite in eine 2-Tab-Struktur umgebaut
+  (Tab 1: 🏦 Kontoauszug, Tab 2: 🔔 Vorschläge). Methoden: `_load_vorschlaege`,
+  `_uebernehmen`, `_batch_uebernehmen`, `_korrigieren`, `_falsch_markieren`.
+- **#84 Buchungsregeln → EinstellungenPage verschoben:** Tab „⚙ Buchungsregeln" aus
+  BuchhaltungPage entfernt; neuer Tab 5 in EinstellungenPage. Methoden: `_load_regeln`,
+  `_edit_regel`, `_delete_regel`. Kategorien-Dropdown nutzt `BuchhaltungPage.aktive_kategorien()`.
+- **#85 Kostenarten → EinstellungenPage verschoben:** Tab „📋 Kostenarten" aus
+  BuchhaltungPage entfernt; neuer Tab 6 in EinstellungenPage. Methoden: `_load_kostenarten`,
+  `_new_kostenart`, `_edit_kostenart`, `_toggle_kostenart`, `_delete_kostenart`,
+  `_umlageschluessel_aus_aufteilungen`. Klassenvar. `KATEGORIEN`/`KOSTENARTEN` und
+  Methoden `aktive_kategorien`, `_deaktivierte_kategorien`, `_save_deaktivierte`
+  **bleiben auf BuchhaltungPage** (genutzt von ZahlungDialog, NebenkostenPage etc.).
+- **#86 Wohngeld Soll/Ist → NebenkostenPage verschoben:** Tab „💰 Wohngeld Soll/Ist"
+  aus BuchhaltungPage entfernt; neuer Tab „💰 Hausgeld-Kontrolle" in NebenkostenPage.
+  Methode `_load_wohngeld` mit KPI-Karten und Pro-Eigentümer-Tabelle.
+- **#87 Jahresabschluss HTML statt PDF:** `_jahresabschluss_pdf()` (reportlab) durch
+  `_jahresabschluss_html()` ersetzt. Generiert selbst-enthaltenes HTML mit Einnahmen-/
+  Ausgaben-Tabellen, Monatsübersicht, KPI-Zeile. Öffnet Browser via `webbrowser.open()`.
+  Speichert unter Dokumente/Abrechnungen/WEG_Jahresabschluss_{Jahr}.html.
+  Button-Text: „🌐 Jahresabschluss". Kein reportlab mehr nötig.
+- **#88 Dead Code entfernt:** `_import_csv()` (leere pass-Methode) aus BuchhaltungPage
+  entfernt.
+
+### BuchhaltungPage nach dem Refactoring
+- Kein Tab-System mehr — nur noch eine direkte Buchungen-View (Treeview height=16)
+- Verbleibende Methoden: `_load_buchungen`, `_new_zahlung`, `_edit_buchung`,
+  `_beleg_oeffnen`, `_delete_buchung`, `_jahresabschluss_html`, `_export_csv`, `_load`
+- Klassenvariablen/Methoden für Kategorien bleiben (genutzt von ZahlungDialog etc.)
+
+---
+
 ## [0.29.0] — 2026-04-19
 
 ### Hinzugefügt

@@ -108,6 +108,14 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.30.0 — GH Issues #83–#88: BuchhaltungPage Refactoring — Tabs auf andere Seiten verteilt:
+#             #83 Vorschläge-Tab → KontoauszugPage (2-Tab-Struktur: Kontoauszug + Vorschläge)
+#             #84 Buchungsregeln-Tab → EinstellungenPage Tab 5
+#             #85 Kostenarten-Tab → EinstellungenPage Tab 6; KATEGORIEN/KOSTENARTEN
+#                 bleiben als Klassenvariablen auf BuchhaltungPage
+#             #86 Wohngeld Soll/Ist-Tab → NebenkostenPage als "💰 Hausgeld-Kontrolle" Tab 5
+#             #87 _jahresabschluss_pdf() (reportlab) → _jahresabschluss_html() (Browser-HTML)
+#             #88 Leere _import_csv()-Methode (pass) entfernt
 #   0.28.0 — GH Issues #80/#81/#82:
 #             #80 Dashboard Backup-KPI: Timestamp nach ZIP-Backup in
 #                 einstellungen.json speichern (cfg["letztes_backup"]);
@@ -160,7 +168,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.29.0"
+APP_VERSION = "0.30.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -2837,11 +2845,7 @@ class WohnungDialog(BaseDialog):
 # ── Buchhaltung-Seite ─────────────────────────────────────────────────────────
 
 class BuchhaltungPage(tk.Frame):
-    """Buchhaltung mit drei Sub-Tabs:
-    1. Buchungen   – manuelle & bestätigte Zahlungen
-    2. Vorschläge  – neue Kontoauszug-Einträge warten auf Zuordnung
-    3. Regeln      – gelernte Buchungsregeln verwalten
-    """
+    """Buchhaltung: Buchungen verwalten, Jahresabschluss-Export."""
 
     # Kostenkategorien – zentral aus WEG_KATEGORIEN (einheitliches System)
     KATEGORIEN = WEG_KATEGORIEN_LISTE[:]
@@ -2853,7 +2857,6 @@ class BuchhaltungPage(tk.Frame):
 
     def __init__(self, parent):
         super().__init__(parent, bg=BG_CARD)
-        self._active_tab = "buchungen"
         # Custom-Kategorien aus Config in Klassenliste laden (#36 fix)
         self._sync_kategorien_from_config()
         self._build()
@@ -2884,47 +2887,27 @@ class BuchhaltungPage(tk.Frame):
         self._saldo_label = tk.Label(top, text="", bg=BG_CARD, fg=TEXT, font=FONT_H2)
         self._saldo_label.pack(side="left")
         make_btn(top, "＋ Buchung",       self._new_zahlung).pack(side="right")
-        make_btn(top, "📄 Jahresabschluss", self._jahresabschluss_pdf,
+        make_btn(top, "🌐 Jahresabschluss", self._jahresabschluss_html,
                  color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
         make_btn(top, "📊 Export CSV",  self._export_csv,
                  color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(6, 0))
 
-        # ── Sub-Tab-Leiste ─────────────────────────────────────────────────────
-        self._tab_btns = {}
-        tab_bar = tk.Frame(self, bg=BG_CARD)
-        tab_bar.pack(fill="x", padx=20, pady=(8, 0))
-        for tid, label in [("buchungen",  "📒  Buchungen"),
-                            ("vorschlaege","🔔  Kontoauszug Vorschläge"),
-                            ("regeln",    "⚙  Buchungsregeln"),
-                            ("kostenarten","📋  Kostenarten"),
-                            ("wohngeld",  "💰  Wohngeld Soll/Ist")]:
-            btn = tk.Button(tab_bar, text=label, font=FONT_NAV, relief="flat", bd=0,
-                            padx=14, pady=7, cursor="hand2",
-                            command=lambda t=tid: self._switch_tab(t))
-            btn.pack(side="left", padx=2)
-            self._tab_btns[tid] = btn
-        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(4, 0))
-
-        # ── Filter-Zeile (nur Buchungen-Tab) ──────────────────────────────────
-        self._filter_frame = tk.Frame(self, bg=BG_CARD)
-        self._filter_frame.pack(fill="x", padx=20, pady=(4, 0))
-        tk.Label(self._filter_frame, text="Typ:", bg=BG_CARD,
+        # ── Filter-Zeile ──────────────────────────────────────────────────────
+        filter_frame = tk.Frame(self, bg=BG_CARD)
+        filter_frame.pack(fill="x", padx=20, pady=(4, 0))
+        tk.Label(filter_frame, text="Typ:", bg=BG_CARD,
                  fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
         self._typ_var = tk.StringVar(value="Alle")
         for t in ("Alle", "Einnahme", "Ausgabe"):
-            tk.Radiobutton(self._filter_frame, text=t, variable=self._typ_var, value=t,
+            tk.Radiobutton(filter_frame, text=t, variable=self._typ_var, value=t,
                            bg=BG_CARD, fg=TEXT, font=FONT_SMALL,
                            activebackground=BG_CARD, selectcolor=BG_CARD,
                            command=self._load_buchungen).pack(side="left", padx=6)
 
-        # ── Haupt-Content-Bereich ──────────────────────────────────────────────
-        self._content = tk.Frame(self, bg=BG_CARD)
-        self._content.pack(fill="both", expand=True, padx=0, pady=0)
-
-        # Buchungen-View
-        self._view_buchungen = tk.Frame(self._content, bg=BG_CARD)
+        # ── Buchungen-Tabelle ──────────────────────────────────────────────────
         cols_b = ("Buchungsdatum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Belegnr.", "📎")  # #56
-        fb, self.tree_b = make_table(self._view_buchungen, cols_b, height=13)
+        fb, self.tree_b = make_table(self, cols_b, height=16)
         fb.pack(fill="both", expand=True, padx=20, pady=6)
         for c, w in zip(cols_b, [100, 200, 110, 100, 80, 80, 80, 28]):
             self.tree_b.heading(c, text=c); self.tree_b.column(c, width=w, anchor="w")
@@ -2932,137 +2915,16 @@ class BuchhaltungPage(tk.Frame):
         self.tree_b.tag_configure("ausgabe",  foreground=DANGER)
         self.tree_b.tag_configure("neu", foreground=ACCENT2, font=("Segoe UI Semibold", 10))
         self.tree_b.bind("<Double-1>", self._edit_buchung)
-        btn_b = tk.Frame(self._view_buchungen, bg=BG_CARD)
+
+        btn_b = tk.Frame(self, bg=BG_CARD)
         btn_b.pack(fill="x", padx=20, pady=(0, 8))
         make_btn(btn_b, "✏ Bearbeiten",       self._edit_buchung, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
         make_btn(btn_b, "🗑 Löschen",         self._delete_buchung, color=DANGER).pack(side="left", padx=(0,6))
         make_btn(btn_b, "📎 Beleg öffnen",    self._beleg_oeffnen, color=BG_INPUT, fg=TEXT).pack(side="left")
 
-        # Vorschläge-View
-        self._view_vorschlaege = tk.Frame(self._content, bg=BG_CARD)
-        # Konto-Filter für Vorschläge
-        vs_filter = tk.Frame(self._view_vorschlaege, bg=BG_CARD)
-        vs_filter.pack(fill="x", padx=20, pady=(6, 2))
-        tk.Label(vs_filter, text="Neue Kontoauszug-Buchungen → Kategorie zuweisen und übernehmen",
-            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
-        tk.Label(vs_filter, text="  Konto:", bg=BG_CARD, fg=TEXT_LIGHT,
-                 font=FONT_SMALL).pack(side="left", padx=(12, 0))
-        self._vs_konto_var = tk.StringVar(value="Alle")
-        self._vs_konto_combo = ttk.Combobox(vs_filter, textvariable=self._vs_konto_var,
-                                             state="readonly", font=FONT_SMALL, width=30)
-        self._vs_konto_combo.pack(side="left", padx=(4, 0))
-        self._vs_konto_combo.bind("<<ComboboxSelected>>", lambda e: self._load_vorschlaege())
+        self._load_buchungen()
 
-        cols_v = ("Datum", "Auftraggeber", "Verwendungszweck", "Betrag", "Konto", "Vorschlag Kat.")
-        fv, self.tree_v = make_table(self._view_vorschlaege, cols_v, height=12)
-        fv.pack(fill="both", expand=True, padx=20, pady=4)
-        for c, w in zip(cols_v, [88, 180, 250, 100, 90, 120]):
-            self.tree_v.heading(c, text=c); self.tree_v.column(c, width=w, anchor="w")
-        self.tree_v.tag_configure("mit_vorschlag", foreground="#2E7D32")
-        # Mehrfachauswahl aktivieren
-        self.tree_v.configure(selectmode="extended")
-        btn_v = tk.Frame(self._view_vorschlaege, bg=BG_CARD)
-        btn_v.pack(fill="x", padx=20, pady=(0, 8))
-        make_btn(btn_v, "✔ Übernehmen",              self._uebernehmen,      color=SUCCESS).pack(side="left", padx=(0,6))
-        make_btn(btn_v, "✔✔ Alle grünen übernehmen", self._batch_uebernehmen,color="#2E7D32").pack(side="left", padx=(0,6))
-        make_btn(btn_v, "✏ Kategorie korrigieren",    self._korrigieren,      color=ACCENT2).pack(side="left", padx=(0,6))
-        make_btn(btn_v, "✗ Falsch zugeordnet",        self._falsch_markieren, color=DANGER).pack(side="left")
-
-        # Regeln-View
-        self._view_regeln = tk.Frame(self._content, bg=BG_CARD)
-        info_r = tk.Label(self._view_regeln,
-            text="Automatisch gelernte Zuordnungsregeln — können hier korrigiert oder gelöscht werden",
-            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL)
-        info_r.pack(anchor="w", padx=20, pady=(6, 2))
-        cols_r = ("Auftraggeber / Empfänger", "Kategorie", "Typ", "Konto", "Treffer", "Korrektur")  # #54
-        fr, self.tree_r = make_table(self._view_regeln, cols_r, height=12)
-        fr.pack(fill="both", expand=True, padx=20, pady=4)
-        for c, w in zip(cols_r, [220, 130, 90, 110, 70, 80]):
-            self.tree_r.heading(c, text=c); self.tree_r.column(c, width=w, anchor="w")
-        btn_r = tk.Frame(self._view_regeln, bg=BG_CARD)
-        btn_r.pack(fill="x", padx=20, pady=(0, 8))
-        make_btn(btn_r, "✏ Korrigieren", self._edit_regel, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
-        make_btn(btn_r, "🗑 Löschen",    self._delete_regel, color=DANGER).pack(side="left")
-
-        # Kostenarten-View
-        self._view_kostenarten = tk.Frame(self._content, bg=BG_CARD)
-        info_k = tk.Label(self._view_kostenarten,
-            text="WEG-Kostenkategorien verwalten — deaktivierte Kategorien können nicht mehr zugewiesen werden",
-            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL)
-        info_k.pack(anchor="w", padx=20, pady=(6, 2))
-        cols_k = ("Kategorie", "Oberkategorie", "Umlagefähig", "Schlüssel", "Status", "Verwendungen")
-        fk, self.tree_k = make_table(self._view_kostenarten, cols_k, height=14)
-        fk.pack(fill="both", expand=True, padx=20, pady=4)
-        for c, w in zip(cols_k, [180, 180, 100, 140, 80, 100]):
-            self.tree_k.heading(c, text=c); self.tree_k.column(c, width=w, anchor="w")
-        self.tree_k.tag_configure("deaktiviert", foreground=TEXT_LIGHT)
-        btn_k = tk.Frame(self._view_kostenarten, bg=BG_CARD)
-        btn_k.pack(fill="x", padx=20, pady=(0, 8))
-        make_btn(btn_k, "＋ Neue Kategorie", self._new_kostenart, color=ACCENT2).pack(side="left", padx=(0,6))
-        make_btn(btn_k, "✏ Bearbeiten", self._edit_kostenart, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
-        make_btn(btn_k, "🔄 Aktivieren/Deaktivieren", self._toggle_kostenart, color=WARNING, fg=TEXT_WHITE).pack(side="left", padx=(0,6))
-        make_btn(btn_k, "🗑 Löschen", self._delete_kostenart, color=DANGER).pack(side="left")
-
-        # ── Tab Wohngeld Soll/Ist (#19) ───────────────────────────────────────
-        self._view_wohngeld = tk.Frame(self._content, bg=BG_CARD)
-        wg_top = tk.Frame(self._view_wohngeld, bg=BG_CARD)
-        wg_top.pack(fill="x", padx=20, pady=(10, 4))
-        tk.Label(wg_top, text="Jahr:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
-        self._wg_jahr = tk.StringVar(value=str(date.today().year))
-        ttk.Combobox(wg_top, textvariable=self._wg_jahr, width=8,
-                     values=[str(y) for y in range(date.today().year, date.today().year - 6, -1)]
-                     ).pack(side="left", padx=6)
-        make_btn(wg_top, "🔄 Auswertung", self._load_wohngeld).pack(side="left")
-
-        self._wg_kpi = tk.Frame(self._view_wohngeld, bg=BG_CARD)
-        self._wg_kpi.pack(fill="x", padx=20, pady=(6, 4))
-
-        tk.Label(self._view_wohngeld,
-                 text="Wohngeld-Einnahmen pro Eigentümer (Ist) vs. Kostenpflicht (Soll nach MEA)",
-                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
-        cols_wg = ("Eigentümer", "MEA %", "Soll (Kostenanteil)", "Ist (gezahlt)", "Saldo", "Status")
-        fwg, self._tree_wg = make_table(self._view_wohngeld, cols_wg, height=12)
-        fwg.pack(fill="both", expand=True, padx=20, pady=(2, 8))
-        for c, w in zip(cols_wg, [180, 60, 140, 140, 110, 100]):
-            self._tree_wg.heading(c, text=c)
-            self._tree_wg.column(c, width=w, anchor="w")
-
-        self._switch_tab("buchungen")
-
-    # ── Tab-Umschalten ────────────────────────────────────────────────────────
-
-    def _switch_tab(self, tab: str):
-        self._active_tab = tab
-        # Button-Styling
-        for tid, btn in self._tab_btns.items():
-            if tid == tab:
-                btn.config(bg=ACCENT2, fg=TEXT_WHITE)
-            else:
-                btn.config(bg=BG_CARD, fg=TEXT_LIGHT)
-        # Filter-Zeile nur bei Buchungen
-        self._filter_frame.pack_forget()
-        # Views ein-/ausblenden
-        for v in [self._view_buchungen, self._view_vorschlaege, self._view_regeln,
-                  self._view_kostenarten, self._view_wohngeld]:
-            v.pack_forget()
-        if tab == "buchungen":
-            self._filter_frame.pack(fill="x", padx=20, pady=(4, 0))
-            self._view_buchungen.pack(fill="both", expand=True)
-            self._load_buchungen()
-        elif tab == "vorschlaege":
-            self._view_vorschlaege.pack(fill="both", expand=True)
-            self._load_vorschlaege()
-        elif tab == "regeln":
-            self._view_regeln.pack(fill="both", expand=True)
-            self._load_regeln()
-        elif tab == "kostenarten":
-            self._view_kostenarten.pack(fill="both", expand=True)
-            self._load_kostenarten()
-        elif tab == "wohngeld":
-            self._view_wohngeld.pack(fill="both", expand=True)
-            self._load_wohngeld()
-
-    # ── Tab 1: Buchungen ──────────────────────────────────────────────────────
+    # ── Buchungen ──────────────────────────────────────────────────────────────
 
     def _load_buchungen(self):
         for i in self.tree_b.get_children(): self.tree_b.delete(i)
@@ -3122,7 +2984,7 @@ class BuchhaltungPage(tk.Frame):
             _sync_kategorie_von_rechnung(conn, zahlung_id, v.get("rechnung_id"))  # #78
             _auto_update_rechnung_status(conn, v.get("rechnung_id"))  # #67
             conn.commit(); conn.close()
-            if self._active_tab == "buchungen": self._load_buchungen()
+            self._load_buchungen()
 
     def _edit_buchung(self, event=None):
         if not hat_recht("Buchhaltung", "schreiben"):
@@ -3197,20 +3059,9 @@ class BuchhaltungPage(tk.Frame):
             conn.commit(); conn.close()
             self._load_buchungen()
 
-    def _jahresabschluss_pdf(self):
-        """#22 Jahresabschluss-PDF: Vollständige Einnahmen/Ausgaben-Übersicht als A4-Dokument."""
-        try:
-            from reportlab.lib.pagesizes import A4
-            from reportlab.lib import colors
-            from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
-                                            Paragraph, Spacer, HRFlowable)
-            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.lib.units import cm
-        except ImportError:
-            messagebox.showerror("Fehler",
-                "reportlab nicht installiert.\nBitte 'pip install reportlab' ausführen.",
-                parent=self)
-            return
+    def _jahresabschluss_html(self):
+        """#87 Jahresabschluss-HTML: Vollständige Einnahmen/Ausgaben-Übersicht, öffnet im Browser."""
+        import webbrowser
 
         # Jahr per Dialog erfragen
         jahr_str = simpledialog.askstring(
@@ -3225,17 +3076,14 @@ class BuchhaltungPage(tk.Frame):
             return
 
         conn = get_db()
-        # Einnahmen nach Kategorie
         ein_rows = conn.execute(
             "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
             "WHERE typ='Einnahme' AND strftime('%Y',datum)=? GROUP BY kategorie ORDER BY s DESC",
             (str(jahr),)).fetchall()
-        # Ausgaben nach Kategorie
         aus_rows = conn.execute(
             "SELECT kategorie, SUM(betrag) as s FROM zahlungen "
             "WHERE typ='Ausgabe' AND strftime('%Y',datum)=? GROUP BY kategorie ORDER BY s DESC",
             (str(jahr),)).fetchall()
-        # Monatliche Übersicht
         monat_rows = conn.execute(
             "SELECT strftime('%m',datum) as m, "
             "SUM(CASE WHEN typ='Einnahme' THEN betrag ELSE 0 END) as ein, "
@@ -3247,148 +3095,136 @@ class BuchhaltungPage(tk.Frame):
         total_ein = sum(r["s"] or 0 for r in ein_rows)
         total_aus = sum(r["s"] or 0 for r in aus_rows)
         jahres_saldo = total_ein - total_aus
+        cfg = load_config()
+        weg_name = cfg.get("weg_name") or "WEG Hausverwaltung"
+        erstellt_am = date.today().strftime("%d.%m.%Y")
 
-        pfad = filedialog.asksaveasfilename(
-            parent=self, title="Jahresabschluss speichern",
-            defaultextension=".pdf",
-            initialfile=f"WEG_Jahresabschluss_{jahr}.pdf",
-            filetypes=[("PDF-Dokument", "*.pdf")])
-        if not pfad:
-            return
+        def td(text, align="left", bold=False, color=""):
+            style = f"text-align:{align};"
+            if bold:  style += "font-weight:bold;"
+            if color: style += f"color:{color};"
+            return f'<td style="{style}">{text}</td>'
 
+        # Einnahmen-Tabelle
+        ein_html = ""
+        for r in ein_rows:
+            ein_html += f"<tr>{td(r['kategorie'] or '–')}{td(fmt_euro(r['s'] or 0), 'right')}</tr>\n"
+        ein_html += (f"<tr style='background:#D4EDDA;font-weight:bold'>"
+                     f"{td('Gesamt Einnahmen', bold=True)}"
+                     f"{td(fmt_euro(total_ein), 'right', bold=True, color='#3A7D44')}</tr>")
+
+        # Ausgaben-Tabelle
+        aus_html = ""
+        for r in aus_rows:
+            aus_html += f"<tr>{td(r['kategorie'] or '–')}{td(fmt_euro(r['s'] or 0), 'right')}</tr>\n"
+        aus_html += (f"<tr style='background:#FADADD;font-weight:bold'>"
+                     f"{td('Gesamt Ausgaben', bold=True)}"
+                     f"{td(fmt_euro(total_aus), 'right', bold=True, color='#C0392B')}</tr>")
+
+        # Monatsübersicht
+        monate = ["Jan","Feb","Mär","Apr","Mai","Jun","Jul","Aug","Sep","Okt","Nov","Dez"]
+        mon_html = ""
+        for r in monat_rows:
+            mi = int(r["m"]) - 1
+            mon = monate[mi] if 0 <= mi < 12 else r["m"]
+            ein_m = r["ein"] or 0
+            aus_m = r["aus"] or 0
+            saldo_m = ein_m - aus_m
+            farbe = "#3A7D44" if saldo_m >= 0 else "#C0392B"
+            mon_html += (f"<tr>{td(f'{mon} {jahr}')}{td(fmt_euro(ein_m),'right')}"
+                         f"{td(fmt_euro(aus_m),'right')}"
+                         f"{td(fmt_euro(saldo_m),'right',color=farbe)}</tr>\n")
+
+        saldo_farbe = "#3A7D44" if jahres_saldo >= 0 else "#C0392B"
+        saldo_bg    = "#D4EDDA" if jahres_saldo >= 0 else "#FADADD"
+        saldo_label = "Jahresüberschuss" if jahres_saldo >= 0 else "Jahresfehlbetrag"
+
+        html = f"""<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>{weg_name} – Jahresabschluss {jahr}</title>
+<style>
+  @page {{ size: A4; margin: 2cm; }}
+  body {{ font-family: 'Segoe UI', Arial, sans-serif; font-size: 11pt;
+          color: #2C2C2C; background: #fff; max-width: 900px; margin: 0 auto; padding: 20px; }}
+  h1 {{ font-size: 18pt; color: #1C2B3A; margin-bottom: 4px; }}
+  h2 {{ font-size: 13pt; color: #1C2B3A; margin-top: 24px; margin-bottom: 6px; }}
+  .meta {{ color: #888; font-size: 9pt; margin-bottom: 16px; }}
+  table {{ border-collapse: collapse; width: 100%; margin-bottom: 16px; }}
+  th {{ background: #1C2B3A; color: #fff; padding: 6px 10px; text-align: left; font-size: 10pt; }}
+  td {{ padding: 5px 10px; border-bottom: 1px solid #E0E0E0; font-size: 10pt; }}
+  tr:nth-child(even) {{ background: #F7F5F0; }}
+  .kpi-row {{ display: flex; gap: 16px; margin-bottom: 20px; }}
+  .kpi {{ background: #F7F5F0; border-radius: 6px; padding: 12px 20px; flex: 1; }}
+  .kpi-label {{ color: #666; font-size: 9pt; }}
+  .kpi-val {{ font-size: 14pt; font-weight: bold; margin-top: 2px; }}
+  .ein-head {{ background: #3A7D44 !important; }}
+  .aus-head {{ background: #C0392B !important; }}
+  .mon-head {{ background: #1C2B3A !important; }}
+  @media print {{ body {{ padding: 0; }} }}
+</style>
+</head>
+<body>
+<h1>{weg_name}</h1>
+<div class="meta">Jahresabschluss {jahr} – Einnahmen &amp; Ausgaben | Erstellt am {erstellt_am}</div>
+
+<div class="kpi-row">
+  <div class="kpi">
+    <div class="kpi-label">Gesamteinnahmen</div>
+    <div class="kpi-val" style="color:#3A7D44">{fmt_euro(total_ein)}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Gesamtausgaben</div>
+    <div class="kpi-val" style="color:#C0392B">{fmt_euro(total_aus)}</div>
+  </div>
+  <div class="kpi" style="background:{saldo_bg}">
+    <div class="kpi-label">{saldo_label}</div>
+    <div class="kpi-val" style="color:{saldo_farbe}">{fmt_euro(jahres_saldo)}</div>
+  </div>
+</div>
+
+<h2>Einnahmen nach Kategorie</h2>
+<table>
+  <tr><th class="ein-head">Kategorie</th><th class="ein-head" style="text-align:right">Betrag</th></tr>
+  {ein_html}
+</table>
+
+<h2>Ausgaben nach Kategorie</h2>
+<table>
+  <tr><th class="aus-head">Kategorie</th><th class="aus-head" style="text-align:right">Betrag</th></tr>
+  {aus_html}
+</table>
+""" + (f"""
+<h2>Monatliche Übersicht</h2>
+<table>
+  <tr>
+    <th class="mon-head">Monat</th>
+    <th class="mon-head" style="text-align:right">Einnahmen</th>
+    <th class="mon-head" style="text-align:right">Ausgaben</th>
+    <th class="mon-head" style="text-align:right">Monatssaldo</th>
+  </tr>
+  {mon_html}
+</table>
+""" if monat_rows else "") + """
+</body>
+</html>"""
+
+        # Speichern
+        ziel_dir = Path(get_pfad("pfad_dokumente", "Dokumente")) / "Abrechnungen"
         try:
-            cfg = load_settings()
-            weg_name = cfg.get("weg_name") or "WEG Hausverwaltung"
-
-            doc = SimpleDocTemplate(pfad, pagesize=A4,
-                                    leftMargin=2*cm, rightMargin=2*cm,
-                                    topMargin=2*cm, bottomMargin=2*cm)
-            styles = getSampleStyleSheet()
-            H1 = ParagraphStyle("H1", parent=styles["Heading1"],
-                                 fontSize=18, textColor=colors.HexColor("#1C2B3A"))
-            H2 = ParagraphStyle("H2", parent=styles["Heading2"],
-                                 fontSize=13, textColor=colors.HexColor("#1C2B3A"))
-            SMALL = ParagraphStyle("sm", parent=styles["Normal"], fontSize=8,
-                                   textColor=colors.HexColor("#666666"))
-            BOLD  = ParagraphStyle("bd", parent=styles["Normal"], fontSize=10,
-                                   fontName="Helvetica-Bold")
-
-            story = [
-                Paragraph(weg_name, H1),
-                Paragraph(f"Jahresabschluss {jahr} – Einnahmen & Ausgaben", H2),
-                Paragraph(f"Erstellt am {date.today().strftime('%d.%m.%Y')}", SMALL),
-                Spacer(1, 0.4*cm),
-            ]
-
-            # ── Gesamtübersicht ──
-            kpi_data = [
-                ["Gesamteinnahmen",  fmt_euro(total_ein)],
-                ["Gesamtausgaben",   fmt_euro(total_aus)],
-                ["Jahresüberschuss" if jahres_saldo >= 0 else "Jahresfehlbetrag",
-                 fmt_euro(jahres_saldo)],
-            ]
-            kpi_t = Table(kpi_data, colWidths=[10*cm, 5*cm])
-            kpi_t.setStyle(TableStyle([
-                ("FONTNAME",   (0,0), (-1,-1), "Helvetica"),
-                ("FONTSIZE",   (0,0), (-1,-1), 11),
-                ("FONTNAME",   (0,-1), (-1,-1), "Helvetica-Bold"),
-                ("ALIGN",      (1,0), (1,-1), "RIGHT"),
-                ("ROWBACKGROUNDS", (0,0), (-1,-1),
-                 [colors.HexColor("#F7F5F0"), colors.HexColor("#EEEAE3"),
-                  colors.HexColor("#D4EDDA") if jahres_saldo >= 0 else colors.HexColor("#FADADD")]),
-                ("GRID",       (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
-                ("TOPPADDING", (0,0), (-1,-1), 6), ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-            ]))
-            story += [kpi_t, Spacer(1, 0.5*cm)]
-
-            # ── Einnahmen ──
-            story.append(Paragraph("Einnahmen nach Kategorie", H2))
-            ein_data = [["Kategorie", "Betrag"]]
-            for r in ein_rows:
-                ein_data.append([r["kategorie"] or "–", fmt_euro(r["s"] or 0)])
-            ein_data.append(["Gesamt Einnahmen", fmt_euro(total_ein)])
-            ein_t = Table(ein_data, colWidths=[12*cm, 5*cm])
-            ein_t.setStyle(TableStyle([
-                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#3A7D44")),
-                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
-                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
-                ("FONTSIZE",    (0,0), (-1,-1), 9),
-                ("ALIGN",       (1,1), (1,-1),  "RIGHT"),
-                ("ROWBACKGROUNDS", (0,1), (-1,-2),
-                 [colors.white, colors.HexColor("#F7F5F0")]),
-                ("BACKGROUND",  (0,-1), (-1,-1), colors.HexColor("#D4EDDA")),
-                ("FONTNAME",    (0,-1), (-1,-1), "Helvetica-Bold"),
-                ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
-                ("TOPPADDING",  (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-            ]))
-            story += [ein_t, Spacer(1, 0.4*cm)]
-
-            # ── Ausgaben ──
-            story.append(Paragraph("Ausgaben nach Kategorie", H2))
-            aus_data = [["Kategorie", "Betrag"]]
-            for r in aus_rows:
-                aus_data.append([r["kategorie"] or "–", fmt_euro(r["s"] or 0)])
-            aus_data.append(["Gesamt Ausgaben", fmt_euro(total_aus)])
-            aus_t = Table(aus_data, colWidths=[12*cm, 5*cm])
-            aus_t.setStyle(TableStyle([
-                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#C0392B")),
-                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
-                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
-                ("FONTSIZE",    (0,0), (-1,-1), 9),
-                ("ALIGN",       (1,1), (1,-1),  "RIGHT"),
-                ("ROWBACKGROUNDS", (0,1), (-1,-2),
-                 [colors.white, colors.HexColor("#F7F5F0")]),
-                ("BACKGROUND",  (0,-1), (-1,-1), colors.HexColor("#FADADD")),
-                ("FONTNAME",    (0,-1), (-1,-1), "Helvetica-Bold"),
-                ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
-                ("TOPPADDING",  (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-            ]))
-            story += [aus_t, Spacer(1, 0.4*cm)]
-
-            # ── Monatliche Übersicht ──
-            if monat_rows:
-                story.append(Paragraph("Monatliche Übersicht", H2))
-                monate = ["Jan","Feb","Mär","Apr","Mai","Jun",
-                          "Jul","Aug","Sep","Okt","Nov","Dez"]
-                mon_data = [["Monat", "Einnahmen", "Ausgaben", "Monatssaldo"]]
-                for r in monat_rows:
-                    mi = int(r["m"]) - 1
-                    mon = monate[mi] if 0 <= mi < 12 else r["m"]
-                    ein_m = r["ein"] or 0
-                    aus_m = r["aus"] or 0
-                    saldo_m = ein_m - aus_m
-                    mon_data.append([
-                        f"{mon} {jahr}", fmt_euro(ein_m), fmt_euro(aus_m),
-                        fmt_euro(saldo_m)])
-                mon_t = Table(mon_data, colWidths=[3.5*cm, 4*cm, 4*cm, 4.5*cm])
-                mon_t.setStyle(TableStyle([
-                    ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1C2B3A")),
-                    ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
-                    ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
-                    ("FONTSIZE",    (0,0), (-1,-1), 9),
-                    ("ALIGN",       (1,1), (-1,-1), "RIGHT"),
-                    ("ROWBACKGROUNDS", (0,1), (-1,-1),
-                     [colors.white, colors.HexColor("#F7F5F0")]),
-                    ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
-                    ("TOPPADDING",  (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-                ]))
-                story.append(mon_t)
-
-            doc.build(story)
-            if messagebox.askyesno("PDF erstellt",
-                f"Jahresabschluss {jahr} gespeichert:\n{pfad}\n\nJetzt öffnen?", parent=self):
-                try:
-                    if os.name == "nt":
-                        os.startfile(pfad)
-                    elif os.uname().sysname == "Darwin":
-                        subprocess.Popen(["open", pfad])
-                    else:
-                        subprocess.Popen(["xdg-open", pfad])
-                except Exception:
-                    pass
+            ziel_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        pfad = ziel_dir / f"WEG_Jahresabschluss_{jahr}.html"
+        try:
+            pfad.write_text(html, encoding="utf-8")
+            webbrowser.open(pfad.as_uri())
+            messagebox.showinfo("Jahresabschluss",
+                f"Jahresabschluss {jahr} geöffnet:\n{pfad}\n\nIm Browser: Strg+P → Als PDF speichern",
+                parent=self)
         except Exception as exc:
-            messagebox.showerror("PDF-Fehler", f"PDF konnte nicht erstellt werden:\n{exc}",
-                                 parent=self)
+            messagebox.showerror("Fehler", f"Konnte HTML nicht speichern:\n{exc}", parent=self)
 
     def _export_csv(self):
         """#31 CSV-Export mit optionalem Jahres- und Typfilter."""
@@ -3433,328 +3269,7 @@ class BuchhaltungPage(tk.Frame):
         messagebox.showinfo("Export",
             f"Exportiert: {os.path.basename(path)}\n{len(rows)} Buchungen")
 
-    # ── Tab 2: Kontoauszug-Vorschläge ─────────────────────────────────────────
-
-    def _load_vorschlaege(self):
-        for i in self.tree_v.get_children(): self.tree_v.delete(i)
-        conn = get_db()
-        # Konto-Filter aktualisieren
-        konten_raw = conn.execute(
-            "SELECT DISTINCT iban FROM kontoauszug "
-            "WHERE iban IS NOT NULL AND iban != '' "
-            "AND (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
-            "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) "
-            "ORDER BY iban"
-        ).fetchall()
-        cfg = load_config()
-        konto_labels = ["Alle"]
-        self._vs_iban_map = {"Alle": None}
-        for kr in konten_raw:
-            iban = kr["iban"]
-            # Bezeichnung aus Einstellungen
-            label = KontoauszugPage._konto_bezeichnung(None, iban, cfg)
-            konto_labels.append(label)
-            self._vs_iban_map[label] = iban
-        self._vs_konto_combo["values"] = konto_labels
-        if self._vs_konto_var.get() not in konto_labels:
-            self._vs_konto_var.set("Alle")
-
-        selected_iban = self._vs_iban_map.get(self._vs_konto_var.get())
-        q = ("SELECT * FROM kontoauszug "
-             "WHERE (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
-             "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) ")
-        params = []
-        if selected_iban:
-            q += "AND iban=? "
-            params.append(selected_iban)
-        q += "ORDER BY datum DESC, id DESC"
-        rows = conn.execute(q, params).fetchall()
-        conn.close()
-        for row in rows:
-            r = dict(row)
-            raw = r["buchungstext"] or ""
-            gegenkonto = raw.split("||")[0] if "||" in raw else ""
-            vzweck     = raw.split("||")[1] if "||" in raw else raw
-            vorschlag  = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]  # 4. Rückgabewert ignoriert
-            tag = "mit_vorschlag" if vorschlag else ""
-            iban_kurz = f"···{r['iban'][-8:]}" if r.get("iban") else r.get("konto_typ") or "–"
-            self.tree_v.insert("", "end", iid=r["id"], values=(
-                fmt_date(r["datum"]),
-                gegenkonto or "–",
-                vzweck or "–",
-                fmt_euro(r["betrag"] or 0),
-                iban_kurz,
-                vorschlag or "–"),
-                tags=(tag,) if tag else ())
-
-    def _uebernehmen(self):
-        """Kontoauszug-Eintrag als Buchung in zahlungen übernehmen."""
-        sel = self.tree_v.selection()
-        if not sel:
-            messagebox.showinfo("Hinweis", "Bitte einen Eintrag auswählen.", parent=self)
-            return
-        if not hat_recht("Buchhaltung", "schreiben"):
-            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
-            return
-        conn = get_db()
-        row_raw = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(sel[0]),)).fetchone()
-        conn.close()
-        if not row_raw:
-            messagebox.showwarning("Fehler", "Eintrag nicht gefunden.", parent=self)
-            return
-        row = dict(row_raw)
-        raw = row["buchungstext"] or ""
-        gegenkonto = raw.split("||")[0] if "||" in raw else ""
-        vzweck     = raw.split("||")[1] if "||" in raw else raw
-        kat_v, typ_v, kto_v, _ = vorschlag_kategorie(raw)  # Konfidenz ignoriert
-        # Vorhandenen Kategorie-Vorschlag bevorzugen
-        kat_v = row.get("kategorie_vorschlag") or kat_v
-        kt = row.get("konto_typ") or kto_v or "Wohngeldkonto"
-
-        # Vorbelegter ZahlungDialog
-        pseudo = {
-            "datum":       row["datum"] or date.today().isoformat(),
-            "betrag":      abs(row["betrag"] or 0),
-            "typ":         "Einnahme" if (row["betrag"] or 0) >= 0 else "Ausgabe",
-            "kategorie":   kat_v,
-            "beschreibung": f"{gegenkonto} – {vzweck}".strip(" –"),
-            "belegnr":     "",
-            "status":      "Neu",
-        }
-        d = ZahlungDialog(self, pseudo)
-        self.wait_window(d)
-        if d.result:
-            v = d.result
-            betrag = float(v["betrag"] or 0)
-            if v["typ"] == "Ausgabe": betrag = -abs(betrag)
-            conn = get_db()
-            conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,konto_typ,status) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
-                 kt, v.get("status", "Neu")))
-            zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            conn.execute(
-                "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
-                "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
-                (v["kategorie"], zahlung_id, int(sel[0])))
-            conn.commit(); conn.close()
-            lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False)
-            self._load_vorschlaege()
-            self._saldo_label.config(text="")
-
-    def _batch_uebernehmen(self):
-        """Grün markierte Vorschläge automatisch übernehmen.
-
-        Verhalten (Issue #2):
-        - Einträge selektiert  → nur die markierten (mit Kategorie) übernehmen
-        - Nichts selektiert    → alle grünen Einträge (aktueller Konto-Filter)
-        Keine Rückfrage pro Buchung.
-        """
-        if not hat_recht("Buchhaltung", "schreiben"):
-            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
-            return
-
-        selected_ids = [int(iid) for iid in self.tree_v.selection()]
-        use_selection = bool(selected_ids)
-        selected_iban = self._vs_iban_map.get(self._vs_konto_var.get())
-
-        conn = get_db()
-        if use_selection:
-            # Nur selektierte Einträge verarbeiten
-            placeholders = ",".join("?" * len(selected_ids))
-            q = (f"SELECT * FROM kontoauszug "
-                 f"WHERE id IN ({placeholders}) "
-                 f"AND (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
-                 f"AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) "
-                 f"ORDER BY datum")
-            rows = conn.execute(q, selected_ids).fetchall()
-            quelle = f"{len(selected_ids)} ausgewählte Einträge"
-        else:
-            # Alle nicht übernommenen Einträge (mit Konto-Filter)
-            q = ("SELECT * FROM kontoauszug "
-                 "WHERE (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
-                 "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) ")
-            params = []
-            if selected_iban:
-                q += "AND iban=? "
-                params.append(selected_iban)
-            q += "ORDER BY datum"
-            rows = conn.execute(q, params).fetchall()
-            quelle = "alle grünen Einträge"
-
-        count = 0
-        skipped = 0
-        lern_queue = []  # (raw, kat, typ, kt) – nach conn.close() ausfuehren
-        for row_raw in rows:
-            row = dict(row_raw)
-            raw = row["buchungstext"] or ""
-            kat = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]  # Konfidenz ignoriert
-            if not kat:
-                skipped += 1
-                continue
-            betrag = row["betrag"] or 0
-            typ = "Einnahme" if betrag >= 0 else "Ausgabe"
-            gegenkonto = raw.split("||")[0] if "||" in raw else ""
-            vzweck = raw.split("||")[1] if "||" in raw else raw
-            beschr = f"{gegenkonto} – {vzweck}".strip(" –") if gegenkonto else vzweck
-            kt = row.get("konto_typ") or "Wohngeldkonto"
-            conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,konto_typ,status) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (row["datum"], betrag, typ, kat, beschr[:200], kt, "Neu"))
-            zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            conn.execute(
-                "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
-                "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
-                (kat, zahlung_id, row["id"]))
-            lern_queue.append((raw, kat, typ, kt))
-            count += 1
-
-        conn.commit()
-        conn.close()
-        # lerne_buchung erst nach conn.close() -- verhindert "database is locked"
-        for _raw, _kat, _typ, _kt in lern_queue:
-            lerne_buchung(_raw, _kat, _typ, _kt)
-
-        if count:
-            msg = f"{count} Buchung(en) aus {quelle} übernommen."
-            if skipped:
-                msg += f"\n{skipped} Eintrag/Einträge ohne Kategorie übersprungen."
-            messagebox.showinfo("Batch-Übernahme", msg)
-        else:
-            msg = "Keine Einträge mit Kategorie-Zuordnung gefunden."
-            if skipped:
-                msg += f"\n{skipped} Eintrag/Einträge haben keine Kategorie."
-            messagebox.showinfo("Batch-Übernahme", msg)
-        self._load_vorschlaege()
-        self._saldo_label.config(text="")
-
-    def _korrigieren(self):
-        """Kategorie-Vorschlag für diesen Eintrag manuell korrigieren (Lernen)."""
-        sel = self.tree_v.selection()
-        if not sel: return
-        conn = get_db()
-        row_raw = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(sel[0]),)).fetchone()
-        conn.close()
-        if not row_raw: return
-        row = dict(row_raw)
-        raw = row["buchungstext"] or ""
-        kat_v = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]  # Konfidenz ignoriert
-        # Auswahldialog für Kategorie
-        win = tk.Toplevel(self)
-        win.title("Kategorie korrigieren")
-        win.geometry("340x260")
-        win.configure(bg=BG_CARD)
-        win.grab_set()
-        win.resizable(False, False)
-        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
-        hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr, text="Kategorie wählen", bg=BG_SIDEBAR, fg=TEXT_WHITE,
-                 font=FONT_H3).pack(side="left", padx=14, pady=10)
-        body = tk.Frame(win, bg=BG_CARD)
-        body.pack(fill="both", expand=True, padx=20, pady=12)
-        tk.Label(body, text="Kategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
-        kat_var = tk.StringVar(value=kat_v)
-        cb = ttk.Combobox(body, textvariable=kat_var, values=self.aktive_kategorien(),
-                          state="readonly", font=FONT_BODY)
-        cb.pack(fill="x", ipady=4)
-        typ_var = tk.StringVar(value="Einnahme" if (row["betrag"] or 0) >= 0 else "Ausgabe")
-        tk.Label(body, text="Typ", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        cb2 = ttk.Combobox(body, textvariable=typ_var,
-                           values=["Einnahme", "Ausgabe"], state="readonly", font=FONT_BODY)
-        cb2.pack(fill="x", ipady=4)
-        saved = [False]
-        def _save():
-            saved[0] = True
-            conn2 = get_db()
-            conn2.execute("UPDATE kontoauszug SET kategorie_vorschlag=? WHERE id=?",
-                          (kat_var.get(), int(sel[0])))
-            conn2.commit(); conn2.close()
-            lerne_buchung(raw, kat_var.get(), typ_var.get(),
-                          row.get("konto_typ") or "Wohngeldkonto", ist_korrektur=True)
-            win.destroy()
-        btn_row = tk.Frame(win, bg=BG_CARD)
-        btn_row.pack(fill="x", padx=20, pady=(0,12))
-        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
-        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
-        win.wait_window()
-        if saved[0]: self._load_vorschlaege()
-
-    def _falsch_markieren(self):
-        """Eintrag als falsch zugeordnet markieren (wird ausgeblendet)."""
-        sel = self.tree_v.selection()
-        if not sel: return
-        conn = get_db()
-        conn.execute("UPDATE kontoauszug SET falsch_zugeordnet=1 WHERE id=?", (int(sel[0]),))
-        conn.commit(); conn.close()
-        self._load_vorschlaege()
-
-    # ── Tab 3: Buchungsregeln ──────────────────────────────────────────────────
-
-    def _load_regeln(self):
-        for i in self.tree_r.get_children(): self.tree_r.delete(i)
-        conn = get_db()
-        for r in conn.execute(
-                "SELECT * FROM buchungsregeln ORDER BY treffer DESC, muster"):
-            self.tree_r.insert("", "end", iid=r["id"], values=(
-                r["muster"], r["kategorie"] or "–",
-                r["typ"] or "–", r["konto_typ"] or "–",
-                r["treffer"] or 0,
-                "✔" if r["ist_korrektur"] else ""))
-        conn.close()
-
-    def _edit_regel(self, event=None):
-        sel = self.tree_r.selection()
-        if not sel: return
-        conn = get_db()
-        row = conn.execute("SELECT * FROM buchungsregeln WHERE id=?", (int(sel[0]),)).fetchone()
-        conn.close()
-        if not row: return
-        win = tk.Toplevel(self)
-        win.title("Buchungsregel bearbeiten")
-        win.geometry("400x320")
-        win.configure(bg=BG_CARD)
-        win.grab_set()
-        win.resizable(False, False)
-        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
-        hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr, text="Buchungsregel bearbeiten", bg=BG_SIDEBAR, fg=TEXT_WHITE,
-                 font=FONT_H3).pack(side="left", padx=14, pady=10)
-        body = tk.Frame(win, bg=BG_CARD)
-        body.pack(fill="both", expand=True, padx=20, pady=12)
-        tk.Label(body, text="Muster (Suchtext)", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
-        muster_var = tk.StringVar(value=row["muster"])
-        make_entry(body, textvariable=muster_var).pack(fill="x", ipady=6)
-        tk.Label(body, text="Kategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        kat_var = tk.StringVar(value=row["kategorie"] or "")
-        ttk.Combobox(body, textvariable=kat_var, values=self.aktive_kategorien(),
-                     state="readonly", font=FONT_BODY).pack(fill="x", ipady=4)
-        tk.Label(body, text="Typ", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        typ_var = tk.StringVar(value=row["typ"] or "Einnahme")
-        ttk.Combobox(body, textvariable=typ_var, values=["Einnahme","Ausgabe"],
-                     state="readonly", font=FONT_BODY).pack(fill="x", ipady=4)
-        def _save():
-            conn2 = get_db()
-            conn2.execute(
-                "UPDATE buchungsregeln SET muster=?,kategorie=?,typ=?,ist_korrektur=1 WHERE id=?",
-                (muster_var.get(), kat_var.get(), typ_var.get(), int(sel[0])))
-            conn2.commit(); conn2.close()
-            win.destroy(); self._load_regeln()
-        btn_row = tk.Frame(win, bg=BG_CARD)
-        btn_row.pack(fill="x", padx=20, pady=(0,12))
-        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
-        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
-
-    def _delete_regel(self):
-        sel = self.tree_r.selection()
-        if not sel: return
-        if messagebox.askyesno("Löschen", "Buchungsregel löschen?"):
-            conn = get_db()
-            conn.execute("DELETE FROM buchungsregeln WHERE id=?", (int(sel[0]),))
-            conn.commit(); conn.close(); self._load_regeln()
-
-    # ── Tab 4: Kostenarten ──────────────────────────────────────────────────
+    # ── Kategorien-Verwaltung (Klassenvariablen bleiben hier — genutzt von ZahlungDialog etc.) ──
 
     # Deaktivierte Kategorien (persistent im Config)
     @staticmethod
@@ -3774,330 +3289,9 @@ class BuchhaltungPage(tk.Frame):
         deaktiviert = cls._deaktivierte_kategorien()
         return [k for k in cls.KATEGORIEN if k not in deaktiviert]
 
-    def _load_kostenarten(self):
-        for i in self.tree_k.get_children(): self.tree_k.delete(i)
-        conn = get_db()
-        deaktiviert = self._deaktivierte_kategorien()
-        for idx, kat_name in enumerate(self.KATEGORIEN):
-            meta = self.KOSTENARTEN.get(kat_name, {})
-            # Anzahl Verwendungen in Buchungen zählen
-            count = conn.execute(
-                "SELECT COUNT(*) FROM zahlungen WHERE kategorie=?", (kat_name,)
-            ).fetchone()[0]
-            # Umlagefähig-Anzeige
-            uml = meta.get("umlagefaehig", False)
-            if uml is True:
-                uml_str = "✔ Ja"
-            elif uml == "Teilweise":
-                uml_str = "~ Teilweise"
-            else:
-                uml_str = "✗ Nein"
-            status = "Deaktiviert" if kat_name in deaktiviert else "Aktiv"
-            tag = "deaktiviert" if kat_name in deaktiviert else ""
-            self.tree_k.insert("", "end", iid=str(idx), values=(
-                kat_name,
-                meta.get("kategorie", "–"),
-                uml_str,
-                meta.get("schluessel", "–"),
-                status,
-                count), tags=(tag,) if tag else ())
-        conn.close()
-
-    def _load_wohngeld(self):
-        """#19 Wohngeld Soll/Ist: Vergleich geleisteter vs. erwarteter Hausgeld-Zahlungen."""
-        try:
-            jahr = int(self._wg_jahr.get())
-        except ValueError:
-            return
-
-        conn = get_db()
-        # Gesamtausgaben des Jahres (Soll-Basis für MEA-Anteil)
-        total_ausgaben = conn.execute(
-            "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
-            "WHERE typ='Ausgabe' AND strftime('%Y',datum)=?", (str(jahr),)
-        ).fetchone()[0]
-        # Tatsächlich gezahltes Hausgeld pro Eigentümer
-        hg_ist = conn.execute(
-            "SELECT eigentuemer_id, SUM(betrag) as s FROM zahlungen "
-            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=? "
-            "GROUP BY eigentuemer_id", (str(jahr),)
-        ).fetchall()
-        hg_gesamt_ist = conn.execute(
-            "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
-            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=?",
-            (str(jahr),)
-        ).fetchone()[0]
-        eigentuemer = conn.execute(
-            "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name"
-        ).fetchall()
-        conn.close()
-
-        hg_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hg_ist}
-        total_mea = sum(parse_float(e["anteil_prozent"]) or 0 for e in eigentuemer) or 100.0
-
-        # KPI
-        for w in self._wg_kpi.winfo_children():
-            w.destroy()
-        saldo_gesamt = hg_gesamt_ist - total_ausgaben
-        for label, wert, color in [
-            ("Gesamtausgaben (Soll)", fmt_euro(total_ausgaben), DANGER),
-            ("Hausgeld-Einnahmen (Ist)", fmt_euro(hg_gesamt_ist), SUCCESS),
-            ("Jahressaldo", fmt_euro(saldo_gesamt),
-             SUCCESS if saldo_gesamt >= 0 else DANGER),
-        ]:
-            karte = tk.Frame(self._wg_kpi, bg=BG_INPUT, padx=14, pady=8)
-            karte.pack(side="left", padx=(0, 10))
-            tk.Label(karte, text=label, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
-            tk.Label(karte, text=wert,  bg=BG_INPUT, fg=color,      font=FONT_H3).pack(anchor="w")
-
-        # Pro-Eigentümer-Tabelle
-        for i in self._tree_wg.get_children():
-            self._tree_wg.delete(i)
-        for e in eigentuemer:
-            anteil_pct  = parse_float(e["anteil_prozent"]) or 0
-            soll        = total_ausgaben * anteil_pct / 100
-            ist         = hg_map.get(e["id"], 0)
-            saldo       = ist - soll
-            name        = f"{e['vorname'] or ''} {e['name']}".strip()
-            if saldo >= 0:
-                status    = "✔ ausgeglichen"
-                color_tag = "plus"
-            else:
-                status    = f"⚠ Rückstand {fmt_euro(abs(saldo))}"
-                color_tag = "minus"
-            self._tree_wg.insert("", "end", values=(
-                name, f"{anteil_pct:.2f}%",
-                fmt_euro(soll), fmt_euro(ist),
-                fmt_euro(saldo), status), tags=(color_tag,))
-        self._tree_wg.tag_configure("plus",  foreground=SUCCESS)
-        self._tree_wg.tag_configure("minus", foreground=DANGER)
-
-    @staticmethod
-    def _umlageschluessel_aus_aufteilungen() -> tuple:
-        """#57/#GH79 – Lädt Umlageschlüssel aus aufteilungen-Tabelle.
-
-        Gibt (namen, name_zu_typ, typ_zu_name, tooltips) zurück:
-        - namen:       Liste der Anzeige-Namen (aufteilungen.name, Basis-Typen als Fallback)
-        - name_zu_typ: dict name → typ (für Speichern)
-        - typ_zu_name: dict typ → name (für Vorbelegen beim Bearbeiten)
-        - tooltips:    dict name → Tooltip-Text (Typ + Beschreibung)
-
-        Der gespeicherte Schlüssel ist immer der Typ (für _berechne_umlageanteil).
-        """
-        basis_typen = ["MEA", "Wohnfläche", "Verbrauch", "Verbrauch/Wohnfläche",
-                       "HeizKV", "Kopfanzahl", "Wasserkosten nach Punkten", "–"]
-        try:
-            conn = get_db()
-            try:
-                rows = conn.execute(
-                    "SELECT name, typ, beschreibung FROM aufteilungen WHERE aktiv=1 ORDER BY name"
-                ).fetchall()
-            finally:
-                conn.close()
-            name_zu_typ: dict = {}
-            typ_zu_name: dict = {}
-            tooltips: dict = {}
-            namen: list = []
-            for r in rows:
-                name = (r["name"] or "").strip() or r["typ"]
-                typ = (r["typ"] or "").strip() or name
-                desc = (r["beschreibung"] or "").strip()
-                name_zu_typ[name] = typ
-                typ_zu_name[typ] = name
-                tip = f"Typ: {typ}"
-                if desc:
-                    tip += f"\n{desc}"
-                tooltips[name] = tip
-                if name not in namen:
-                    namen.append(name)
-            # Basis-Typen ergänzen (als name = typ, falls nicht schon vorhanden)
-            for t in basis_typen:
-                if t not in typ_zu_name:
-                    name_zu_typ[t] = t
-                    typ_zu_name[t] = t
-                    tooltips[t] = f"Standard-Schlüssel: {t}"
-                    if t not in namen:
-                        namen.append(t)
-            return namen or basis_typen, name_zu_typ, typ_zu_name, tooltips
-        except Exception:
-            basis_map = {t: t for t in basis_typen}
-            return basis_typen, basis_map, basis_map.copy(), {t: f"Standard-Schlüssel: {t}" for t in basis_typen}
-
-    def _new_kostenart(self):
-        """Neue benutzerdefinierte Kategorie hinzufügen."""
-        win = tk.Toplevel(self)
-        win.title("Neue Kostenkategorie")
-        win.geometry("400x300")
-        win.configure(bg=BG_CARD)
-        win.grab_set()
-        win.resizable(False, False)
-        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
-        hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr, text="Neue Kostenkategorie", bg=BG_SIDEBAR, fg=TEXT_WHITE,
-                 font=FONT_H3).pack(side="left", padx=14, pady=10)
-        body = tk.Frame(win, bg=BG_CARD)
-        body.pack(fill="both", expand=True, padx=20, pady=12)
-        tk.Label(body, text="Name der Kategorie *", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
-        name_var = tk.StringVar()
-        make_entry(body, textvariable=name_var).pack(fill="x", ipady=6)
-        tk.Label(body, text="Oberkategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        ober_var = tk.StringVar(value="Sonstiges")
-        ober_vals = sorted(set(m.get("kategorie", "Sonstiges") for m in self.KOSTENARTEN.values()))
-        ttk.Combobox(body, textvariable=ober_var, values=ober_vals, font=FONT_BODY).pack(fill="x", ipady=4)
-        tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        schluessel_var = tk.StringVar(value="MEA")
-        _namen, _name_zu_typ, _typ_zu_name, _tooltips = self._umlageschluessel_aus_aufteilungen()  # #GH79
-        schluessel_cb = ttk.Combobox(body, textvariable=schluessel_var,
-                     values=_namen,  # #GH79: zeigt Name statt Typ
-                     font=FONT_BODY)
-        schluessel_cb.pack(fill="x", ipady=4)
-        make_tooltip(schluessel_cb,  # #GH79: Tooltip mit Typ + Beschreibung
-                     lambda: _tooltips.get(schluessel_var.get(), ""))
-        uml_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
-                       fg=TEXT, font=FONT_BODY, activebackground=BG_CARD).pack(anchor="w", pady=(8,0))
-        def _save():
-            name = name_var.get().strip()
-            if not name:
-                messagebox.showwarning("Pflichtfeld", "Name der Kategorie ist erforderlich.", parent=win)
-                return
-            if name in self.KATEGORIEN:
-                messagebox.showwarning("Duplikat", f"Kategorie '{name}' existiert bereits.", parent=win)
-                return
-            # #GH79: Anzeige-Name → internen Typ übersetzen
-            angezeigter_name = schluessel_var.get()
-            typ_schluessel = _name_zu_typ.get(angezeigter_name, angezeigter_name)
-            # Dynamisch hinzufügen
-            self.KATEGORIEN.insert(-1, name)  # Vor "Kategorie offen"
-            self.KOSTENARTEN[name] = {
-                "kategorie": ober_var.get(),
-                "umlagefaehig": uml_var.get(),
-                "schluessel": typ_schluessel
-            }
-            # Persistieren in Config
-            cfg = load_config()
-            custom = cfg.get("custom_kategorien", [])
-            custom.append({"name": name, "kategorie": ober_var.get(),
-                          "umlagefaehig": uml_var.get(), "schluessel": typ_schluessel})
-            cfg["custom_kategorien"] = custom
-            save_config(cfg)
-            win.destroy()
-            self._load_kostenarten()
-        btn_row = tk.Frame(win, bg=BG_CARD)
-        btn_row.pack(fill="x", padx=20, pady=(0,12))
-        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
-        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
-
-    def _edit_kostenart(self):
-        """Bestehende Kategorie bearbeiten (Oberkategorie, Schlüssel, Umlagefähig)."""
-        sel = self.tree_k.selection()
-        if not sel: return
-        idx = int(sel[0])
-        if idx >= len(self.KATEGORIEN): return
-        kat_name = self.KATEGORIEN[idx]
-        meta = self.KOSTENARTEN.get(kat_name, {})
-        win = tk.Toplevel(self)
-        win.title("Kostenkategorie bearbeiten")
-        win.geometry("400x280")
-        win.configure(bg=BG_CARD)
-        win.grab_set()
-        win.resizable(False, False)
-        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
-        hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr, text=f"Kategorie: {kat_name}", bg=BG_SIDEBAR, fg=TEXT_WHITE,
-                 font=FONT_H3).pack(side="left", padx=14, pady=10)
-        body = tk.Frame(win, bg=BG_CARD)
-        body.pack(fill="both", expand=True, padx=20, pady=12)
-        tk.Label(body, text="Oberkategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
-        ober_var = tk.StringVar(value=meta.get("kategorie", "Sonstiges"))
-        ober_vals = sorted(set(m.get("kategorie", "Sonstiges") for m in self.KOSTENARTEN.values()))
-        ttk.Combobox(body, textvariable=ober_var, values=ober_vals, font=FONT_BODY).pack(fill="x", ipady=4)
-        tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        _namen_e, _name_zu_typ_e, _typ_zu_name_e, _tooltips_e = self._umlageschluessel_aus_aufteilungen()  # #GH79
-        # #GH79: gespeicherten Typ → Anzeige-Name umrechnen (z.B. "MEA" → "Miteigentumsanteil")
-        gespeicherter_typ = meta.get("schluessel", "MEA")
-        anzeige_start = _typ_zu_name_e.get(gespeicherter_typ, gespeicherter_typ)
-        schluessel_var = tk.StringVar(value=anzeige_start)
-        schluessel_cb_e = ttk.Combobox(body, textvariable=schluessel_var,
-                     values=_namen_e,  # #GH79: zeigt Name statt Typ
-                     font=FONT_BODY)
-        schluessel_cb_e.pack(fill="x", ipady=4)
-        make_tooltip(schluessel_cb_e,  # #GH79: Tooltip mit Typ + Beschreibung
-                     lambda: _tooltips_e.get(schluessel_var.get(), ""))
-        uml = meta.get("umlagefaehig", False)
-        uml_var = tk.BooleanVar(value=uml if isinstance(uml, bool) else False)
-        tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
-                       fg=TEXT, font=FONT_BODY, activebackground=BG_CARD).pack(anchor="w", pady=(8,0))
-        def _save():
-            # #GH79: Anzeige-Name → internen Typ übersetzen
-            angezeigter_name = schluessel_var.get()
-            typ_schluessel = _name_zu_typ_e.get(angezeigter_name, angezeigter_name)
-            self.KOSTENARTEN[kat_name] = {
-                "kategorie": ober_var.get(),
-                "umlagefaehig": uml_var.get(),
-                "schluessel": typ_schluessel
-            }
-            win.destroy()
-            self._load_kostenarten()
-        btn_row = tk.Frame(win, bg=BG_CARD)
-        btn_row.pack(fill="x", padx=20, pady=(0,12))
-        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
-        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
-
-    def _toggle_kostenart(self):
-        """Kategorie aktivieren/deaktivieren."""
-        sel = self.tree_k.selection()
-        if not sel: return
-        idx = int(sel[0])
-        if idx >= len(self.KATEGORIEN): return
-        kat_name = self.KATEGORIEN[idx]
-        deaktiviert = self._deaktivierte_kategorien()
-        if kat_name in deaktiviert:
-            deaktiviert.discard(kat_name)
-        else:
-            deaktiviert.add(kat_name)
-        self._save_deaktivierte(deaktiviert)
-        self._load_kostenarten()
-
-    def _delete_kostenart(self):
-        """Kategorie löschen (nur wenn nicht in Buchungen verwendet)."""
-        sel = self.tree_k.selection()
-        if not sel: return
-        idx = int(sel[0])
-        if idx >= len(self.KATEGORIEN): return
-        kat_name = self.KATEGORIEN[idx]
-        # Schutz: Verwendete Kategorien nicht löschbar
-        conn = get_db()
-        count = conn.execute(
-            "SELECT COUNT(*) FROM zahlungen WHERE kategorie=?", (kat_name,)
-        ).fetchone()[0]
-        conn.close()
-        if count > 0:
-            messagebox.showwarning("Geschützt",
-                f"Kategorie '{kat_name}' wird in {count} Buchung(en) verwendet "
-                f"und kann nicht gelöscht werden.\n\nSie können die Kategorie stattdessen deaktivieren.",
-                parent=self)
-            return
-        if not messagebox.askyesno("Löschen", f"Kategorie '{kat_name}' wirklich löschen?", parent=self):
-            return
-        self.KATEGORIEN.remove(kat_name)
-        self.KOSTENARTEN.pop(kat_name, None)
-        # Aus Config entfernen
-        cfg = load_config()
-        custom = cfg.get("custom_kategorien", [])
-        cfg["custom_kategorien"] = [c for c in custom if c.get("name") != kat_name]
-        deakt = set(cfg.get("deaktivierte_kategorien", []))
-        deakt.discard(kat_name)
-        cfg["deaktivierte_kategorien"] = sorted(deakt)
-        save_config(cfg)
-        self._load_kostenarten()
-
     # Compat: alter Name → neuer Name
     def _load(self):
         self._load_buchungen()
-
-    def _import_csv(self):
-        pass  # CSV-Import nur in Kontoauszug-Seite
 
 
 class ZahlungDialog(BaseDialog):
@@ -6041,7 +5235,8 @@ class NebenkostenPage(tk.Frame):
         for tid, label in [("weg",  "🏛 §28 WEG – Eigentümer"),
                             ("bgb", "👤 §556 BGB – Mieter"),
                             ("wp",  "📋 Wirtschaftsplan"),
-                            ("verbrauch", "🔢 Verbrauch")]:
+                            ("verbrauch", "🔢 Verbrauch"),
+                            ("wohngeld", "💰 Hausgeld-Kontrolle")]:
             btn = tk.Button(tab_bar, text=label, font=FONT_NAV, relief="flat", bd=0,
                             padx=14, pady=7, cursor="hand2",
                             command=lambda t=tid: self._switch_tab(t))
@@ -6197,6 +5392,30 @@ class NebenkostenPage(tk.Frame):
         btn_row.pack(fill="x", padx=20, pady=8)
         make_btn(btn_row, "✏️ Bearbeiten", self._edit_verbrauch).pack(side="left", padx=(0, 6))
 
+        # ── Tab Hausgeld-Kontrolle (#86) ────────────────────────────────────────
+        self._view_wohngeld = tk.Frame(self._content, bg=BG_CARD)
+        wg_top = tk.Frame(self._view_wohngeld, bg=BG_CARD)
+        wg_top.pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(wg_top, text="Jahr:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._wg_jahr = tk.StringVar(value=str(date.today().year))
+        ttk.Combobox(wg_top, textvariable=self._wg_jahr, width=8,
+                     values=[str(y) for y in range(date.today().year, date.today().year - 6, -1)]
+                     ).pack(side="left", padx=6)
+        make_btn(wg_top, "🔄 Auswertung", self._load_wohngeld).pack(side="left")
+
+        self._wg_kpi = tk.Frame(self._view_wohngeld, bg=BG_CARD)
+        self._wg_kpi.pack(fill="x", padx=20, pady=(6, 4))
+
+        tk.Label(self._view_wohngeld,
+                 text="Hausgeld-Einnahmen pro Eigentümer (Ist) vs. Kostenpflicht (Soll nach MEA)",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
+        cols_wg = ("Eigentümer", "MEA %", "Soll (Kostenanteil)", "Ist (gezahlt)", "Saldo", "Status")
+        fwg, self._tree_wg = make_table(self._view_wohngeld, cols_wg, height=12)
+        fwg.pack(fill="both", expand=True, padx=20, pady=(2, 8))
+        for c, w in zip(cols_wg, [180, 60, 140, 140, 110, 100]):
+            self._tree_wg.heading(c, text=c)
+            self._tree_wg.column(c, width=w, anchor="w")
+
         self._switch_tab("weg")
 
     # ── Tab-Wechsel ────────────────────────────────────────────────────────────
@@ -6206,11 +5425,17 @@ class NebenkostenPage(tk.Frame):
         for t, btn in self._tab_btns.items():
             btn.configure(bg=ACCENT if t == tid else BG_CARD,
                           fg=TEXT_WHITE if t == tid else TEXT)
-        for frame in (self._view_weg, self._view_bgb, self._view_wp, self._view_verbrauch):
+        for frame in (self._view_weg, self._view_bgb, self._view_wp,
+                      self._view_verbrauch, self._view_wohngeld):
             frame.pack_forget()
-        {"weg": self._view_weg, "bgb": self._view_bgb, "wp": self._view_wp, "verbrauch": self._view_verbrauch}[tid].pack(
-            fill="both", expand=True)
-        {"weg": self._load_weg, "bgb": self._load_bgb, "wp": self._load_wp, "verbrauch": self._load_verbrauch_tab}[tid]()
+        view_map = {"weg": self._view_weg, "bgb": self._view_bgb,
+                    "wp": self._view_wp, "verbrauch": self._view_verbrauch,
+                    "wohngeld": self._view_wohngeld}
+        load_map = {"weg": self._load_weg, "bgb": self._load_bgb,
+                    "wp": self._load_wp, "verbrauch": self._load_verbrauch_tab,
+                    "wohngeld": self._load_wohngeld}
+        view_map[tid].pack(fill="both", expand=True)
+        load_map[tid]()
 
     # ── Verbrauchsdaten-Tab ────────────────────────────────────────────────────
 
@@ -6317,6 +5542,69 @@ class NebenkostenPage(tk.Frame):
         btn_row.pack(pady=12)
         make_btn(btn_row, "💾 Speichern", _speichern).pack(side="left", padx=6)
         make_btn(btn_row, "Abbrechen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(side="left", padx=6)
+
+    # ── Hausgeld-Kontrolle (#86) ──────────────────────────────────────────────
+
+    def _load_wohngeld(self):
+        """Wohngeld Soll/Ist: Vergleich geleisteter vs. erwarteter Hausgeld-Zahlungen."""
+        try:
+            jahr = int(self._wg_jahr.get())
+        except ValueError:
+            return
+        conn = get_db()
+        total_ausgaben = conn.execute(
+            "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
+            "WHERE typ='Ausgabe' AND strftime('%Y',datum)=?", (str(jahr),)
+        ).fetchone()[0]
+        hg_ist = conn.execute(
+            "SELECT eigentuemer_id, SUM(betrag) as s FROM zahlungen "
+            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=? "
+            "GROUP BY eigentuemer_id", (str(jahr),)
+        ).fetchall()
+        hg_gesamt_ist = conn.execute(
+            "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
+            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=?",
+            (str(jahr),)
+        ).fetchone()[0]
+        eigentuemer = conn.execute(
+            "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name"
+        ).fetchall()
+        conn.close()
+        hg_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hg_ist}
+        # KPI-Karten
+        for w in self._wg_kpi.winfo_children():
+            w.destroy()
+        saldo_gesamt = hg_gesamt_ist - total_ausgaben
+        for label, wert, color in [
+            ("Gesamtausgaben (Soll)", fmt_euro(total_ausgaben), DANGER),
+            ("Hausgeld-Einnahmen (Ist)", fmt_euro(hg_gesamt_ist), SUCCESS),
+            ("Jahressaldo", fmt_euro(saldo_gesamt), SUCCESS if saldo_gesamt >= 0 else DANGER),
+        ]:
+            karte = tk.Frame(self._wg_kpi, bg=BG_INPUT, padx=14, pady=8)
+            karte.pack(side="left", padx=(0, 10))
+            tk.Label(karte, text=label, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+            tk.Label(karte, text=wert,  bg=BG_INPUT, fg=color,      font=FONT_H3).pack(anchor="w")
+        # Pro-Eigentümer-Tabelle
+        for i in self._tree_wg.get_children():
+            self._tree_wg.delete(i)
+        for e in eigentuemer:
+            anteil_pct = parse_float(e["anteil_prozent"]) or 0
+            soll       = total_ausgaben * anteil_pct / 100
+            ist        = hg_map.get(e["id"], 0)
+            saldo      = ist - soll
+            name       = f"{e['vorname'] or ''} {e['name']}".strip()
+            if saldo >= 0:
+                status    = "✔ ausgeglichen"
+                color_tag = "wg_plus"
+            else:
+                status    = f"⚠ Rückstand {fmt_euro(abs(saldo))}"
+                color_tag = "wg_minus"
+            self._tree_wg.insert("", "end", values=(
+                name, f"{anteil_pct:.2f}%",
+                fmt_euro(soll), fmt_euro(ist),
+                fmt_euro(saldo), status), tags=(color_tag,))
+        self._tree_wg.tag_configure("wg_plus",  foreground=SUCCESS)
+        self._tree_wg.tag_configure("wg_minus", foreground=DANGER)
 
     # ── §28 WEG Eigentümer ─────────────────────────────────────────────────────
 
@@ -8046,7 +7334,10 @@ class AufteilungDialog(BaseDialog):
 # ── Kontoauszug-Seite ──────────────────────────────────────────────────────
 
 class KontoauszugPage(tk.Frame):
-    """Kontoauszug-Seite: Import von CAMT.052 XML (Sparkasse) und CSV."""
+    """Kontoauszug-Seite: Import von CAMT.052 XML (Sparkasse) und CSV.
+    Tab 1: 🏦 Kontoauszug – importierte Buchungen
+    Tab 2: 🔔 Vorschläge – neue Einträge auf Zuordnung warten (#83)
+    """
 
     CAMT_NS = "urn:iso:std:iso:20022:tech:xsd:camt.052.001.08"
 
@@ -8057,21 +7348,40 @@ class KontoauszugPage(tk.Frame):
     # ── UI aufbauen ───────────────────────────────────────────────────────────
 
     def _build(self):
-        # Kopfzeile mit zwei Import-Schaltflächen
-        row = tk.Frame(self, bg=BG_CARD)
-        row.pack(fill="x", padx=20, pady=(18, 6))
-        tk.Label(row, text="Kontoauszug", bg=BG_CARD, fg=TEXT,
+        # ── Kopfzeile ────────────────────────────────────────────────────────
+        hdr_row = tk.Frame(self, bg=BG_CARD)
+        hdr_row.pack(fill="x", padx=20, pady=(18, 6))
+        tk.Label(hdr_row, text="Kontoauszug", bg=BG_CARD, fg=TEXT,
                  font=FONT_H2).pack(side="left")
-        make_btn(row, "📥 CAMT.052 XML", self._import_xml,
+        make_btn(hdr_row, "📥 CAMT.052 XML", self._import_xml,
                  color=ACCENT2).pack(side="right")
-        make_btn(row, "📄 CSV", self._import_csv_action,
+        make_btn(hdr_row, "📄 CSV", self._import_csv_action,
                  color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
-        make_btn(row, "🔗 Auto-Matching", self._auto_matching_starten,
+        make_btn(hdr_row, "🔗 Auto-Matching", self._auto_matching_starten,
                  color="#1A5276").pack(side="right", padx=(0, 8))  # #69
-        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20)
+
+        # ── Sub-Tab-Leiste ────────────────────────────────────────────────────
+        self._ka_tab_btns = {}
+        tab_bar = tk.Frame(self, bg=BG_CARD)
+        tab_bar.pack(fill="x", padx=20, pady=(4, 0))
+        for tid, label in [("kontoauszug", "🏦  Kontoauszug"),
+                            ("vorschlaege", "🔔  Vorschläge")]:
+            btn = tk.Button(tab_bar, text=label, font=FONT_NAV, relief="flat", bd=0,
+                            padx=14, pady=7, cursor="hand2",
+                            command=lambda t=tid: self._switch_ka_tab(t))
+            btn.pack(side="left", padx=2)
+            self._ka_tab_btns[tid] = btn
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(4, 0))
+
+        # ── Content-Bereich ───────────────────────────────────────────────────
+        self._ka_content = tk.Frame(self, bg=BG_CARD)
+        self._ka_content.pack(fill="both", expand=True)
+
+        # ── View 1: Kontoauszug ───────────────────────────────────────────────
+        self._view_kontoauszug = tk.Frame(self._ka_content, bg=BG_CARD)
 
         # Konto-Filter-Zeile
-        filter_row = tk.Frame(self, bg=BG_CARD)
+        filter_row = tk.Frame(self._view_kontoauszug, bg=BG_CARD)
         filter_row.pack(fill="x", padx=20, pady=(6, 0))
         tk.Label(filter_row, text="Konto:", bg=BG_CARD, fg=TEXT_LIGHT,
                  font=FONT_SMALL).pack(side="left")
@@ -8084,12 +7394,12 @@ class KontoauszugPage(tk.Frame):
         # Info-Zeile (wird nach Import aktualisiert)
         self._info_var = tk.StringVar(
             value="Kontoauszug importieren: CAMT.052 XML (Sparkasse Bodensee) oder CSV")
-        tk.Label(self, textvariable=self._info_var,
+        tk.Label(self._view_kontoauszug, textvariable=self._info_var,
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(
                  anchor="w", padx=20, pady=(4, 0))
 
         # Status-Legende
-        legende_frame = tk.Frame(self, bg=BG_CARD)
+        legende_frame = tk.Frame(self._view_kontoauszug, bg=BG_CARD)
         legende_frame.pack(fill="x", padx=20, pady=(4, 0))
         for text, farbe in [
             ("● Importiert", TEXT_LIGHT),
@@ -8100,12 +7410,12 @@ class KontoauszugPage(tk.Frame):
             tk.Label(legende_frame, text=text, bg=BG_CARD, fg=farbe, font=FONT_SMALL).pack(side="left", padx=6)
 
         # Saldo-Kacheln (pro Konto)
-        self._saldo_frame = tk.Frame(self, bg=BG_CARD)
+        self._saldo_frame = tk.Frame(self._view_kontoauszug, bg=BG_CARD)
         self._saldo_frame.pack(fill="x", padx=20, pady=(4, 0))
 
         # Buchungstabelle
         cols = ("Datum", "Auftraggeber / Empfänger", "Verwendungszweck", "Betrag", "✔")
-        f, self.tree = make_table(self, cols, height=14)
+        f, self.tree = make_table(self._view_kontoauszug, cols, height=12)
         f.pack(fill="both", expand=True, padx=20, pady=6)
         for col, w in zip(cols, [90, 200, 310, 110, 36]):
             self.tree.heading(col, text=col)
@@ -8124,12 +7434,58 @@ class KontoauszugPage(tk.Frame):
         self.tree.bind("<<TreeviewSelect>>", self._on_row_click)
 
         # Aktions-Buttons (unten)
-        btn_row = tk.Frame(self, bg=BG_CARD)
+        btn_row = tk.Frame(self._view_kontoauszug, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0, 10))
         make_btn(btn_row, "🗑 Alle löschen", self._clear,
                  color=DANGER).pack(side="left")
 
-        self._load()
+        # ── View 2: Vorschläge (#83) ──────────────────────────────────────────
+        self._view_vorschlaege = tk.Frame(self._ka_content, bg=BG_CARD)
+
+        # Konto-Filter für Vorschläge
+        vs_filter = tk.Frame(self._view_vorschlaege, bg=BG_CARD)
+        vs_filter.pack(fill="x", padx=20, pady=(6, 2))
+        tk.Label(vs_filter, text="Neue Kontoauszug-Buchungen → Kategorie zuweisen und übernehmen",
+            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        tk.Label(vs_filter, text="  Konto:", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(side="left", padx=(12, 0))
+        self._vs_konto_var = tk.StringVar(value="Alle")
+        self._vs_konto_combo = ttk.Combobox(vs_filter, textvariable=self._vs_konto_var,
+                                             state="readonly", font=FONT_SMALL, width=30)
+        self._vs_konto_combo.pack(side="left", padx=(4, 0))
+        self._vs_konto_combo.bind("<<ComboboxSelected>>", lambda e: self._load_vorschlaege())
+
+        cols_v = ("Datum", "Auftraggeber", "Verwendungszweck", "Betrag", "Konto", "Vorschlag Kat.")
+        fv, self.tree_v = make_table(self._view_vorschlaege, cols_v, height=12)
+        fv.pack(fill="both", expand=True, padx=20, pady=4)
+        for c, w in zip(cols_v, [88, 180, 250, 100, 90, 120]):
+            self.tree_v.heading(c, text=c); self.tree_v.column(c, width=w, anchor="w")
+        self.tree_v.tag_configure("mit_vorschlag", foreground="#2E7D32")
+        # Mehrfachauswahl aktivieren
+        self.tree_v.configure(selectmode="extended")
+        btn_v = tk.Frame(self._view_vorschlaege, bg=BG_CARD)
+        btn_v.pack(fill="x", padx=20, pady=(0, 8))
+        make_btn(btn_v, "✔ Übernehmen",              self._uebernehmen,      color=SUCCESS).pack(side="left", padx=(0,6))
+        make_btn(btn_v, "✔✔ Alle grünen übernehmen", self._batch_uebernehmen,color="#2E7D32").pack(side="left", padx=(0,6))
+        make_btn(btn_v, "✏ Kategorie korrigieren",    self._korrigieren,      color=ACCENT2).pack(side="left", padx=(0,6))
+        make_btn(btn_v, "✗ Falsch zugeordnet",        self._falsch_markieren, color=DANGER).pack(side="left")
+
+        self._switch_ka_tab("kontoauszug")
+
+    # ── Tab-Umschalten ────────────────────────────────────────────────────────
+
+    def _switch_ka_tab(self, tab: str):
+        for tid, btn in self._ka_tab_btns.items():
+            btn.config(bg=ACCENT2 if tid == tab else BG_CARD,
+                       fg=TEXT_WHITE if tid == tab else TEXT_LIGHT)
+        for v in [self._view_kontoauszug, self._view_vorschlaege]:
+            v.pack_forget()
+        if tab == "kontoauszug":
+            self._view_kontoauszug.pack(fill="both", expand=True)
+            self._load()
+        elif tab == "vorschlaege":
+            self._view_vorschlaege.pack(fill="both", expand=True)
+            self._load_vorschlaege()
 
     # ── Tabelle befüllen ─────────────────────────────────────────────────────
 
@@ -8285,6 +7641,244 @@ class KontoauszugPage(tk.Frame):
     def _get_default_import_dir(self):
         """Gibt den Standard-Importpfad zurück, legt ihn ggf. an (#38)."""
         return get_pfad("pfad_kontoauszug_import", "Kontoauszüge")
+
+    # ── Tab 2: Vorschläge (#83) ───────────────────────────────────────────────
+
+    def _load_vorschlaege(self):
+        for i in self.tree_v.get_children(): self.tree_v.delete(i)
+        conn = get_db()
+        # Konto-Filter aktualisieren
+        konten_raw = conn.execute(
+            "SELECT DISTINCT iban FROM kontoauszug "
+            "WHERE iban IS NOT NULL AND iban != '' "
+            "AND (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
+            "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) "
+            "ORDER BY iban"
+        ).fetchall()
+        cfg = load_config()
+        konto_labels = ["Alle"]
+        self._vs_iban_map = {"Alle": None}
+        for kr in konten_raw:
+            iban = kr["iban"]
+            label = self._konto_bezeichnung(iban, cfg)
+            konto_labels.append(label)
+            self._vs_iban_map[label] = iban
+        self._vs_konto_combo["values"] = konto_labels
+        if self._vs_konto_var.get() not in konto_labels:
+            self._vs_konto_var.set("Alle")
+
+        selected_iban = self._vs_iban_map.get(self._vs_konto_var.get())
+        q = ("SELECT * FROM kontoauszug "
+             "WHERE (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
+             "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) ")
+        params = []
+        if selected_iban:
+            q += "AND iban=? "
+            params.append(selected_iban)
+        q += "ORDER BY datum DESC, id DESC"
+        rows = conn.execute(q, params).fetchall()
+        conn.close()
+        for row in rows:
+            r = dict(row)
+            raw = r["buchungstext"] or ""
+            gegenkonto = raw.split("||")[0] if "||" in raw else ""
+            vzweck     = raw.split("||")[1] if "||" in raw else raw
+            vorschlag  = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
+            tag = "mit_vorschlag" if vorschlag else ""
+            iban_kurz = f"···{r['iban'][-8:]}" if r.get("iban") else r.get("konto_typ") or "–"
+            self.tree_v.insert("", "end", iid=r["id"], values=(
+                fmt_date(r["datum"]),
+                gegenkonto or "–",
+                vzweck or "–",
+                fmt_euro(r["betrag"] or 0),
+                iban_kurz,
+                vorschlag or "–"),
+                tags=(tag,) if tag else ())
+
+    def _uebernehmen(self):
+        """Kontoauszug-Eintrag als Buchung in zahlungen übernehmen."""
+        sel = self.tree_v.selection()
+        if not sel:
+            messagebox.showinfo("Hinweis", "Bitte einen Eintrag auswählen.", parent=self)
+            return
+        if not hat_recht("Buchhaltung", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
+            return
+        conn = get_db()
+        row_raw = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(sel[0]),)).fetchone()
+        conn.close()
+        if not row_raw:
+            messagebox.showwarning("Fehler", "Eintrag nicht gefunden.", parent=self)
+            return
+        row = dict(row_raw)
+        raw = row["buchungstext"] or ""
+        gegenkonto = raw.split("||")[0] if "||" in raw else ""
+        vzweck     = raw.split("||")[1] if "||" in raw else raw
+        kat_v, typ_v, kto_v, _ = vorschlag_kategorie(raw)
+        kat_v = row.get("kategorie_vorschlag") or kat_v
+        kt = row.get("konto_typ") or kto_v or "Wohngeldkonto"
+        pseudo = {
+            "datum":       row["datum"] or date.today().isoformat(),
+            "betrag":      abs(row["betrag"] or 0),
+            "typ":         "Einnahme" if (row["betrag"] or 0) >= 0 else "Ausgabe",
+            "kategorie":   kat_v,
+            "beschreibung": f"{gegenkonto} – {vzweck}".strip(" –"),
+            "belegnr":     "",
+            "status":      "Neu",
+        }
+        d = ZahlungDialog(self, pseudo)
+        self.wait_window(d)
+        if d.result:
+            v = d.result
+            betrag = float(v["betrag"] or 0)
+            if v["typ"] == "Ausgabe": betrag = -abs(betrag)
+            conn = get_db()
+            conn.execute(
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,konto_typ,status) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
+                 kt, v.get("status", "Neu")))
+            zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
+                "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
+                (v["kategorie"], zahlung_id, int(sel[0])))
+            conn.commit(); conn.close()
+            lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False)
+            self._load_vorschlaege()
+
+    def _batch_uebernehmen(self):
+        """Grün markierte Vorschläge automatisch übernehmen."""
+        if not hat_recht("Buchhaltung", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
+            return
+        selected_ids = [int(iid) for iid in self.tree_v.selection()]
+        use_selection = bool(selected_ids)
+        selected_iban = self._vs_iban_map.get(self._vs_konto_var.get())
+        conn = get_db()
+        if use_selection:
+            placeholders = ",".join("?" * len(selected_ids))
+            q = (f"SELECT * FROM kontoauszug "
+                 f"WHERE id IN ({placeholders}) "
+                 f"AND (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
+                 f"AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) "
+                 f"ORDER BY datum")
+            rows = conn.execute(q, selected_ids).fetchall()
+            quelle = f"{len(selected_ids)} ausgewählte Einträge"
+        else:
+            q = ("SELECT * FROM kontoauszug "
+                 "WHERE (als_buchung_uebernommen IS NULL OR als_buchung_uebernommen=0) "
+                 "AND (falsch_zugeordnet IS NULL OR falsch_zugeordnet=0) ")
+            params = []
+            if selected_iban:
+                q += "AND iban=? "
+                params.append(selected_iban)
+            q += "ORDER BY datum"
+            rows = conn.execute(q, params).fetchall()
+            quelle = "alle grünen Einträge"
+        count = 0
+        skipped = 0
+        lern_queue = []
+        for row_raw in rows:
+            row = dict(row_raw)
+            raw = row["buchungstext"] or ""
+            kat = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
+            if not kat:
+                skipped += 1
+                continue
+            betrag = row["betrag"] or 0
+            typ = "Einnahme" if betrag >= 0 else "Ausgabe"
+            gegenkonto = raw.split("||")[0] if "||" in raw else ""
+            vzweck = raw.split("||")[1] if "||" in raw else raw
+            beschr = f"{gegenkonto} – {vzweck}".strip(" –") if gegenkonto else vzweck
+            kt = row.get("konto_typ") or "Wohngeldkonto"
+            conn.execute(
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,konto_typ,status) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (row["datum"], betrag, typ, kat, beschr[:200], kt, "Neu"))
+            zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
+                "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
+                (kat, zahlung_id, row["id"]))
+            lern_queue.append((raw, kat, typ, kt))
+            count += 1
+        conn.commit()
+        conn.close()
+        for _raw, _kat, _typ, _kt in lern_queue:
+            lerne_buchung(_raw, _kat, _typ, _kt)
+        if count:
+            msg = f"{count} Buchung(en) aus {quelle} übernommen."
+            if skipped:
+                msg += f"\n{skipped} Eintrag/Einträge ohne Kategorie übersprungen."
+            messagebox.showinfo("Batch-Übernahme", msg)
+        else:
+            msg = "Keine Einträge mit Kategorie-Zuordnung gefunden."
+            if skipped:
+                msg += f"\n{skipped} Eintrag/Einträge haben keine Kategorie."
+            messagebox.showinfo("Batch-Übernahme", msg)
+        self._load_vorschlaege()
+
+    def _korrigieren(self):
+        """Kategorie-Vorschlag für diesen Eintrag manuell korrigieren (Lernen)."""
+        sel = self.tree_v.selection()
+        if not sel: return
+        conn = get_db()
+        row_raw = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(sel[0]),)).fetchone()
+        conn.close()
+        if not row_raw: return
+        row = dict(row_raw)
+        raw = row["buchungstext"] or ""
+        kat_v = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
+        win = tk.Toplevel(self)
+        win.title("Kategorie korrigieren")
+        win.geometry("340x260")
+        win.configure(bg=BG_CARD)
+        win.grab_set()
+        win.resizable(False, False)
+        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="Kategorie wählen", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H3).pack(side="left", padx=14, pady=10)
+        body = tk.Frame(win, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=20, pady=12)
+        tk.Label(body, text="Kategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+        kat_var = tk.StringVar(value=kat_v)
+        cb = ttk.Combobox(body, textvariable=kat_var, values=BuchhaltungPage.aktive_kategorien(),
+                          state="readonly", font=FONT_BODY)
+        cb.pack(fill="x", ipady=4)
+        typ_var = tk.StringVar(value="Einnahme" if (row["betrag"] or 0) >= 0 else "Ausgabe")
+        tk.Label(body, text="Typ", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
+        cb2 = ttk.Combobox(body, textvariable=typ_var,
+                           values=["Einnahme", "Ausgabe"], state="readonly", font=FONT_BODY)
+        cb2.pack(fill="x", ipady=4)
+        saved = [False]
+        def _save():
+            saved[0] = True
+            conn2 = get_db()
+            conn2.execute("UPDATE kontoauszug SET kategorie_vorschlag=? WHERE id=?",
+                          (kat_var.get(), int(sel[0])))
+            conn2.commit(); conn2.close()
+            lerne_buchung(raw, kat_var.get(), typ_var.get(),
+                          row.get("konto_typ") or "Wohngeldkonto", ist_korrektur=True)
+            win.destroy()
+        btn_row = tk.Frame(win, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0,12))
+        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
+        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
+        win.wait_window()
+        if saved[0]: self._load_vorschlaege()
+
+    def _falsch_markieren(self):
+        """Eintrag als falsch zugeordnet markieren (wird ausgeblendet)."""
+        sel = self.tree_v.selection()
+        if not sel: return
+        conn = get_db()
+        conn.execute("UPDATE kontoauszug SET falsch_zugeordnet=1 WHERE id=?", (int(sel[0]),))
+        conn.commit(); conn.close()
+        self._load_vorschlaege()
+
+    # ── Import ────────────────────────────────────────────────────────────────
 
     def _import_xml(self):
         """CAMT.052 XML-Dateien oder -Ordner (Sparkasse Bodensee / ISO 20022) importieren."""
@@ -10418,7 +10012,17 @@ class EinstellungenPage(tk.Frame):
         make_btn(btn_log_row, "📋 Matching-Log anzeigen", self._show_match_log,
                  color=ACCENT2).pack(side="left")
 
-        # ── Tab 5: KI-Administration (nur für Berechtigte) ────────────────────
+        # ── Tab 5: Buchungsregeln (#84) ───────────────────────────────────────
+        t_regeln_outer, t_regeln = self._scrollable_tab(nb)
+        nb.add(t_regeln_outer, text="⚙ Buchungsregeln")
+        self._build_regeln_tab(t_regeln)
+
+        # ── Tab 6: Kostenarten (#85) ──────────────────────────────────────────
+        t_kat_outer, t_kat = self._scrollable_tab(nb)
+        nb.add(t_kat_outer, text="📋 Kostenarten")
+        self._build_kostenarten_tab(t_kat)
+
+        # ── Tab 7: KI-Administration (nur für Berechtigte) ────────────────────
         t4_outer, t4 = self._scrollable_tab(nb)
         nb.add(t4_outer, text="🤖 KI-Administration")
         if not hat_recht("KI-Administration", "lesen"):
@@ -10429,6 +10033,334 @@ class EinstellungenPage(tk.Frame):
                      justify="center").pack(expand=True)
         else:
             self._build_ki_admin_tab(t4)
+
+    # ── Tab: Buchungsregeln (#84) ─────────────────────────────────────────────
+
+    def _build_regeln_tab(self, parent):
+        tk.Label(parent,
+            text="Automatisch gelernte Zuordnungsregeln — können hier korrigiert oder gelöscht werden",
+            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(6, 2))
+        cols_r = ("Auftraggeber / Empfänger", "Kategorie", "Typ", "Konto", "Treffer", "Korrektur")
+        fr, self.tree_r = make_table(parent, cols_r, height=16)
+        fr.pack(fill="both", expand=True, padx=20, pady=4)
+        for c, w in zip(cols_r, [220, 130, 90, 110, 70, 80]):
+            self.tree_r.heading(c, text=c); self.tree_r.column(c, width=w, anchor="w")
+        btn_r = tk.Frame(parent, bg=BG_CARD)
+        btn_r.pack(fill="x", padx=20, pady=(0, 8))
+        make_btn(btn_r, "✏ Korrigieren", self._edit_regel, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
+        make_btn(btn_r, "🗑 Löschen",    self._delete_regel, color=DANGER).pack(side="left")
+        make_btn(btn_r, "🔄 Aktualisieren", self._load_regeln, color=BG_INPUT, fg=TEXT).pack(side="right")
+        self._load_regeln()
+
+    def _load_regeln(self):
+        for i in self.tree_r.get_children(): self.tree_r.delete(i)
+        conn = get_db()
+        for r in conn.execute(
+                "SELECT * FROM buchungsregeln ORDER BY treffer DESC, muster"):
+            self.tree_r.insert("", "end", iid=r["id"], values=(
+                r["muster"], r["kategorie"] or "–",
+                r["typ"] or "–", r["konto_typ"] or "–",
+                r["treffer"] or 0,
+                "✔" if r["ist_korrektur"] else ""))
+        conn.close()
+
+    def _edit_regel(self, event=None):
+        sel = self.tree_r.selection()
+        if not sel: return
+        conn = get_db()
+        row = conn.execute("SELECT * FROM buchungsregeln WHERE id=?", (int(sel[0]),)).fetchone()
+        conn.close()
+        if not row: return
+        win = tk.Toplevel(self)
+        win.title("Buchungsregel bearbeiten")
+        win.geometry("400x320")
+        win.configure(bg=BG_CARD)
+        win.grab_set()
+        win.resizable(False, False)
+        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="Buchungsregel bearbeiten", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H3).pack(side="left", padx=14, pady=10)
+        body = tk.Frame(win, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=20, pady=12)
+        tk.Label(body, text="Muster (Suchtext)", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+        muster_var = tk.StringVar(value=row["muster"])
+        make_entry(body, textvariable=muster_var).pack(fill="x", ipady=6)
+        tk.Label(body, text="Kategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
+        kat_var = tk.StringVar(value=row["kategorie"] or "")
+        ttk.Combobox(body, textvariable=kat_var, values=BuchhaltungPage.aktive_kategorien(),
+                     state="readonly", font=FONT_BODY).pack(fill="x", ipady=4)
+        tk.Label(body, text="Typ", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
+        typ_var = tk.StringVar(value=row["typ"] or "Einnahme")
+        ttk.Combobox(body, textvariable=typ_var, values=["Einnahme","Ausgabe"],
+                     state="readonly", font=FONT_BODY).pack(fill="x", ipady=4)
+        def _save():
+            conn2 = get_db()
+            conn2.execute(
+                "UPDATE buchungsregeln SET muster=?,kategorie=?,typ=?,ist_korrektur=1 WHERE id=?",
+                (muster_var.get(), kat_var.get(), typ_var.get(), int(sel[0])))
+            conn2.commit(); conn2.close()
+            win.destroy(); self._load_regeln()
+        btn_row = tk.Frame(win, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0,12))
+        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
+        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
+
+    def _delete_regel(self):
+        sel = self.tree_r.selection()
+        if not sel: return
+        if messagebox.askyesno("Löschen", "Buchungsregel löschen?"):
+            conn = get_db()
+            conn.execute("DELETE FROM buchungsregeln WHERE id=?", (int(sel[0]),))
+            conn.commit(); conn.close(); self._load_regeln()
+
+    # ── Tab: Kostenarten (#85) ────────────────────────────────────────────────
+
+    def _build_kostenarten_tab(self, parent):
+        tk.Label(parent,
+            text="WEG-Kostenkategorien verwalten — deaktivierte Kategorien können nicht mehr zugewiesen werden",
+            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(6, 2))
+        cols_k = ("Kategorie", "Oberkategorie", "Umlagefähig", "Schlüssel", "Status", "Verwendungen")
+        fk, self.tree_k = make_table(parent, cols_k, height=16)
+        fk.pack(fill="both", expand=True, padx=20, pady=4)
+        for c, w in zip(cols_k, [180, 180, 100, 140, 80, 100]):
+            self.tree_k.heading(c, text=c); self.tree_k.column(c, width=w, anchor="w")
+        self.tree_k.tag_configure("deaktiviert", foreground=TEXT_LIGHT)
+        btn_k = tk.Frame(parent, bg=BG_CARD)
+        btn_k.pack(fill="x", padx=20, pady=(0, 8))
+        make_btn(btn_k, "＋ Neue Kategorie", self._new_kostenart, color=ACCENT2).pack(side="left", padx=(0,6))
+        make_btn(btn_k, "✏ Bearbeiten", self._edit_kostenart, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
+        make_btn(btn_k, "🔄 Aktivieren/Deaktivieren", self._toggle_kostenart, color=WARNING, fg=TEXT_WHITE).pack(side="left", padx=(0,6))
+        make_btn(btn_k, "🗑 Löschen", self._delete_kostenart, color=DANGER).pack(side="left")
+        self._load_kostenarten()
+
+    def _load_kostenarten(self):
+        for i in self.tree_k.get_children(): self.tree_k.delete(i)
+        conn = get_db()
+        deaktiviert = BuchhaltungPage._deaktivierte_kategorien()
+        for idx, kat_name in enumerate(BuchhaltungPage.KATEGORIEN):
+            meta = BuchhaltungPage.KOSTENARTEN.get(kat_name, {})
+            count = conn.execute(
+                "SELECT COUNT(*) FROM zahlungen WHERE kategorie=?", (kat_name,)
+            ).fetchone()[0]
+            uml = meta.get("umlagefaehig", False)
+            if uml is True:
+                uml_str = "✔ Ja"
+            elif uml == "Teilweise":
+                uml_str = "~ Teilweise"
+            else:
+                uml_str = "✗ Nein"
+            status = "Deaktiviert" if kat_name in deaktiviert else "Aktiv"
+            tag = "deaktiviert" if kat_name in deaktiviert else ""
+            self.tree_k.insert("", "end", iid=str(idx), values=(
+                kat_name,
+                meta.get("kategorie", "–"),
+                uml_str,
+                meta.get("schluessel", "–"),
+                status,
+                count), tags=(tag,) if tag else ())
+        conn.close()
+
+    @staticmethod
+    def _umlageschluessel_aus_aufteilungen() -> tuple:
+        """Lädt Umlageschlüssel aus aufteilungen-Tabelle (#GH79)."""
+        basis_typen = ["MEA", "Wohnfläche", "Verbrauch", "Verbrauch/Wohnfläche",
+                       "HeizKV", "Kopfanzahl", "Wasserkosten nach Punkten", "–"]
+        try:
+            conn = get_db()
+            try:
+                rows = conn.execute(
+                    "SELECT name, typ, beschreibung FROM aufteilungen WHERE aktiv=1 ORDER BY name"
+                ).fetchall()
+            finally:
+                conn.close()
+            name_zu_typ: dict = {}
+            typ_zu_name: dict = {}
+            tooltips: dict = {}
+            namen: list = []
+            for r in rows:
+                name = (r["name"] or "").strip() or r["typ"]
+                typ = (r["typ"] or "").strip() or name
+                desc = (r["beschreibung"] or "").strip()
+                name_zu_typ[name] = typ
+                typ_zu_name[typ] = name
+                tip = f"Typ: {typ}"
+                if desc:
+                    tip += f"\n{desc}"
+                tooltips[name] = tip
+                if name not in namen:
+                    namen.append(name)
+            for t in basis_typen:
+                if t not in typ_zu_name:
+                    name_zu_typ[t] = t
+                    typ_zu_name[t] = t
+                    tooltips[t] = f"Standard-Schlüssel: {t}"
+                    if t not in namen:
+                        namen.append(t)
+            return namen or basis_typen, name_zu_typ, typ_zu_name, tooltips
+        except Exception:
+            basis_map = {t: t for t in basis_typen}
+            return basis_typen, basis_map, basis_map.copy(), {t: f"Standard-Schlüssel: {t}" for t in basis_typen}
+
+    def _new_kostenart(self):
+        """Neue benutzerdefinierte Kategorie hinzufügen."""
+        win = tk.Toplevel(self)
+        win.title("Neue Kostenkategorie")
+        win.geometry("400x300")
+        win.configure(bg=BG_CARD)
+        win.grab_set()
+        win.resizable(False, False)
+        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="Neue Kostenkategorie", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H3).pack(side="left", padx=14, pady=10)
+        body = tk.Frame(win, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=20, pady=12)
+        tk.Label(body, text="Name der Kategorie *", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+        name_var = tk.StringVar()
+        make_entry(body, textvariable=name_var).pack(fill="x", ipady=6)
+        tk.Label(body, text="Oberkategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
+        ober_var = tk.StringVar(value="Sonstiges")
+        ober_vals = sorted(set(m.get("kategorie", "Sonstiges") for m in BuchhaltungPage.KOSTENARTEN.values()))
+        ttk.Combobox(body, textvariable=ober_var, values=ober_vals, font=FONT_BODY).pack(fill="x", ipady=4)
+        tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
+        schluessel_var = tk.StringVar(value="MEA")
+        _namen, _name_zu_typ, _typ_zu_name, _tooltips = self._umlageschluessel_aus_aufteilungen()
+        schluessel_cb = ttk.Combobox(body, textvariable=schluessel_var,
+                     values=_namen, font=FONT_BODY)
+        schluessel_cb.pack(fill="x", ipady=4)
+        make_tooltip(schluessel_cb, lambda: _tooltips.get(schluessel_var.get(), ""))
+        uml_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
+                       fg=TEXT, font=FONT_BODY, activebackground=BG_CARD).pack(anchor="w", pady=(8,0))
+        def _save():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showwarning("Pflichtfeld", "Name der Kategorie ist erforderlich.", parent=win)
+                return
+            if name in BuchhaltungPage.KATEGORIEN:
+                messagebox.showwarning("Duplikat", f"Kategorie '{name}' existiert bereits.", parent=win)
+                return
+            angezeigter_name = schluessel_var.get()
+            typ_schluessel = _name_zu_typ.get(angezeigter_name, angezeigter_name)
+            BuchhaltungPage.KATEGORIEN.insert(-1, name)
+            BuchhaltungPage.KOSTENARTEN[name] = {
+                "kategorie": ober_var.get(),
+                "umlagefaehig": uml_var.get(),
+                "schluessel": typ_schluessel
+            }
+            cfg = load_config()
+            custom = cfg.get("custom_kategorien", [])
+            custom.append({"name": name, "kategorie": ober_var.get(),
+                          "umlagefaehig": uml_var.get(), "schluessel": typ_schluessel})
+            cfg["custom_kategorien"] = custom
+            save_config(cfg)
+            win.destroy()
+            self._load_kostenarten()
+        btn_row = tk.Frame(win, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0,12))
+        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
+        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
+
+    def _edit_kostenart(self):
+        """Bestehende Kategorie bearbeiten."""
+        sel = self.tree_k.selection()
+        if not sel: return
+        idx = int(sel[0])
+        if idx >= len(BuchhaltungPage.KATEGORIEN): return
+        kat_name = BuchhaltungPage.KATEGORIEN[idx]
+        meta = BuchhaltungPage.KOSTENARTEN.get(kat_name, {})
+        win = tk.Toplevel(self)
+        win.title("Kostenkategorie bearbeiten")
+        win.geometry("400x280")
+        win.configure(bg=BG_CARD)
+        win.grab_set()
+        win.resizable(False, False)
+        hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text=f"Kategorie: {kat_name}", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H3).pack(side="left", padx=14, pady=10)
+        body = tk.Frame(win, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=20, pady=12)
+        tk.Label(body, text="Oberkategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+        ober_var = tk.StringVar(value=meta.get("kategorie", "Sonstiges"))
+        ober_vals = sorted(set(m.get("kategorie", "Sonstiges") for m in BuchhaltungPage.KOSTENARTEN.values()))
+        ttk.Combobox(body, textvariable=ober_var, values=ober_vals, font=FONT_BODY).pack(fill="x", ipady=4)
+        tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
+        _namen_e, _name_zu_typ_e, _typ_zu_name_e, _tooltips_e = self._umlageschluessel_aus_aufteilungen()
+        gespeicherter_typ = meta.get("schluessel", "MEA")
+        anzeige_start = _typ_zu_name_e.get(gespeicherter_typ, gespeicherter_typ)
+        schluessel_var = tk.StringVar(value=anzeige_start)
+        schluessel_cb_e = ttk.Combobox(body, textvariable=schluessel_var,
+                     values=_namen_e, font=FONT_BODY)
+        schluessel_cb_e.pack(fill="x", ipady=4)
+        make_tooltip(schluessel_cb_e, lambda: _tooltips_e.get(schluessel_var.get(), ""))
+        uml = meta.get("umlagefaehig", False)
+        uml_var = tk.BooleanVar(value=uml if isinstance(uml, bool) else False)
+        tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
+                       fg=TEXT, font=FONT_BODY, activebackground=BG_CARD).pack(anchor="w", pady=(8,0))
+        def _save():
+            angezeigter_name = schluessel_var.get()
+            typ_schluessel = _name_zu_typ_e.get(angezeigter_name, angezeigter_name)
+            BuchhaltungPage.KOSTENARTEN[kat_name] = {
+                "kategorie": ober_var.get(),
+                "umlagefaehig": uml_var.get(),
+                "schluessel": typ_schluessel
+            }
+            win.destroy()
+            self._load_kostenarten()
+        btn_row = tk.Frame(win, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0,12))
+        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
+        make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
+
+    def _toggle_kostenart(self):
+        """Kategorie aktivieren/deaktivieren."""
+        sel = self.tree_k.selection()
+        if not sel: return
+        idx = int(sel[0])
+        if idx >= len(BuchhaltungPage.KATEGORIEN): return
+        kat_name = BuchhaltungPage.KATEGORIEN[idx]
+        deaktiviert = BuchhaltungPage._deaktivierte_kategorien()
+        if kat_name in deaktiviert:
+            deaktiviert.discard(kat_name)
+        else:
+            deaktiviert.add(kat_name)
+        BuchhaltungPage._save_deaktivierte(deaktiviert)
+        self._load_kostenarten()
+
+    def _delete_kostenart(self):
+        """Kategorie löschen (nur wenn nicht in Buchungen verwendet)."""
+        sel = self.tree_k.selection()
+        if not sel: return
+        idx = int(sel[0])
+        if idx >= len(BuchhaltungPage.KATEGORIEN): return
+        kat_name = BuchhaltungPage.KATEGORIEN[idx]
+        conn = get_db()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM zahlungen WHERE kategorie=?", (kat_name,)
+        ).fetchone()[0]
+        conn.close()
+        if count > 0:
+            messagebox.showwarning("Geschützt",
+                f"Kategorie '{kat_name}' wird in {count} Buchung(en) verwendet "
+                f"und kann nicht gelöscht werden.\n\nSie können die Kategorie stattdessen deaktivieren.",
+                parent=self)
+            return
+        if not messagebox.askyesno("Löschen", f"Kategorie '{kat_name}' wirklich löschen?", parent=self):
+            return
+        BuchhaltungPage.KATEGORIEN.remove(kat_name)
+        BuchhaltungPage.KOSTENARTEN.pop(kat_name, None)
+        cfg = load_config()
+        custom = cfg.get("custom_kategorien", [])
+        cfg["custom_kategorien"] = [c for c in custom if c.get("name") != kat_name]
+        deakt = set(cfg.get("deaktivierte_kategorien", []))
+        deakt.discard(kat_name)
+        cfg["deaktivierte_kategorien"] = sorted(deakt)
+        save_config(cfg)
+        self._load_kostenarten()
+
+    # ── Tab: KI-Administration ────────────────────────────────────────────────
 
     def _build_ki_admin_tab(self, t4):
         """Inhalt des KI-Administration Tabs (ausgelagert für Zugriffsschutz #34)."""
