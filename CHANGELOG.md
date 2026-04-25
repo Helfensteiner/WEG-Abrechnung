@@ -7,6 +7,25 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.35.1] — 2026-04-25
+
+### Fix / Verbesserung
+
+- **GH#95 Beschreibung automatisch befüllen bei Rechnungs-Upload:**
+  - `_felder_befuellen()`: Feld `beschreibung` wird jetzt beim Import gesetzt.
+    Bisher fehlte es in der Felder-Liste; `tk.Text`-Widgets wurden außerdem mit
+    falschen Index-Argumenten angesprochen (`0` statt `"1.0"`) — beides behoben.
+  - **ZUGFeRD/CII-Parser**: extrahiert `ram:SpecifiedTradeProduct/ram:Name`
+    (erste Rechnungsposition) sowie `rsm:ExchangedDocument/ram:Name` als Betreff.
+  - **xRechnung-UBL-Parser**: extrahiert `cbc:Description`, `cbc:Name` (aus
+    Rechnungszeilen) oder `cbc:Note` als Beschreibung.
+  - **KI-OCR** (`_ki_ocr_rechnung_static`): lieferte `beschreibung` bereits —
+    wird jetzt tatsächlich in das Formular übernommen.
+  - **Fallback** (kein Beschreibungstext im Dokument): automatisch generierter
+    Text `"Rechnung {Nr} – {Steller}"` bzw. `"Rechnung von {Steller}"`.
+
+---
+
 ## [0.35.0] — 2026-04-25
 
 ### Neu

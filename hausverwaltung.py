@@ -108,6 +108,13 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.35.1 — Beschreibung auto-befüllen bei Rechnungs-Upload (#95):
+#             _felder_befuellen: "beschreibung" in Fill-Loop aufgenommen;
+#             tk.Text-Widget korrekt befüllt (delete "1.0"/"end" statt 0/"end");
+#             ZUGFeRD/CII-Parser: ram:SpecifiedTradeProduct/ram:Name extrahiert;
+#             xRechnung-UBL-Parser: cbc:Description/cbc:Name/cbc:Note extrahiert;
+#             KI-OCR lieferte beschreibung bereits — wird jetzt auch gesetzt;
+#             Fallback: "Rechnung {Nr} – {Steller}" wenn kein XML-Feld vorhanden.
 #   0.35.0 — Skonto / Differenz-Verbuchung (#94):
 #             DifferenzBuchenDialog: zeigt Rechnungsbetrag, Gebucht, Differenz;
 #             Buchungsart wählbar (Skonto / Nachlass / Rundungsdifferenz / Sonstiges);
@@ -222,7 +229,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.35.0"
+APP_VERSION = "0.35.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -4378,6 +4385,11 @@ class RechnungenPage(tk.Frame):
         faellig_raw = _txt(".//ram:DueDateDateTime/udt:DateTimeString")
         faelligkeitsdatum = f"{faellig_raw[:4]}-{faellig_raw[4:6]}-{faellig_raw[6:8]}" \
             if len(faellig_raw) >= 8 else ""
+        # Leistungsbeschreibung: erstes Positionsprodukt oder Betreff
+        beschreibung = (
+            _txt(".//ram:IncludedSupplyChainTradeLineItem/ram:SpecifiedTradeProduct/ram:Name")
+            or _txt(".//rsm:ExchangedDocument/ram:Name")
+        )
         return {
             "rechnungsnummer": rnr,
             "rechnungssteller": steller,
@@ -4387,6 +4399,7 @@ class RechnungenPage(tk.Frame):
             "betrag_netto": netto,
             "mwst_betrag": mwst,
             "mwst_satz": round(mwst / netto * 100, 1) if netto else 19.0,
+            "beschreibung": beschreibung,
             "zugferd_format": "ZUGFeRD/CII",
         }
 
@@ -4414,6 +4427,11 @@ class RechnungenPage(tk.Frame):
             netto = float(_txt(".//cac:LegalMonetaryTotal/cbc:TaxExclusiveAmount") or 0)
         except ValueError:
             netto = 0.0
+        beschreibung = (
+            _txt(".//cac:InvoiceLine/cac:Item/cbc:Description")
+            or _txt(".//cac:InvoiceLine/cac:Item/cbc:Name")
+            or _txt("cbc:Note")
+        )
         return {
             "rechnungsnummer": _txt("cbc:ID"),
             "rechnungssteller": _txt(".//cac:AccountingSupplierParty/cac:Party/cac:PartyName/cbc:Name"),
@@ -4421,6 +4439,7 @@ class RechnungenPage(tk.Frame):
             "faelligkeitsdatum": _txt(".//cac:PaymentMeans/cbc:PaymentDueDate"),
             "betrag_brutto": brutto,
             "betrag_netto": netto,
+            "beschreibung": beschreibung,
             "zugferd_format": "xRechnung-UBL",
         }
 
@@ -5259,11 +5278,17 @@ class RechnungDialog(BaseDialog):
                 return
             w = self._fields.get(key)
             if not w: return
-            if hasattr(w, "set"): w.set(str(val))
-            elif hasattr(w, "delete"): w.delete(0, "end"); w.insert(0, str(val))
+            if isinstance(w, tk.Text):
+                w.delete("1.0", "end")
+                w.insert("1.0", str(val))
+            elif hasattr(w, "set"):
+                w.set(str(val))
+            elif hasattr(w, "delete"):
+                w.delete(0, "end"); w.insert(0, str(val))
         for key in ("rechnungsnummer", "rechnungssteller", "rechnungsdatum",
                     "faelligkeitsdatum", "betrag_brutto", "betrag_netto",
                     "mwst_satz", "mwst_betrag", "lohnanteil",
+                    "beschreibung",         # #95
                     "leistungsjahr", "abrechnungsjahr"):  # #GH81
             _set(key, daten.get(key))
         # #GH81: Leistungs-/Abrechnungsjahr aus Rechnungsdatum ableiten, falls nicht gesetzt
@@ -5273,6 +5298,14 @@ class RechnungDialog(BaseDialog):
                 auto_jahr = str(rd)[:4]
                 _set("leistungsjahr", auto_jahr)
                 _set("abrechnungsjahr", auto_jahr)
+        # #95: Beschreibung auto-generieren wenn nicht aus Datei extrahiert
+        if not daten.get("beschreibung"):
+            steller = daten.get("rechnungssteller", "")
+            rnr     = daten.get("rechnungsnummer", "")
+            if steller and rnr:
+                _set("beschreibung", f"Rechnung {rnr} – {steller}")
+            elif steller:
+                _set("beschreibung", f"Rechnung von {steller}")
 
     def _on_save(self):
         v = self._get_values()
