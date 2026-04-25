@@ -108,6 +108,14 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.36.0 — Auto-Match + Kategorie nach Rechnungserfassung (#98):
+#             _auto_match_neue_rechnung(rechnung_id, parent_win): neue Modulfunktion;
+#             läuft nach jedem INSERT in rechnungen:
+#             1. Kategorie-Auto-Setzung via vorschlag_kategorie(steller+beschr);
+#             2. Kontoauszug-Score gegen alle unzugeordneten Ausgaben;
+#             ≥80: Auto-Buchung + Kontoauszug verknüpft + Status aktualisiert + Info-Dialog;
+#             60–79: Hinweis-Dialog "manuell prüfen"; <60: lautlos;
+#             Kategorie wird auch aus kategorie_vorschlag des besten Treffers übernommen.
 #   0.35.3 — Beleg öffnen / Ordner öffnen in RechnungenPage (#97):
 #             Zwei neue Buttons: "📂 Beleg öffnen" (os.startfile) und
 #             "📁 Ordner öffnen" (explorer /select,<pfad>);
@@ -237,7 +245,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.35.3"
+APP_VERSION = "0.36.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -3992,6 +4000,133 @@ def _auto_match_alle(conn, schwelle_auto: float = 80.0,
     return {"auto": auto_count, "vorschlaege": vorschlaege, "offen": offen_count}
 
 
+def _auto_match_neue_rechnung(rechnung_id: int, parent_win=None):
+    """#98 – Läuft nach Erfassung einer neuen Rechnung und versucht:
+    1. Passende Kontoauszugsbuchung zu finden und automatisch zuzuordnen.
+    2. Kategorie zu setzen (aus Kontoauszug-Vorschlag oder Buchungsregeln).
+    """
+    conn = get_db()
+    try:
+        rechnung = conn.execute("SELECT * FROM rechnungen WHERE id=?",
+                                (rechnung_id,)).fetchone()
+        if not rechnung:
+            return
+        rechnung = dict(rechnung)
+
+        # ── 1. Kategorie auto-setzen ──────────────────────────────────────────
+        if not rechnung.get("kategorie"):
+            suchtext = " ".join(filter(None, [rechnung.get("rechnungssteller"),
+                                               rechnung.get("beschreibung")]))
+            kat_regel, _, _, konfidenz = vorschlag_kategorie(
+                suchtext, rechnung.get("betrag_brutto"))
+            if kat_regel and konfidenz >= 0.50:
+                conn.execute(
+                    "UPDATE rechnungen SET kategorie=? WHERE id=? "
+                    "AND (kategorie IS NULL OR kategorie='')",
+                    (kat_regel, rechnung_id))
+                rechnung["kategorie"] = kat_regel
+
+        # ── 2. Kontoauszug-Match ──────────────────────────────────────────────
+        ka_rows = conn.execute(
+            "SELECT * FROM kontoauszug WHERE betrag < 0 AND zugeordnet=0 "
+            "ORDER BY datum DESC"
+        ).fetchall()
+
+        if not ka_rows:
+            conn.commit()
+            return
+
+        kandidaten = []
+        for kb in ka_rows:
+            s = _score_kontoauszug_gegen_rechnung(dict(kb), rechnung)
+            if s >= 60.0:
+                kandidaten.append({"kb": dict(kb), "score": s})
+        kandidaten.sort(key=lambda x: x["score"], reverse=True)
+
+        if not kandidaten:
+            conn.commit()
+            return
+
+        bester = kandidaten[0]
+        score  = bester["score"]
+        kb_dict = bester["kb"]
+
+        # ── Kategorie aus Kontoauszug übernehmen (falls noch nicht gesetzt) ──
+        if not rechnung.get("kategorie") and kb_dict.get("kategorie_vorschlag"):
+            conn.execute(
+                "UPDATE rechnungen SET kategorie=? WHERE id=? "
+                "AND (kategorie IS NULL OR kategorie='')",
+                (kb_dict["kategorie_vorschlag"], rechnung_id))
+
+        if score >= 80.0:
+            # Auto-Buchung anlegen und Rechnung verknüpfen
+            buchungstext = kb_dict.get("buchungstext", "")
+            if "||" in buchungstext:
+                gk, vzw = buchungstext.split("||", 1)
+                beschr = f"{gk.strip()} – {vzw.strip()}"[:200]
+            else:
+                beschr = buchungstext[:200]
+
+            existing_z = conn.execute(
+                "SELECT id FROM zahlungen WHERE datum=? AND betrag=? AND konto_typ=?",
+                (kb_dict.get("datum"), kb_dict.get("betrag"),
+                 kb_dict.get("konto_typ", ""))).fetchone()
+
+            if existing_z:
+                zahlung_id = existing_z["id"]
+                conn.execute(
+                    "UPDATE zahlungen SET rechnung_id=? WHERE id=? AND rechnung_id IS NULL",
+                    (rechnung_id, zahlung_id))
+            else:
+                kat = (kb_dict.get("kategorie_vorschlag")
+                       or rechnung.get("kategorie") or "Sonstiges")
+                conn.execute(
+                    "INSERT INTO zahlungen "
+                    "(datum,betrag,typ,kategorie,beschreibung,konto_typ,status,rechnung_id) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (kb_dict.get("datum"), kb_dict.get("betrag"), "Ausgabe",
+                     kat, beschr, kb_dict.get("konto_typ", ""), "Neu", rechnung_id))
+                zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            conn.execute(
+                "UPDATE kontoauszug SET zugeordnet=1, als_buchung_uebernommen=1, "
+                "zahlung_id=? WHERE id=?",
+                (zahlung_id, kb_dict["id"]))
+            _auto_update_rechnung_status(conn, rechnung_id)
+            _auto_log_match(conn, kb_dict["id"], rechnung_id, zahlung_id,
+                            score, "auto_neu")
+            conn.commit()
+
+            if parent_win:
+                messagebox.showinfo(
+                    "✅ Kontoauszug automatisch zugeordnet",
+                    f"Eine passende Kontoauszug-Buchung wurde automatisch zugeordnet:\n\n"
+                    f"  Datum:   {fmt_date(kb_dict.get('datum'))}\n"
+                    f"  Betrag:  {fmt_euro(abs(kb_dict.get('betrag') or 0))}\n"
+                    f"  Score:   {score:.0f} / 100\n\n"
+                    "Die Rechnung wurde als 'Bezahlt' oder 'Teilbezahlt' aktualisiert.",
+                    parent=parent_win)
+        else:
+            # Score 60–79: nur Hinweis, keine Auto-Buchung
+            conn.commit()
+            if parent_win:
+                messagebox.showinfo(
+                    "💡 Mögliche Kontoauszug-Buchung gefunden",
+                    f"Es wurde eine möglicherweise passende Buchung gefunden "
+                    f"(Score: {score:.0f}/100):\n\n"
+                    f"  Datum:   {fmt_date(kb_dict.get('datum'))}\n"
+                    f"  Betrag:  {fmt_euro(abs(kb_dict.get('betrag') or 0))}\n\n"
+                    "Bitte über '📎 Buchung zuordnen' manuell prüfen und bestätigen.",
+                    parent=parent_win)
+    except Exception:
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
 # ── Rechnungen-Seite (#65 / #66 – Doppelte Buchführung) ──────────────────────
 
 class RechnungenPage(tk.Frame):
@@ -4165,12 +4300,15 @@ class RechnungenPage(tk.Frame):
                      v.get("zugferd_format"),
                      int(v["leistungsjahr"]) if v.get("leistungsjahr") else None,   # #GH81
                      int(v["abrechnungsjahr"]) if v.get("abrechnungsjahr") else None))
+                neue_rechnung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                 conn.commit()
             finally:
                 conn.close()
             # #73/#75 – Beleg automatisch in Jahresablage archivieren
             if v.get("beleg_dateipfad"):
                 _beleg_archivieren(self, v.get("beleg_dateipfad"), v.get("rechnungsdatum", ""))
+            # #98 – Auto-Match Kontoauszug + Kategorie nach Rechnungserfassung
+            _auto_match_neue_rechnung(neue_rechnung_id, parent_win=self)
             self._load()
 
     def _edit_rechnung(self, event=None):
