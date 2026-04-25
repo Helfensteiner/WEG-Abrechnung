@@ -108,6 +108,10 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.36.6 — FOREIGN KEY Fehler beim Kontoauszug-Löschen behoben (#104):
+#             _clear(): erst kontoauszug_match_log löschen (referenziert
+#             kontoauszug.id), dann kontoauszug; eigene Transaktion mit
+#             Rollback bei Fehler statt db_execute().
 #   0.36.5 — Kontoauszug-Zuordnung beim Buchung-Löschen zurücksetzen (#103):
 #             _delete_buchung: vor DELETE zahlungen → UPDATE kontoauszug
 #             SET zugeordnet=0, als_buchung_uebernommen=0, zahlung_id=NULL
@@ -272,7 +276,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.36.5"
+APP_VERSION = "0.36.6"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -9348,12 +9352,20 @@ class KontoauszugPage(tk.Frame):
     def _clear(self):
         if messagebox.askyesno("Alle löschen",
                                "Alle importierten Kontoauszugsbuchungen löschen?"):
-            # #89 – db_execute mit Fehlerbehandlung
-            ok = db_execute("DELETE FROM kontoauszug", commit=True)
-            if ok:
+            conn = get_db()
+            try:
+                # #103 – Match-Log zuerst löschen (FOREIGN KEY kontoauszug_id)
+                conn.execute("DELETE FROM kontoauszug_match_log")
+                conn.execute("DELETE FROM kontoauszug")
+                conn.commit()
                 self._info_var.set(
                     "Kontoauszug importieren: CAMT.052 XML (Sparkasse Bodensee) oder CSV")
                 self._load()
+            except Exception as e:
+                conn.rollback()
+                messagebox.showerror("Datenbankfehler", str(e), parent=self)
+            finally:
+                conn.close()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
