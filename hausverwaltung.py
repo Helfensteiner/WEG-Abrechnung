@@ -108,6 +108,20 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.33.0 — GH Issues #81/#82:
+#             #81  Leistungs-/Abrechnungsjahr in Rechnungen: DB-Spalten
+#                  leistungsjahr + abrechnungsjahr (INTEGER) in rechnungen;
+#                  RechnungDialog: zwei neue Felder (zweispaltig), vorbelegt
+#                  aus rechnungsdatum (automatische Ableitung); KI-OCR-Prompt
+#                  extrahiert Leistungs-/Abrechnungsjahr; _felder_befuellen()
+#                  setzt beide Felder; RechnungenPage-Tabelle: neue Spalte
+#                  "Lj./Abr." zeigt leistungsjahr/abrechnungsjahr kombiniert.
+#             #82  Auto-Matching Buchhaltung: _score_kontoauszug_gegen_zahlung()
+#                  (Betrag 40 + Datum 30 + Beschreibung/Kategorie 30 Punkte);
+#                  _auto_match_gegen_buchungen() zweiter Matching-Pass nach
+#                  _auto_match_alle(); verknüpft unzugeordnete kontoauszug-
+#                  Einträge mit bestehenden zahlungen (kein rechnung-Umweg);
+#                  Ergebnis in Abschluss-Dialog und _info_var ausgewiesen.
 #   0.32.0 — GH Issues #76/#77/#80:
 #             #80  Buchhaltung Belegnr.-Spalte: LEFT JOIN rechnungen; zeigt
 #                  rechnungsnummer der verknüpften Rechnung (rg_nummer) statt
@@ -191,7 +205,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.32.0"
+APP_VERSION = "0.33.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -1048,6 +1062,9 @@ CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
         # v0.31.0 – #78 Differenzbeträge/Skonto in kontoauszug_match_log
         "ALTER TABLE kontoauszug_match_log ADD COLUMN differenz_betrag REAL DEFAULT 0.0",
         "ALTER TABLE kontoauszug_match_log ADD COLUMN differenz_grund TEXT",
+        # v0.33.0 – GH#81 Leistungs-/Abrechnungsjahr in rechnungen
+        "ALTER TABLE rechnungen ADD COLUMN leistungsjahr INTEGER",
+        "ALTER TABLE rechnungen ADD COLUMN abrechnungsjahr INTEGER",
     ]:
         try:
             c.execute(sql)
@@ -3700,6 +3717,137 @@ def _score_kontoauszug_gegen_rechnung(kb: dict, rechnung: dict) -> float:
     return min(100.0, score)
 
 
+def _score_kontoauszug_gegen_zahlung(kb: dict, zahlung: dict) -> float:
+    """GH#82 – Fuzzy-Score (0–100): Kontoauszugsbuchung vs. bestehende Buchung (zahlung).
+
+    Gewichte: Betrag 40 pt | Datum 30 pt | Beschreibung/Kategorie 30 pt
+    """
+    from difflib import SequenceMatcher
+    score = 0.0
+
+    # ── 1. Betrag-Match (max. 40 Punkte) ─────────────────────────────────────
+    kb_betrag = abs(kb.get("betrag") or 0)
+    z_betrag  = abs(zahlung.get("betrag") or 0)
+    if z_betrag > 0:
+        differenz = abs(kb_betrag - z_betrag)
+        if differenz < 0.005:
+            score += 40
+        elif differenz <= z_betrag * 0.01:
+            score += 35
+        elif differenz <= z_betrag * 0.05:
+            score += 20
+
+    # ── 2. Datum-Match (max. 30 Punkte) ──────────────────────────────────────
+    try:
+        from datetime import date as _date
+        def _to_date(s):
+            if not s: return None
+            if isinstance(s, _date): return s
+            for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+                try:
+                    return _date.fromisoformat(str(s)) if fmt == "%Y-%m-%d" else \
+                           __import__("datetime").datetime.strptime(str(s), fmt).date()
+                except ValueError:
+                    continue
+            return None
+        kb_dat = _to_date(kb.get("datum"))
+        z_dat  = _to_date(zahlung.get("datum"))
+        if kb_dat and z_dat:
+            tage = abs((kb_dat - z_dat).days)
+            if tage == 0:    score += 30
+            elif tage <= 3:  score += 25
+            elif tage <= 7:  score += 15
+            elif tage <= 30: score += 5
+    except Exception:
+        pass
+
+    # ── 3. Text-Match (max. 30 Punkte) ────────────────────────────────────────
+    # Kontoauszug-Buchungstext vs. Zahlung-Beschreibung + Kategorie
+    try:
+        vzweck = (kb.get("buchungstext") or "").upper()
+        beschr = (zahlung.get("beschreibung") or "").upper()
+        kateg  = (zahlung.get("kategorie") or "").upper()
+        suchtext = (beschr + " " + kateg).strip()
+
+        if suchtext and vzweck:
+            ratio = SequenceMatcher(None, suchtext, vzweck).ratio()
+            if ratio >= 0.75:
+                score += 30
+            elif ratio >= 0.50:
+                score += 20
+            elif ratio >= 0.30:
+                score += 10
+            else:
+                # Wortweise Suche: signifikante Wörter (≥4 Zeichen) aus Beschreibung im Buchungstext
+                woerter = [w for w in suchtext.split() if len(w) >= 4]
+                treffer = sum(1 for w in woerter if w in vzweck)
+                if woerter and treffer >= max(1, len(woerter) // 2):
+                    score += 15
+    except Exception:
+        pass
+
+    return min(100.0, score)
+
+
+def _auto_match_gegen_buchungen(conn, schwelle_auto: float = 80.0,
+                                schwelle_vorschlag: float = 60.0) -> dict:
+    """GH#82 – Zweiter Matching-Pass: verknüpft unzugeordnete Kontoauszugseinträge
+    mit bestehenden Buchungen (zahlungen), die noch kein kontoauszug.zahlung_id haben.
+
+    Rückgabe: {"auto": int, "vorschlaege": list[dict], "offen": int}
+    """
+    # Unzugeordnete Kontoauszugsausgaben (nach dem ersten Matching-Pass noch offen)
+    ka_rows = conn.execute(
+        "SELECT * FROM kontoauszug WHERE betrag < 0 AND zugeordnet=0 ORDER BY datum DESC"
+    ).fetchall()
+
+    # Zahlungen ohne kontoauszug-Verknüpfung (kein kontoauszug-Eintrag zeigt auf sie)
+    z_rows = conn.execute(
+        "SELECT z.* FROM zahlungen z "
+        "WHERE z.typ='Ausgabe' "
+        "AND NOT EXISTS (SELECT 1 FROM kontoauszug k WHERE k.zahlung_id=z.id AND k.zugeordnet=1)"
+        "ORDER BY z.datum DESC"
+    ).fetchall()
+
+    if not ka_rows or not z_rows:
+        return {"auto": 0, "vorschlaege": [], "offen": len(ka_rows)}
+
+    auto_count = 0
+    vorschlaege = []
+    offen_count = 0
+
+    for kb in ka_rows:
+        kandidaten = []
+        for z in z_rows:
+            s = _score_kontoauszug_gegen_zahlung(dict(kb), dict(z))
+            if s >= schwelle_vorschlag:
+                kandidaten.append({"zahlung": dict(z), "score": s})
+        kandidaten.sort(key=lambda x: x["score"], reverse=True)
+
+        if not kandidaten:
+            offen_count += 1
+            continue
+
+        bester = kandidaten[0]
+        if bester["score"] >= schwelle_auto:
+            try:
+                zahlung_id = bester["zahlung"]["id"]
+                conn.execute(
+                    "UPDATE kontoauszug SET zugeordnet=1, als_buchung_uebernommen=1, "
+                    "zahlung_id=? WHERE id=?",
+                    (zahlung_id, dict(kb)["id"]))
+                _auto_log_match(conn, dict(kb)["id"], None, zahlung_id,
+                                bester["score"], "auto_buchung")  # #GH82
+                auto_count += 1
+            except Exception:
+                offen_count += 1
+        else:
+            vorschlaege.append({"kb": dict(kb), "kandidaten": kandidaten[:3]})
+
+    conn.commit()
+    return {"auto": auto_count, "vorschlaege": vorschlaege, "offen": offen_count}
+
+
 def _auto_log_match(conn, kontoauszug_id: int, rechnung_id, zahlung_id,
                     score: float, methode: str):
     """GoB-konformer Audit-Trail: jeden Match-Vorgang in kontoauszug_match_log speichern."""
@@ -3834,10 +3982,10 @@ class RechnungenPage(tk.Frame):
                            command=self._load).pack(side="left", padx=6)
 
         # Rechnungstabelle
-        cols = ("Nr.", "Steller", "Datum", "Brutto €", "Gebucht €", "Differenz €", "Status", "Kategorie")
+        cols = ("Nr.", "Steller", "Datum", "Brutto €", "Gebucht €", "Differenz €", "Status", "Kategorie", "Lj./Abr.")  # #GH81
         f, self.tree = make_table(self, cols, height=14)
         f.pack(fill="both", expand=True, padx=20, pady=4)
-        for c, w in zip(cols, [90, 160, 90, 90, 90, 100, 90, 120]):
+        for c, w in zip(cols, [90, 160, 90, 90, 90, 100, 80, 110, 80]):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=w, anchor="w")
         self.tree.column("Brutto €",    anchor="e")
@@ -3907,6 +4055,10 @@ class RechnungenPage(tk.Frame):
                 tag = "offen"
             # Differenz-Farbe: zu wenig = grün (noch offen), zu viel = rot, genau = schwarz
             diff_str = fmt_euro(differenz)
+            # #GH81: Leistungsjahr / Abrechnungsjahr kombiniert anzeigen
+            lj = rd.get("leistungsjahr") or ""
+            aj = rd.get("abrechnungsjahr") or ""
+            lj_abr = f"{lj}/{aj}" if lj and aj and lj != aj else str(lj or aj or "–")
             self.tree.insert("", "end", iid=rd["id"], values=(
                 rd["rechnungsnummer"] or "–",
                 rd["rechnungssteller"] or "–",
@@ -3915,7 +4067,8 @@ class RechnungenPage(tk.Frame):
                 fmt_euro(gebucht),
                 diff_str,
                 rd["status"] or "–",
-                rd["kategorie"] or "–"
+                rd["kategorie"] or "–",
+                lj_abr,
             ), tags=(tag,))
         tree_empty_hint(self.tree)
         self._update_kpi(total_brutto, total_gebucht, offen_count)
@@ -3950,8 +4103,9 @@ class RechnungenPage(tk.Frame):
                 conn.execute(
                     "INSERT INTO rechnungen (rechnungsnummer, rechnungssteller, rechnungsdatum, "
                     "faelligkeitsdatum, betrag_brutto, betrag_netto, mwst_satz, mwst_betrag, "
-                    "lohnanteil, handwerker_steuerlich, kategorie, beschreibung, beleg_dateipfad, status, zugferd_format) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "lohnanteil, handwerker_steuerlich, kategorie, beschreibung, beleg_dateipfad, "
+                    "status, zugferd_format, leistungsjahr, abrechnungsjahr) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (v.get("rechnungsnummer"), v.get("rechnungssteller"),
                      v.get("rechnungsdatum"), v.get("faelligkeitsdatum"),
                      float(v.get("betrag_brutto") or 0),
@@ -3962,7 +4116,9 @@ class RechnungenPage(tk.Frame):
                      v.get("handwerker_steuerlich", 0),  # #68 §35a EStG
                      v.get("kategorie"), v.get("beschreibung"),
                      v.get("beleg_dateipfad"), v.get("status", "Offen"),
-                     v.get("zugferd_format")))
+                     v.get("zugferd_format"),
+                     int(v["leistungsjahr"]) if v.get("leistungsjahr") else None,   # #GH81
+                     int(v["abrechnungsjahr"]) if v.get("abrechnungsjahr") else None))
                 conn.commit()
             finally:
                 conn.close()
@@ -3992,7 +4148,8 @@ class RechnungenPage(tk.Frame):
                     "UPDATE rechnungen SET rechnungsnummer=?, rechnungssteller=?, "
                     "rechnungsdatum=?, faelligkeitsdatum=?, betrag_brutto=?, betrag_netto=?, "
                     "mwst_satz=?, mwst_betrag=?, lohnanteil=?, handwerker_steuerlich=?, "
-                    "kategorie=?, beschreibung=?, beleg_dateipfad=?, status=?, zugferd_format=? "
+                    "kategorie=?, beschreibung=?, beleg_dateipfad=?, status=?, zugferd_format=?, "
+                    "leistungsjahr=?, abrechnungsjahr=? "  # #GH81
                     "WHERE id=?",
                     (v.get("rechnungsnummer"), v.get("rechnungssteller"),
                      v.get("rechnungsdatum"), v.get("faelligkeitsdatum"),
@@ -4005,6 +4162,8 @@ class RechnungenPage(tk.Frame):
                      v.get("kategorie"), v.get("beschreibung"),
                      v.get("beleg_dateipfad"), v.get("status", "Offen"),
                      v.get("zugferd_format"),  # #66 – bewahrt das Import-Format
+                     int(v["leistungsjahr"]) if v.get("leistungsjahr") else None,   # #GH81
+                     int(v["abrechnungsjahr"]) if v.get("abrechnungsjahr") else None,
                      int(sel[0])))
                 conn.commit()
             finally:
@@ -4799,6 +4958,14 @@ class RechnungDialog(BaseDialog):
                         r.get("rechnungsdatum", date.today().isoformat()) or "", row=l)
         self._add_field("Fälligkeitsdatum (JJJJ-MM-TT)", "faelligkeitsdatum",
                         r.get("faelligkeitsdatum", "") or "", row=ri)
+        # #GH81 – Leistungs-/Abrechnungsjahr: automatisch aus Rechnungsdatum vorbelegt
+        _rg_dat = r.get("rechnungsdatum", date.today().isoformat()) or ""
+        _auto_jahr = str(_rg_dat[:4]) if len(str(_rg_dat)) >= 4 else str(date.today().year)
+        l, ri = _two_col()
+        self._add_field("Leistungsjahr", "leistungsjahr",
+                        str(r.get("leistungsjahr") or _auto_jahr), row=l)
+        self._add_field("Abrechnungsjahr", "abrechnungsjahr",
+                        str(r.get("abrechnungsjahr") or _auto_jahr), row=ri)
 
         # Beträge – zweispaltig: Brutto/Netto und MwSt-Satz/Betrag #71
         tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
@@ -4881,8 +5048,16 @@ class RechnungDialog(BaseDialog):
             elif hasattr(w, "delete"): w.delete(0, "end"); w.insert(0, str(val))
         for key in ("rechnungsnummer", "rechnungssteller", "rechnungsdatum",
                     "faelligkeitsdatum", "betrag_brutto", "betrag_netto",
-                    "mwst_satz", "mwst_betrag", "lohnanteil"):
+                    "mwst_satz", "mwst_betrag", "lohnanteil",
+                    "leistungsjahr", "abrechnungsjahr"):  # #GH81
             _set(key, daten.get(key))
+        # #GH81: Leistungs-/Abrechnungsjahr aus Rechnungsdatum ableiten, falls nicht gesetzt
+        if not daten.get("leistungsjahr") and not daten.get("abrechnungsjahr"):
+            rd = daten.get("rechnungsdatum") or ""
+            if len(str(rd)) >= 4:
+                auto_jahr = str(rd)[:4]
+                _set("leistungsjahr", auto_jahr)
+                _set("abrechnungsjahr", auto_jahr)
 
     def _on_save(self):
         v = self._get_values()
@@ -4952,7 +5127,9 @@ def _ki_ocr_rechnung_static(pdf_pfad: str) -> dict:
         '  "mwst_satz": MwSt-Satz in Prozent (z.B. 19.0 oder null)\n'
         '  "mwst_betrag": MwSt-Betrag als Dezimalzahl (oder null)\n'
         '  "lohnanteil": Lohnanteil (§35a EStG) als Dezimalzahl (oder null)\n'
-        '  "beschreibung": Kurze Leistungsbeschreibung'
+        '  "beschreibung": Kurze Leistungsbeschreibung\n'
+        '  "leistungsjahr": Jahr der erbrachten Leistung als Integer (z.B. 2025 oder null)\n'  # #GH81
+        '  "abrechnungsjahr": Jahr der Abrechnung/Rechnungsstellung als Integer (oder null)'   # #GH81
     )
     try:
         import json as _json
@@ -8374,26 +8551,30 @@ class KontoauszugPage(tk.Frame):
         conn = get_db()
         try:
             ergebnis = _auto_match_alle(conn, schwelle_auto, schwelle_vorschlag)
+            # #GH82: Zweiter Pass – unzugeordnete Kontoauszugseinträge gegen bestehende Buchungen
+            ergebnis2 = _auto_match_gegen_buchungen(conn, schwelle_auto, schwelle_vorschlag)
         finally:
             conn.close()
 
         self._load()
 
-        auto = ergebnis["auto"]
+        auto = ergebnis["auto"] + ergebnis2["auto"]
         vorschlaege = ergebnis["vorschlaege"]
-        offen = ergebnis["offen"]
+        offen = ergebnis2["offen"]
 
         self._info_var.set(
             f"✅ Auto-Matching: {auto} automatisch gebucht  |  "
             f"{len(vorschlaege)} Vorschläge zur Prüfung  |  {offen} ungeklärt")
 
+        buchungen_info = (f"\n🔗 Davon {ergebnis2['auto']} über bestehende Buchungen verknüpft (GH#82)"
+                          if ergebnis2["auto"] > 0 else "")
         if vorschlaege:
             # Review-Dialog öffnen
             MatchingReviewDialog(self, vorschlaege, get_db, callback=self._load)
         else:
             messagebox.showinfo(
                 "Auto-Matching abgeschlossen",
-                f"✅ Automatisch gebucht: {auto}\n"
+                f"✅ Automatisch gebucht: {auto}{buchungen_info}\n"
                 f"📋 Vorschläge zur Prüfung: 0\n"
                 f"❓ Ungeklärt (kein Treffer): {offen}\n\n"
                 f"Ungeklärte Buchungen können in der Rechnungsverwaltung\n"

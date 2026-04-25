@@ -7,6 +7,34 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.33.0] — 2026-04-25
+
+### Neu
+
+- **GH#81 Leistungs-/Abrechnungsjahr bei Rechnungen:**
+  - Neue DB-Spalten `leistungsjahr` und `abrechnungsjahr` (INTEGER) in `rechnungen` (via Migration).
+  - `RechnungDialog`: zwei neue Felder (zweispaltig), werden automatisch aus dem Rechnungsdatum
+    vorbelegt (Jahr-Ableitung). Manuell bearbeitbar.
+  - `_felder_befuellen()`: setzt `leistungsjahr`/`abrechnungsjahr` aus importierten Daten,
+    leitet bei fehlendem Wert aus `rechnungsdatum` ab.
+  - KI-OCR-Prompt: extrahiert beide Jahresfelder aus der PDF-Rechnung.
+  - `RechnungenPage`: neue Spalte `"Lj./Abr."` zeigt `leistungsjahr/abrechnungsjahr` kombiniert
+    (z.B. `"2025/2024"` oder `"2025"` wenn beide gleich).
+
+- **GH#82 Auto-Matching auf bestehende Buchungen erweitern:**
+  - Neue Funktion `_score_kontoauszug_gegen_zahlung()`: Fuzzy-Score (0–100) zwischen
+    Kontoauszugsbuchung und bestehender Zahlung — Betrag 40 Pt, Datum 30 Pt,
+    Beschreibung/Kategorie 30 Pt (inkl. wortweiser Suche für Detailunterscheidung
+    wie z.B. Haftpflicht- vs. Gebäudeversicherung desselben Anbieters).
+  - Neue Funktion `_auto_match_gegen_buchungen()`: zweiter Matching-Pass nach dem
+    Rechnung-Matching. Verknüpft noch unzugeordnete Kontoauszugseinträge direkt mit
+    bestehenden `zahlungen` (ohne Umweg über `rechnungen`). Protokoll in
+    `kontoauszug_match_log` (methode = `"auto_buchung"`).
+  - `_auto_matching_starten()`: ruft beide Passes auf, summiert Ergebnisse,
+    zeigt Anzahl der über Buchungen verknüpften Einträge im Abschluss-Dialog.
+
+---
+
 ## [0.32.0] — 2026-04-25
 
 ### Behoben
