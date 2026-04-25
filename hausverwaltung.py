@@ -108,6 +108,11 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.36.3 — Vorschläge-Buchung: Belegnr+Abrechnungsjahr vorbelegen (#101):
+#             _extrahiere_belegnr_aus_vzweck(): SEPA-Refs (EREF+/KREF+/MREF+),
+#             Rg.Nr., Rechnung, Beleg, RE- aus Verwendungszweck extrahieren.
+#             _uebernehmen(): belegnr aus Vzweck, abrechnungsjahr aus Datum-Jahr;
+#             INSERT in zahlungen um abrechnungsrelevant + abrechnungsjahr erweitert.
 #   0.36.2 — Kategorie-Zuweisung beim Rechnungs-Import (#100):
 #             _felder_befuellen: "kategorie" in Fill-Loop; Fallback via
 #             vorschlag_kategorie(steller+beschr) wenn Feld leer bleibt.
@@ -256,7 +261,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.36.2"
+APP_VERSION = "0.36.3"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -8168,6 +8173,37 @@ class AufteilungDialog(BaseDialog):
             v["wohnung_ids"] = []
         self.result = v; self.destroy()
 
+def _extrahiere_belegnr_aus_vzweck(vzweck: str) -> str:
+    """#101 – Versucht eine Belegnummer/Referenz aus dem Verwendungszweck zu extrahieren.
+
+    Sucht nach gängigen deutschen Banktext-Mustern:
+    SEPA-Structured-References (EREF+, KREF+), Rg.-Nr., Rechnung, Beleg, RE-.
+    """
+    import re
+    if not vzweck:
+        return ""
+    # SEPA structured references (CAMT.052)
+    for prefix in ("EREF+", "KREF+", "MREF+", "CRED+", "SVWZ+"):
+        idx = vzweck.upper().find(prefix)
+        if idx != -1:
+            val = vzweck[idx + len(prefix):].split("+")[0].strip()
+            if val and len(val) >= 3:
+                return val[:40]
+    # Explizite Schlagwörter + alphanumerischer Wert danach
+    patterns = [
+        r'(?:Rg\.?\s*(?:Nr\.?)?\s*)([A-Z0-9][A-Z0-9\-/_. ]{2,20})',
+        r'(?:RE[-\s])([A-Z0-9][A-Z0-9\-/_]{2,20})',
+        r'(?:Rechnung\s+)([A-Z0-9][A-Z0-9\-/_. ]{2,20})',
+        r'(?:Beleg(?:nr\.?)?\s*)([A-Z0-9][A-Z0-9\-/_. ]{2,20})',
+        r'(?:Referenz\s*:?\s*)([A-Z0-9][A-Z0-9\-/_. ]{2,20})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, vzweck, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()[:40]
+    return ""
+
+
 # ── Kontoauszug-Seite ──────────────────────────────────────────────────────
 
 class KontoauszugPage(tk.Frame):
@@ -8574,38 +8610,56 @@ class KontoauszugPage(tk.Frame):
             return
         row = dict(row_raw)
         raw = row["buchungstext"] or ""
-        gegenkonto = raw.split("||")[0] if "||" in raw else ""
-        vzweck     = raw.split("||")[1] if "||" in raw else raw
+        gegenkonto = raw.split("||")[0].strip() if "||" in raw else ""
+        vzweck     = raw.split("||")[1].strip() if "||" in raw else raw.strip()
         kat_v, typ_v, kto_v, _ = vorschlag_kategorie(raw)
         kat_v = row.get("kategorie_vorschlag") or kat_v
         kt = row.get("konto_typ") or kto_v or "Wohngeldkonto"
+        # #101 – Belegnummer aus Verwendungszweck extrahieren
+        belegnr_v = _extrahiere_belegnr_aus_vzweck(vzweck)
+        # #101 – Abrechnungsjahr aus Buchungsdatum ableiten
+        abr_jahr = None
+        datum_str = row.get("datum") or ""
+        if len(str(datum_str)) >= 4:
+            try:
+                abr_jahr = int(str(datum_str)[:4])
+            except ValueError:
+                pass
         pseudo = {
-            "datum":       row["datum"] or date.today().isoformat(),
-            "betrag":      abs(row["betrag"] or 0),
-            "typ":         "Einnahme" if (row["betrag"] or 0) >= 0 else "Ausgabe",
-            "kategorie":   kat_v,
-            "beschreibung": f"{gegenkonto} – {vzweck}".strip(" –"),
-            "belegnr":     "",
-            "status":      "Neu",
+            "datum":              row["datum"] or date.today().isoformat(),
+            "betrag":             abs(row["betrag"] or 0),
+            "typ":                "Einnahme" if (row["betrag"] or 0) >= 0 else "Ausgabe",
+            "kategorie":          kat_v,
+            "beschreibung":       f"{gegenkonto} – {vzweck}".strip(" –"),
+            "belegnr":            belegnr_v,       # #101
+            "abrechnungsjahr":    str(abr_jahr) if abr_jahr else "",  # #101
+            "abrechnungsrelevant": "1",
+            "status":             "Neu",
         }
         d = ZahlungDialog(self, pseudo)
         self.wait_window(d)
         if d.result:
             v = d.result
             betrag = float(v["betrag"] or 0)
-            if v["typ"] == "Ausgabe": betrag = -abs(betrag)
+            if v["typ"] == "Ausgabe":
+                betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,konto_typ,status) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
-                 kt, v.get("status", "Neu")))
+                "INSERT INTO zahlungen "
+                "(datum,betrag,typ,kategorie,beschreibung,belegnr,konto_typ,status,"
+                " abrechnungsrelevant,abrechnungsjahr) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"],
+                 v.get("belegnr") or None, kt, v.get("status", "Neu"),
+                 int(v.get("abrechnungsrelevant") or 1),
+                 int(v["abrechnungsjahr"]) if v.get("abrechnungsjahr") else None))
             zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             conn.execute(
                 "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
                 "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
                 (v["kategorie"], zahlung_id, int(sel[0])))
-            conn.commit(); conn.close()
+            conn.commit()
+            conn.close()
             lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False)
             self._load_vorschlaege()
 
