@@ -7,6 +7,18 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.35.2] — 2026-04-25
+
+### Fix
+
+- **GH#96 Duplikat-Dialog erscheint beim Bearbeiten ohne neuen Beleg:**
+  - `_edit_rechnung()`: Alter `beleg_dateipfad` wird vor dem Dialog-Öffnen gemerkt.
+    `_beleg_archivieren()` wird nur noch aufgerufen wenn der Pfad sich tatsächlich
+    geändert hat (neuer Upload). Beim Ändern von Kategorie, Status, Beschreibung o.ä.
+    erscheint kein Duplikat-Hinweis mehr.
+
+---
+
 ## [0.35.1] — 2026-04-25
 
 ### Fix / Verbesserung

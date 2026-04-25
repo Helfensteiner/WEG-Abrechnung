@@ -108,6 +108,9 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.35.2 — Duplikat-Dialog bei Bearbeiten ohne neuen Beleg unterdrücken (#96):
+#             _edit_rechnung: alter beleg_dateipfad wird gemerkt; _beleg_archivieren()
+#             wird nur aufgerufen wenn der Pfad sich geändert hat (neuer Beleg).
 #   0.35.1 — Beschreibung auto-befüllen bei Rechnungs-Upload (#95):
 #             _felder_befuellen: "beschreibung" in Fill-Loop aufgenommen;
 #             tk.Text-Widget korrekt befüllt (delete "1.0"/"end" statt 0/"end");
@@ -229,7 +232,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.35.1"
+APP_VERSION = "0.35.2"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -4174,6 +4177,7 @@ class RechnungenPage(tk.Frame):
         finally:
             conn.close()
         if not row: return
+        alter_beleg = (row.get("beleg_dateipfad") or "").strip()
         d = RechnungDialog(self, dict(row))
         self.wait_window(d)
         if d.result:
@@ -4204,9 +4208,10 @@ class RechnungenPage(tk.Frame):
                 conn.commit()
             finally:
                 conn.close()
-            # #73/#75 – Beleg automatisch in Jahresablage archivieren
-            if v.get("beleg_dateipfad"):
-                _beleg_archivieren(self, v.get("beleg_dateipfad"), v.get("rechnungsdatum", ""))
+            # #73/#75 – Beleg archivieren, aber NUR wenn der Pfad neu ist (#96)
+            neuer_beleg = (v.get("beleg_dateipfad") or "").strip()
+            if neuer_beleg and neuer_beleg != alter_beleg:
+                _beleg_archivieren(self, neuer_beleg, v.get("rechnungsdatum", ""))
             self._load()
 
     def _delete_rechnung(self):
