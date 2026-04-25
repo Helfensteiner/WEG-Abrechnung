@@ -108,6 +108,13 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.36.4 — Abrechnungsjahr bei Auto-Matching ermitteln (#102):
+#             _ermittle_abrechnungsjahr(datum, kategorie, beschr): leitet Jahr
+#             aus Buchungsdatum ab; Sonderregel: Nebenkostenvorauszahlungen
+#             (Wohngeld, Hausgeld, Vorauszahlung, Nebenkosten etc.) nach dem
+#             15.12. → None (nicht eindeutig, manuell zu klären).
+#             _auto_match_alle + _auto_match_neue_rechnung: INSERT zahlungen
+#             um abrechnungsrelevant=1 + abrechnungsjahr erweitert.
 #   0.36.3 — Vorschläge-Buchung: Belegnr+Abrechnungsjahr vorbelegen (#101):
 #             _extrahiere_belegnr_aus_vzweck(): SEPA-Refs (EREF+/KREF+/MREF+),
 #             Rg.Nr., Rechnung, Beleg, RE- aus Verwendungszweck extrahieren.
@@ -261,7 +268,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.36.3"
+APP_VERSION = "0.36.4"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -3928,6 +3935,34 @@ def _auto_log_match(conn, kontoauszug_id: int, rechnung_id, zahlung_id,
         pass
 
 
+_NEBENKOSTEN_KEYWORDS = frozenset([
+    "wohngeld", "hausgeld", "vorauszahlung", "nebenkosten",
+    "betriebskosten", "grundgebühr", "abschlag", "rücklage",
+    "erhaltungsrücklage", "sonderumlage",
+])
+
+
+def _ermittle_abrechnungsjahr(datum, kategorie: str = "",
+                               beschreibung: str = "") -> "int | None":
+    """#102 – Ermittelt das Abrechnungsjahr aus dem Buchungsdatum.
+
+    Sonderregel: Nebenkostenvorauszahlungen nach dem 15. Dezember sind
+    jahresübergreifend nicht eindeutig → None zurückgeben (manuell klären).
+    """
+    if not datum:
+        return None
+    try:
+        d = date.fromisoformat(str(datum)[:10])
+    except (ValueError, TypeError):
+        return None
+    # Prüfen ob Datum nach 15. Dezember
+    if d.month == 12 and d.day > 15:
+        text = f"{kategorie} {beschreibung}".lower()
+        if any(kw in text for kw in _NEBENKOSTEN_KEYWORDS):
+            return None   # Nicht eindeutig — manuell klären
+    return d.year
+
+
 def _auto_match_alle(conn, schwelle_auto: float = 80.0,
                      schwelle_vorschlag: float = 60.0) -> dict:
     """Führt automatisches Matching für nicht zugeordnete Kontoauszugsbuchungen durch.
@@ -3989,14 +4024,16 @@ def _auto_match_alle(conn, schwelle_auto: float = 80.0,
                                  (rechnung["id"], zahlung_id))
                 else:
                     kat = kb_dict.get("kategorie_vorschlag") or rechnung.get("kategorie") or "Sonstiges"
+                    abr_jahr = _ermittle_abrechnungsjahr(  # #102
+                        kb_dict.get("datum"), kat, beschr)
                     conn.execute(
                         "INSERT INTO zahlungen "
-                        "(datum,betrag,typ,kategorie,beschreibung,konto_typ,status,rechnung_id) "
-                        "VALUES (?,?,?,?,?,?,?,?)",
+                        "(datum,betrag,typ,kategorie,beschreibung,konto_typ,status,"
+                        " abrechnungsrelevant,abrechnungsjahr,rechnung_id) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
                         (kb_dict.get("datum"), kb_dict.get("betrag"), "Ausgabe",
-                         kat, beschr,
-                         kb_dict.get("konto_typ", ""),
-                         "Neu", rechnung["id"]))
+                         kat, beschr, kb_dict.get("konto_typ", ""),
+                         "Neu", 1, abr_jahr, rechnung["id"]))
                     zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
                 conn.execute(
@@ -4096,12 +4133,16 @@ def _auto_match_neue_rechnung(rechnung_id: int, parent_win=None):
             else:
                 kat = (kb_dict.get("kategorie_vorschlag")
                        or rechnung.get("kategorie") or "Sonstiges")
+                abr_jahr = _ermittle_abrechnungsjahr(  # #102
+                    kb_dict.get("datum"), kat, beschr)
                 conn.execute(
                     "INSERT INTO zahlungen "
-                    "(datum,betrag,typ,kategorie,beschreibung,konto_typ,status,rechnung_id) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "(datum,betrag,typ,kategorie,beschreibung,konto_typ,status,"
+                    " abrechnungsrelevant,abrechnungsjahr,rechnung_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (kb_dict.get("datum"), kb_dict.get("betrag"), "Ausgabe",
-                     kat, beschr, kb_dict.get("konto_typ", ""), "Neu", rechnung_id))
+                     kat, beschr, kb_dict.get("konto_typ", ""),
+                     "Neu", 1, abr_jahr, rechnung_id))
                 zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
             conn.execute(
