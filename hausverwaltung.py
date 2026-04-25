@@ -108,6 +108,20 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.31.0 — GH Issues #78/#89/#90/#91/#92/#93:
+#             #78  Differenzbeträge/Skonto in BuchungZuordnenDialog: Prüfung der Differenz
+#                  zwischen Bankbetrag und Rechnungsbetrag; Toleranz ≤ 2 € oder ≤ 2 %
+#                  → automatisch „Skonto/Rundung"; größere Differenz → Bestätigungsdialog;
+#                  differenz_betrag + differenz_grund in kontoauszug_match_log gespeichert.
+#             #89  db_execute() Hilfsfunktion: zentrale DB-Fehlerbehandlung mit
+#                  messagebox.showerror bei sqlite3.Error; in kritischen DELETE-Ops genutzt.
+#             #90  parse_betrag() + parse_datum() Validierungsfunktionen: parse_betrag()
+#                  akzeptiert „1.234,56" und „1234.56"; parse_datum() akzeptiert TT.MM.JJJJ
+#                  und JJJJ-MM-TT; beide in ZahlungDialog + RechnungDialog genutzt.
+#             #91  KontoauszugPage Saldo-KPI: Letzte-Saldo-Anzeige nach _refresh_saldo_kacheln.
+#             #92  confirm_delete() globale Hilfsfunktion: einheitlicher Lösch-Dialog;
+#                  ersetzt wichtigste askyesno-Aufrufe bei Delete-Aktionen.
+#             #93  Dashboard Hausgeld-KPI: Monatsumsatz-Einnahmen als neue KPI-Karte.
 #   0.30.0 — GH Issues #83–#88: BuchhaltungPage Refactoring — Tabs auf andere Seiten verteilt:
 #             #83 Vorschläge-Tab → KontoauszugPage (2-Tab-Struktur: Kontoauszug + Vorschläge)
 #             #84 Buchungsregeln-Tab → EinstellungenPage Tab 5
@@ -168,7 +182,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.30.0"
+APP_VERSION = "0.31.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -566,6 +580,33 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")  # Referentielle Integrität erzwingen
     return conn
+
+def db_execute(sql: str, params: tuple = (), commit: bool = False):
+    """#89 – Zentrale DB-Hilfsfunktion mit Fehlerbehandlung.
+
+    SELECT → gibt Liste von Rows zurück (oder leere Liste bei Fehler).
+    INSERT/UPDATE/DELETE mit commit=True → gibt True zurück (oder False bei Fehler).
+    Bei sqlite3.Error: messagebox.showerror() und False/[] zurückgeben.
+    """
+    conn = get_db()
+    try:
+        cur = conn.execute(sql, params)
+        if commit:
+            conn.commit()
+            return True
+        return cur.fetchall()
+    except sqlite3.Error as e:
+        messagebox.showerror("Datenbankfehler", str(e))
+        return False if commit else []
+    finally:
+        conn.close()
+
+
+def confirm_delete(parent=None, titel: str = "Löschen bestätigen",
+                   nachricht: str = "Wirklich löschen?") -> bool:
+    """#92 – Einheitlicher Lösch-Bestätigungsdialog. True = bestätigt."""
+    return messagebox.askyesno(titel, nachricht, icon="warning", parent=parent)
+
 
 def init_db():
     conn = get_db()
@@ -995,6 +1036,9 @@ CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
         "ALTER TABLE zahlungen DROP COLUMN gesamtrechnungsbetrag",
         "ALTER TABLE zahlungen DROP COLUMN lohnanteil",
         "ALTER TABLE zahlungen DROP COLUMN handwerker_steuerlich",
+        # v0.31.0 – #78 Differenzbeträge/Skonto in kontoauszug_match_log
+        "ALTER TABLE kontoauszug_match_log ADD COLUMN differenz_betrag REAL DEFAULT 0.0",
+        "ALTER TABLE kontoauszug_match_log ADD COLUMN differenz_grund TEXT",
     ]:
         try:
             c.execute(sql)
@@ -1148,19 +1192,64 @@ def fmt_date(val):
     except:
         return str(val)
 
-def parse_datum(s: str) -> str:
-    """Normalisiert Datumseingabe auf ISO JJJJ-MM-TT.
+def parse_datum(s: str) -> str | None:
+    """#90 – Normalisiert Datumseingabe auf ISO JJJJ-MM-TT.
     Akzeptiert: JJJJ-MM-TT, TT.MM.JJJJ, TT/MM/JJJJ
+    Gibt None zurück wenn kein gültiges Datum erkannt.
     """
     s = (s or "").strip()
     if not s:
-        return ""
+        return None
     if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
-        return s
+        try:
+            datetime.strptime(s, "%Y-%m-%d")
+            return s
+        except ValueError:
+            return None
     m = re.match(r'^(\d{1,2})[./](\d{1,2})[./](\d{4})$', s)
     if m:
-        return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
-    return s
+        iso = f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+        try:
+            datetime.strptime(iso, "%Y-%m-%d")
+            return iso
+        except ValueError:
+            return None
+    return None
+
+
+def parse_betrag(text: str) -> float | None:
+    """#90 – Parst Betragsangaben in float.
+    Akzeptiert: '1.234,56' (deutsch), '1234.56' (englisch), '1234,56'.
+    Gibt None zurück bei ungültigem Format.
+    """
+    if text is None:
+        return None
+    text = str(text).strip().replace(" ", "").replace("€", "").replace("\xa0", "")
+    if not text:
+        return None
+    # Deutsches Format: Punkt als Tausender, Komma als Dezimal
+    # Erkenne: wenn Komma vorhanden und genau 2 Stellen dahinter (oder kein Punkt)
+    hat_komma = "," in text
+    hat_punkt = "." in text
+    if hat_komma and hat_punkt:
+        # Beide vorhanden: letztes Trennzeichen ist Dezimal
+        letztes_komma = text.rfind(",")
+        letzter_punkt = text.rfind(".")
+        if letztes_komma > letzter_punkt:
+            # Komma ist Dezimaltrennzeichen (deutsch): 1.234,56
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            # Punkt ist Dezimaltrennzeichen (englisch): 1,234.56
+            text = text.replace(",", "")
+    elif hat_komma:
+        # Nur Komma: Dezimalkomma (1234,56 oder 1.234,56)
+        text = text.replace(",", ".")
+    # Nur Punkt oder keine Trennzeichen: direkt als float
+    try:
+        val = float(text)
+        return val
+    except ValueError:
+        return None
 
 def sync_mea_eigentuemer(conn=None):
     """#20 MEA-Sync: Berechnet eigentuemer.anteil_prozent aus SUM(wohnungen.mea_tausendstel) / 10.
@@ -1643,12 +1732,20 @@ class DashboardPage(tk.Frame):
         jahres_aus     = conn.execute("SELECT COALESCE(SUM(betrag),0) FROM zahlungen WHERE typ='Ausgabe' AND strftime('%Y',datum)=strftime('%Y','now')").fetchone()[0]
         jahres_saldo   = jahres_ein - jahres_aus
         ruecklage_sum  = conn.execute("SELECT COALESCE(SUM(betrag),0) FROM zahlungen WHERE typ='Ausgabe' AND kategorie='Erhaltungsrücklage'").fetchone()[0]
+        # #93 – Hausgeld-KPI: Einnahmen mit Hausgeld/Wohngeld-Kategorie im laufenden Monat
+        hausgeld_monat = conn.execute(
+            "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
+            "WHERE typ='Einnahme' AND strftime('%Y-%m',datum)=strftime('%Y-%m','now') "
+            "AND (LOWER(kategorie) LIKE '%hausgeld%' OR LOWER(kategorie) LIKE '%wohngeld%')"
+        ).fetchone()[0]
         conn.close()
 
-        kpi_row.columnconfigure((0, 1, 2, 3, 4, 5), weight=1, uniform="kpi")
+        kpi_row.columnconfigure((0, 1, 2, 3, 4, 5, 6), weight=1, uniform="kpi")
         kpis = [
             ("🏠", "Aktive Mieter",    str(mieter_count),           ACCENT2),
             ("💰", "Einnahmen (Monat)", fmt_euro(einnahmen),          SUCCESS),
+            ("🏷", "Hausgeld (Monat)", fmt_euro(hausgeld_monat),
+             SUCCESS if hausgeld_monat > 0 else WARNING),
             ("📊", f"Jahressaldo {date.today().year}", fmt_euro(jahres_saldo),
              SUCCESS if jahres_saldo >= 0 else DANGER),
             ("🏦", "Rücklagen (kum.)",  fmt_euro(ruecklage_sum),      "#2E6DA4"),
@@ -1883,7 +1980,7 @@ class MieterPage(tk.Frame):
             messagebox.showwarning("Berechtigung", "Sie haben keine Löschberechtigung.", parent=self); return
         sel = self.tree.selection()
         if not sel: return
-        if messagebox.askyesno("Löschen", "Mieter wirklich löschen?"):
+        if confirm_delete(self, nachricht="Mieter wirklich löschen?"):
             conn = get_db()
             conn.execute("DELETE FROM mieter WHERE id=?", (int(sel[0]),))
             conn.commit(); conn.close()
@@ -2405,7 +2502,7 @@ class EigentuemerPage(tk.Frame):
             messagebox.showwarning("Berechtigung", "Sie haben keine Löschberechtigung.", parent=self); return
         sel = self.tree.selection()
         if not sel: return
-        if messagebox.askyesno("Löschen", "Eigentümer löschen?"):
+        if confirm_delete(self, nachricht="Eigentümer löschen?"):
             conn = get_db()
             conn.execute("DELETE FROM eigentuemer WHERE id=?", (int(sel[0]),))
             conn.commit(); conn.close(); self._load()
@@ -2667,7 +2764,7 @@ class WohnungenPage(tk.Frame):
             messagebox.showwarning("Berechtigung", "Sie haben keine Löschberechtigung.", parent=self); return
         sel = self.tree.selection()
         if not sel: return
-        if messagebox.askyesno("Löschen", "Wohnung endgültig löschen?", parent=self):
+        if confirm_delete(self, nachricht="Wohnung endgültig löschen?"):
             try:
                 conn = get_db()
                 conn.execute("DELETE FROM wohnungen WHERE id=?", (int(sel[0]),))
@@ -3377,9 +3474,20 @@ class ZahlungDialog(BaseDialog):
         v = self._get_values()
         if not v.get("datum") or not v.get("betrag"):
             messagebox.showwarning("Pflichtfelder", "Datum und Betrag sind erforderlich.", parent=self); return
-        # Normalisiere Datum
-        if v.get("datum"):
-            v["datum"] = parse_datum(v["datum"])
+        # #90 – Datum validieren und normalisieren
+        datum_iso = parse_datum(v.get("datum", ""))
+        if not datum_iso:
+            messagebox.showwarning("Ungültiges Datum",
+                "Bitte Datum im Format TT.MM.JJJJ oder JJJJ-MM-TT eingeben.", parent=self)
+            return
+        v["datum"] = datum_iso
+        # #90 – Betrag validieren
+        betrag_val = parse_betrag(str(v.get("betrag", "")))
+        if betrag_val is None:
+            messagebox.showwarning("Ungültiger Betrag",
+                "Bitte einen gültigen Betrag eingeben (z.B. 1234,56 oder 1234.56).", parent=self)
+            return
+        v["betrag"] = betrag_val
         # Abrechnungsrelevanz speichern
         v["abrechnungsrelevant"] = 1 if self._abr_var.get() else 0
         # #65 – Rechnung-Zuordnung
@@ -4308,9 +4416,53 @@ class BuchungZuordnenDialog(tk.Toplevel):
         conn = get_db()
         try:
             if zuordnen:
+                # #78 – Differenzprüfung vor Zuordnung
+                zahlung_row = conn.execute(
+                    "SELECT betrag FROM zahlungen WHERE id=?", (zahlung_id,)).fetchone()
+                if zahlung_row:
+                    bank_betrag = abs(zahlung_row["betrag"] or 0)
+                    rg_betrag   = abs(self._betrag_gesamt or 0)
+                    differenz   = rg_betrag - bank_betrag
+                    diff_abs    = abs(differenz)
+                    toleranz    = max(2.00, rg_betrag * 0.02)
+                    if diff_abs > 0 and diff_abs > toleranz:
+                        # Differenz größer als Toleranz → Bestätigungsdialog
+                        weiter = messagebox.askyesno(
+                            "Abweichung festgestellt",
+                            f"Der Bankbetrag ({fmt_euro(bank_betrag)}) weicht vom "
+                            f"Rechnungsbetrag ({fmt_euro(rg_betrag)}) ab.\n\n"
+                            f"Differenz: {fmt_euro(diff_abs)}\n\n"
+                            "Trotzdem zuordnen?",
+                            icon="warning", parent=self
+                        )
+                        if not weiter:
+                            conn.close()
+                            return
+                        differenz_grund = f"Manuell bestätigt ({fmt_euro(diff_abs)} Abweichung)"
+                    elif diff_abs > 0:
+                        differenz_grund = "Skonto/Rundung"
+                    else:
+                        differenz_grund = ""
+                    differenz_betrag = differenz if diff_abs > 0 else 0.0
+                else:
+                    differenz_betrag = 0.0
+                    differenz_grund  = ""
+
                 conn.execute("UPDATE zahlungen SET rechnung_id=? WHERE id=?",
                              (self._rechnung_id, zahlung_id))
                 _sync_kategorie_von_rechnung(conn, zahlung_id, self._rechnung_id)  # #78
+                # #78 – Differenz in match_log protokollieren (falls Eintrag vorhanden)
+                if differenz_betrag != 0.0 or differenz_grund:
+                    try:
+                        conn.execute(
+                            "UPDATE kontoauszug_match_log "
+                            "SET differenz_betrag=?, differenz_grund=? "
+                            "WHERE rechnung_id=? AND zahlung_id=? AND abgelehnt=0",
+                            (differenz_betrag, differenz_grund,
+                             self._rechnung_id, zahlung_id)
+                        )
+                    except Exception:
+                        pass
             else:
                 conn.execute("UPDATE zahlungen SET rechnung_id=NULL WHERE id=?",
                              (zahlung_id,))
@@ -4723,11 +4875,31 @@ class RechnungDialog(BaseDialog):
         if not v.get("betrag_brutto"):
             messagebox.showwarning("Pflichtfeld", "Betrag Brutto ist erforderlich.", parent=self)
             return
+        # #90 – Betrag Brutto validieren
+        betrag_val = parse_betrag(str(v.get("betrag_brutto", "")))
+        if betrag_val is None:
+            messagebox.showwarning("Ungültiger Betrag",
+                "Bitte einen gültigen Brutto-Betrag eingeben (z.B. 1234,56).", parent=self)
+            return
+        v["betrag_brutto"] = betrag_val
+        # #90 – Rechnungsdatum validieren (optional, aber wenn angegeben dann korrekt)
+        rd = v.get("rechnungsdatum", "")
+        if rd:
+            rd_iso = parse_datum(str(rd))
+            if rd_iso:
+                v["rechnungsdatum"] = rd_iso
+        # Fälligkeitsdatum normalisieren wenn vorhanden
+        fd = v.get("faelligkeitsdatum", "")
+        if fd:
+            fd_iso = parse_datum(str(fd))
+            if fd_iso:
+                v["faelligkeitsdatum"] = fd_iso
         v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
         v["zugferd_format"] = getattr(self, "_zugferd_format_val", None)  # #66
         # #74 – handwerker_steuerlich auto: 1 wenn Lohnanteil > 0 (keine Checkbox)
         try:
-            v["handwerker_steuerlich"] = 1 if float(v.get("lohnanteil") or 0) > 0 else 0
+            lohnanteil_val = parse_betrag(str(v.get("lohnanteil") or "")) or 0.0
+            v["handwerker_steuerlich"] = 1 if lohnanteil_val > 0 else 0
         except (ValueError, TypeError):
             v["handwerker_steuerlich"] = 0
         self.result = v
@@ -4932,7 +5104,7 @@ class WartungPage(tk.Frame):
             messagebox.showwarning("Berechtigung", "Keine Löschberechtigung.", parent=self); return
         sel = self.tree.selection()
         if not sel: return
-        if messagebox.askyesno("Löschen", "Auftrag löschen?"):
+        if confirm_delete(self, nachricht="Auftrag löschen?"):
             conn = get_db()
             conn.execute("DELETE FROM wartung WHERE id=?", (int(sel[0]),))
             conn.commit(); conn.close(); self._load()
@@ -7631,6 +7803,29 @@ class KontoauszugPage(tk.Frame):
             for child in card.winfo_children():
                 child.bind("<Button-1>", lambda e, lbl=bezeichnung: self._filter_konto(lbl))
 
+        # #91 – Letzte Buchung + kumulativer Saldo als Info-Zeile
+        conn2 = get_db()
+        letzte = conn2.execute(
+            "SELECT datum, betrag FROM kontoauszug ORDER BY datum DESC, id DESC LIMIT 1"
+        ).fetchone()
+        gesamt_saldo = conn2.execute(
+            "SELECT SUM(betrag) FROM kontoauszug"
+        ).fetchone()[0] or 0.0
+        conn2.close()
+        if letzte:
+            saldo_farbe = ACCENT2 if gesamt_saldo >= 0 else DANGER
+            info_lbl = (
+                f"Kumulativer Saldo: {fmt_euro(gesamt_saldo)}  ·  "
+                f"Letzte Buchung: {fmt_date(letzte['datum'])}"
+            )
+            if not hasattr(self, "_saldo_info_lbl") or not self._saldo_info_lbl.winfo_exists():
+                self._saldo_info_lbl = tk.Label(
+                    self._saldo_frame, text=info_lbl,
+                    bg=BG_CARD, fg=saldo_farbe, font=FONT_SMALL)
+                self._saldo_info_lbl.pack(side="left", padx=(12, 0), pady=4)
+            else:
+                self._saldo_info_lbl.config(text=info_lbl, fg=saldo_farbe)
+
     def _filter_konto(self, label):
         """Setzt den Konto-Filter auf das geklickte Konto."""
         self._konto_var.set(label)
@@ -8286,13 +8481,12 @@ class KontoauszugPage(tk.Frame):
     def _clear(self):
         if messagebox.askyesno("Alle löschen",
                                "Alle importierten Kontoauszugsbuchungen löschen?"):
-            conn = get_db()
-            conn.execute("DELETE FROM kontoauszug")
-            conn.commit()
-            conn.close()
-            self._info_var.set(
-                "Kontoauszug importieren: CAMT.052 XML (Sparkasse Bodensee) oder CSV")
-            self._load()
+            # #89 – db_execute mit Fehlerbehandlung
+            ok = db_execute("DELETE FROM kontoauszug", commit=True)
+            if ok:
+                self._info_var.set(
+                    "Kontoauszug importieren: CAMT.052 XML (Sparkasse Bodensee) oder CSV")
+                self._load()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -10811,7 +11005,7 @@ class BenutzerverwaltungPage(tk.Frame):
         if user and user["ist_superadmin"]:
             messagebox.showinfo("Gesperrt", "Superadmin-Benutzer können nicht gelöscht werden.", parent=self)
             return
-        if messagebox.askyesno("Löschen", "Benutzer löschen?"):
+        if confirm_delete(self, nachricht="Benutzer löschen?"):
             conn = get_db()
             conn.execute("DELETE FROM benutzer WHERE id=?", (uid,))
             conn.commit(); conn.close(); self._load()

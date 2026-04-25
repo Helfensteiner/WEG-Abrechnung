@@ -7,6 +7,42 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.31.0] — 2026-04-25
+
+### Neu
+
+- **GH#78 Differenzbeträge / Skonto beim Zuordnen:** Im `BuchungZuordnenDialog` wird jetzt
+  vor dem Zuordnen die Differenz zwischen Bankbuchungs-Betrag und Zahlungs-Betrag berechnet.
+  Toleranzschwelle: `max(2,00 €, 2 % des Betrags)`. Innerhalb der Toleranz → automatisch
+  `differenz_grund = "Skonto/Rundung"`. Außerhalb → Bestätigungsdialog mit Betragsanzeige.
+  Protokoll: `differenz_betrag` + `differenz_grund` in `kontoauszug_match_log` (neue Spalten,
+  DB-Migration in `init_db()` via `ALTER TABLE ... ADD COLUMN`).
+
+- **#89 DB-Fehlerbehandlung:** Neue globale Hilfsfunktion `db_execute(sql, params, commit)` —
+  zentrales `try/except sqlite3.Error` mit `messagebox.showerror("Datenbankfehler", ...)`.
+  Eingesetzt bei kritischen DELETE-Operationen (z.B. `KontoauszugPage._clear()`).
+
+- **#90 Eingabevalidierung:** Neue globale Funktionen `parse_betrag()` und `parse_datum()`:
+  - `parse_betrag()` akzeptiert deutsches Format `„1.234,56 €"` und englisches `1234.56`;
+    gibt `None` bei ungültigem Wert zurück.
+  - `parse_datum()` akzeptiert `TT.MM.JJJJ` und `JJJJ-MM-TT`; gibt `None` bei Fehler.
+  - Eingesetzt in `ZahlungDialog._on_save()` und `RechnungDialog._on_save()`.
+
+- **#91 Kontoauszug Saldo-Verlauf:** In `KontoauszugPage` neue Saldo-Anzeige nach den
+  Konto-Kacheln: kumulativer Saldo aller Buchungen + Datum der letzten Buchung,
+  farblich hervorgehoben (blau positiv / rot negativ).
+
+- **#92 Lösch-Bestätigungsdialog einheitlich:** Neue globale Hilfsfunktion
+  `confirm_delete(parent, titel, nachricht)` — einheitlicher `messagebox.askyesno`-Dialog
+  mit `icon="warning"`. Ersetzt individuelle Bestätigungsabfragen bei Mieter löschen,
+  Eigentümer löschen, Wohnung löschen.
+
+- **#93 Dashboard Hausgeld-KPI:** Neue KPI-Karte `"🏷 Hausgeld (Monat)"` im Dashboard —
+  zeigt Summe aller Wohngeld/Hausgeld-Einnahmen im laufenden Monat aus `zahlungen`
+  (Kategorien: `wohngeld`, `hausgeld`, `nebenkosten`).
+
+---
+
 ## [0.30.0] — 2026-04-20
 
 ### Geändert

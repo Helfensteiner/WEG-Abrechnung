@@ -227,7 +227,7 @@
     <h1>WEG-Hausverwaltung · Workflow-Konzept</h1>
     <p>Kontoauszug-Upload → Rechnungs-Upload → Zahlungsabgleich → Jahresabrechnung</p>
   </div>
-  <div class="ver-badge">v0.29 ✅ · v0.30 Planung · April 2026</div>
+  <div class="ver-badge">v0.30 ✅ · v0.31 ✅ · April 2026</div>
 </header>
 
 <div class="tab-bar">
@@ -1136,6 +1136,92 @@
   </div>
 
   <div class="section">
+    <div class="section-title">Implementierungsplan: v0.31 – Qualität &amp; Tech-Debt (GH#78, #89–#93)</div>
+    <div class="summary-grid">
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--orange);">⚖️ GH#78 Differenzbeträge / Skonto</div>
+        <div class="phase-body">
+          <p>Im <code>BuchungZuordnenDialog._toggle()</code>: Differenz zwischen Bankbetrag und Zahlungsbetrag prüfen.</p>
+          <ul>
+            <li>Toleranz: <code>max(2,00 €, 2 % des Betrags)</code></li>
+            <li>Innerhalb → automatisch <code>differenz_grund = "Skonto/Rundung"</code></li>
+            <li>Außerhalb → <code>messagebox.askyesno</code> mit Betragsanzeige</li>
+            <li>DB: <code>differenz_betrag</code> + <code>differenz_grund</code> in <code>kontoauszug_match_log</code> (ALTER TABLE Migration)</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--green);">Status: ✅ v0.31.0 implementiert</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--red);">🛡 #89 DB-Fehlerbehandlung</div>
+        <div class="phase-body">
+          <p>Neue globale Funktion <code>db_execute(sql, params, commit)</code> mit zentralem <code>try/except sqlite3.Error</code>.</p>
+          <ul>
+            <li>Benutzerfreundliche Fehlermeldung via <code>messagebox.showerror</code></li>
+            <li>Rückgabe: <code>True</code> / <code>False</code> oder Rows bei SELECT</li>
+            <li>Eingesetzt bei kritischen DELETE-Operationen</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--green);">Status: ✅ v0.31.0 implementiert</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--blue);">✔️ #90 Eingabevalidierung</div>
+        <div class="phase-body">
+          <p>Zwei globale Validierungsfunktionen für konsistente Eingaben.</p>
+          <ul>
+            <li><code>parse_betrag()</code>: akzeptiert „1.234,56 €" und „1234.56", gibt <code>None</code> bei Fehler</li>
+            <li><code>parse_datum()</code>: akzeptiert <code>TT.MM.JJJJ</code> + <code>JJJJ-MM-TT</code>, gibt <code>None</code> bei Fehler</li>
+            <li>Eingesetzt in <code>ZahlungDialog._on_save()</code> und <code>RechnungDialog._on_save()</code></li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--green);">Status: ✅ v0.31.0 implementiert</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--green);">📈 #91 Kontoauszug Saldo-Verlauf</div>
+        <div class="phase-body">
+          <p>In <code>KontoauszugPage._refresh_saldo_kacheln()</code>: kumulativer Saldo + Datum der letzten Buchung.</p>
+          <ul>
+            <li>Farbe: blau (positiv) / rot (negativ)</li>
+            <li>Zeigt Saldo aller importierten Buchungen kumuliert</li>
+            <li>Kompakte Anzeige unter den Konto-Kacheln</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--green);">Status: ✅ v0.31.0 implementiert</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--purple);">🗑 #92 Lösch-Dialog einheitlich</div>
+        <div class="phase-body">
+          <p>Neue globale Funktion <code>confirm_delete(parent, titel, nachricht)</code>.</p>
+          <ul>
+            <li>Einheitlicher <code>messagebox.askyesno(icon="warning")</code></li>
+            <li>Eingesetzt: Mieter löschen, Eigentümer löschen, Wohnung löschen</li>
+            <li>Verhindert versehentliches Löschen durch klare Warnung</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--green);">Status: ✅ v0.31.0 implementiert</p>
+        </div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-head" style="background:var(--darkblue);">💰 #93 Dashboard Hausgeld-KPI</div>
+        <div class="phase-body">
+          <p>Neue KPI-Karte „🏷 Hausgeld (Monat)" im Dashboard.</p>
+          <ul>
+            <li>Abfrage: <code>zahlungen</code> WHERE <code>kategorie LIKE '%wohngeld%'</code> im laufenden Monat</li>
+            <li>Ampelfarbe: grün (Einnahmen vorhanden) / orange (keine)</li>
+            <li>7. KPI-Karte neben den bestehenden 6 im Dashboard</li>
+          </ul>
+          <p style="margin-top:8px;font-size:12px;color:var(--green);">Status: ✅ v0.31.0 implementiert</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="section">
     <div class="section-title">Implementierungsplan: v0.30 – BuchhaltungPage-Refactoring (GH#83–#88)</div>
     <div class="summary-grid">
 
@@ -1371,9 +1457,9 @@
       </tr>
       <tr>
         <td><strong>GH#78</strong></td>
-        <td>BuchungZuordnenDialog – Differenzbeträge (Skonto, Teilzahlungen, Währungsabweichungen) – Konzept documented</td>
-        <td style="color:var(--orange);">🟠 Needs Refinement</td>
-        <td class="td-status-miss">⚠️ → v0.29+</td>
+        <td>BuchungZuordnenDialog – Differenzbeträge (Skonto, Teilzahlungen, Toleranz max(2€/2%), kontoauszug_match_log)</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-done">✅ v0.31.0</td>
       </tr>
       <tr>
         <td><strong>GH#79</strong></td>
@@ -1416,6 +1502,36 @@
         <td>BuchhaltungPage: Dead Code <code>_import_csv()</code> (leere pass-Methode) entfernt</td>
         <td style="color:var(--light);">⚪ Klein</td>
         <td class="td-status-done">✅ v0.30.0</td>
+      </tr>
+      <tr style="background:#E8F5E9;">
+        <td><strong>#89</strong></td>
+        <td>DB-Fehlerbehandlung: <code>db_execute()</code> globale Hilfsfunktion mit <code>try/except sqlite3.Error</code> + <code>messagebox.showerror</code></td>
+        <td style="color:var(--red);">🔴 Hoch</td>
+        <td class="td-status-done">✅ v0.31.0</td>
+      </tr>
+      <tr style="background:#E8F5E9;">
+        <td><strong>#90</strong></td>
+        <td>Eingabevalidierung: <code>parse_betrag()</code> (DE/EN-Format) + <code>parse_datum()</code> (TT.MM.JJJJ / JJJJ-MM-TT) in ZahlungDialog + RechnungDialog</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-done">✅ v0.31.0</td>
+      </tr>
+      <tr style="background:#E8F5E9;">
+        <td><strong>#91</strong></td>
+        <td>KontoauszugPage: Saldo-Verlauf-Anzeige (kumulativer Saldo + Datum der letzten Buchung)</td>
+        <td style="color:var(--light);">⚪ Niedrig</td>
+        <td class="td-status-done">✅ v0.31.0</td>
+      </tr>
+      <tr style="background:#E8F5E9;">
+        <td><strong>#92</strong></td>
+        <td>Lösch-Bestätigungsdialog: <code>confirm_delete()</code> globale Hilfsfunktion; einheitlich in Mieter, Eigentümer, Wohnung</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-done">✅ v0.31.0</td>
+      </tr>
+      <tr style="background:#E8F5E9;">
+        <td><strong>#93</strong></td>
+        <td>Dashboard: neue KPI-Karte „🏷 Hausgeld (Monat)" — Wohngeld/Hausgeld-Einnahmen laufender Monat</td>
+        <td style="color:var(--blue);">🔵 Mittel</td>
+        <td class="td-status-done">✅ v0.31.0</td>
       </tr>
     </table>
   </div>
@@ -1620,33 +1736,32 @@ weg_backup_20260419_143022.zip
     <div class="section-title">Prozess-Reifegrad: Jetzt vs. Ziel</div>
     <div class="card-grid" style="grid-template-columns: 1fr 1fr;">
       <div class="card" style="border-top: 3px solid var(--blue);">
-        <div class="card-head"><span class="card-icon">📍</span><div><div class="card-title">Heute (v0.30.0) – BuchhaltungPage-Refactoring</div></div></div>
+        <div class="card-head"><span class="card-icon">📍</span><div><div class="card-title">Heute (v0.31.0) – Qualität &amp; Tech-Debt</div></div></div>
         <ul>
           <li>CAMT.052 XML-Import (Sparkasse) ✅</li>
-          <li>Rechnung importieren (ZUGFeRD/OCR/KI) ✅</li>
           <li>Auto-Matching Kontoauszug ↔ Rechnung ✅</li>
+          <li>BuchungZuordnen: Differenzbeträge/Skonto ✅</li>
           <li>BuchungZuordnen: Suchfeld + Click-to-Sort ▲/▼ ✅</li>
-          <li>Kostenart: Umlageschlüssel-Name + Tooltip ✅</li>
-          <li>Vorschläge-Tab → KontoauszugPage (2-Tab-Struktur) ✅</li>
-          <li>Buchungsregeln + Kostenarten → EinstellungenPage ✅</li>
-          <li>Hausgeld Soll/Ist → NebenkostenPage ✅</li>
-          <li>Jahresabschluss: HTML-Export (Browser-Druck → PDF) ✅</li>
-          <li>ZIP-Backup inkl. einstellungen.json + SHA256 ✅</li>
-          <li>Dashboard: Letztes-Backup KPI ✅</li>
+          <li>DB-Fehlerbehandlung: db_execute() ✅</li>
+          <li>Eingabevalidierung: parse_betrag() + parse_datum() ✅</li>
+          <li>Lösch-Bestätigungsdialog einheitlich ✅</li>
+          <li>Dashboard: Hausgeld-KPI (Monat) ✅</li>
+          <li>Kontoauszug: Saldo-Anzeige ✅</li>
+          <li>Jahresabschluss: HTML-Export ✅</li>
+          <li>ZIP-Backup + SHA256 ✅</li>
         </ul>
         <p style="margin-top:10px;font-size:12px;color:var(--blue);">Ca. 2–3 Min. Prüfung pro Kontoauszugsdatei</p>
       </div>
       <div class="card" style="border-top: 3px solid var(--green);">
-        <div class="card-head"><span class="card-icon">🎯</span><div><div class="card-title">Ziel (v0.31+) – Differenzbeträge &amp; Produktionsreife</div></div></div>
+        <div class="card-head"><span class="card-icon">🎯</span><div><div class="card-title">Ziel (v0.32+) – PDF-Export &amp; Produktionsreife</div></div></div>
         <ul>
-          <li>Alle v0.30-Features ✅</li>
-          <li>Differenzbeträge / Skonto (GH#78) 🔮 <em>v0.31</em></li>
-          <li>PDF-Export: Nebenkostenabrechnung 🔮 <em>v0.31</em></li>
-          <li>Jahresabschluss-Bericht (E/A-Übersicht) 🔮 <em>v0.31</em></li>
+          <li>Alle v0.31-Features ✅</li>
+          <li>PDF-Export: Nebenkostenabrechnung 🔮 <em>v0.32</em></li>
+          <li>E-Mail-Versand SMTP 🔮 <em>v0.32</em></li>
           <li>Windows-EXE (PyInstaller) ✨ <em>v1.0</em></li>
           <li>DATEV-Export für Steuerberater 🔮 <em>v1.0</em></li>
         </ul>
-        <p style="margin-top:10px;font-size:12px;color:var(--green);">Weitere UX-Verbesserungen &amp; Produktionsreife</p>
+        <p style="margin-top:10px;font-size:12px;color:var(--green);">PDF-Export &amp; Produktionsreife</p>
       </div>
     </div>
   </div>
@@ -1728,10 +1843,19 @@ weg_backup_20260419_143022.zip
       </div>
 
       <div class="roadmap-item">
+        <div class="roadmap-icon">✅</div>
+        <div class="roadmap-text">
+          <h4>v0.31.0 – Qualität &amp; Tech-Debt (GH#78, #89–#93)</h4>
+          <p>GH#78 Differenzbeträge/Skonto beim Zuordnen · #89 db_execute() Fehlerbehandlung · #90 parse_betrag()/parse_datum() Validierung · #91 Saldo-Verlauf Kontoauszug · #92 confirm_delete() einheitlich · #93 Dashboard Hausgeld-KPI</p>
+        </div>
+        <span class="roadmap-tag tag-done">✅ Fertig</span>
+      </div>
+
+      <div class="roadmap-item">
         <div class="roadmap-icon">🔵</div>
         <div class="roadmap-text">
-          <h4>v0.31.0 – Differenzbeträge &amp; PDF-Export (GH#78 + weitere)</h4>
-          <p>GH#78 Skonto/Differenzbeträge beim Zuordnen · PDF-Export Nebenkostenabrechnung · Jahresabschluss-Bericht E/A-Übersicht</p>
+          <h4>v0.32.0 – PDF-Export &amp; E-Mail (weitere)</h4>
+          <p>PDF-Export Nebenkostenabrechnung · E-Mail-Versand SMTP · Jahresabschluss-Bericht E/A-Übersicht</p>
         </div>
         <span class="roadmap-tag tag-next">🔵 Nächste Priorität</span>
       </div>
@@ -1785,8 +1909,8 @@ weg_backup_20260419_143022.zip
 </div>
 
 <footer>
-  WEG-Hausverwaltung Welte Rapp Bilgery · Konzept-Dokument v0.30 · Aktualisiert April 2026 ·
-  Stack: Python · Tkinter · SQLite · CAMT.052 · ZUGFeRD · KI-OCR · v0.29 ✅ · v0.30 ✅ · GH Issues #83–#88 fertig
+  WEG-Hausverwaltung Welte Rapp Bilgery · Konzept-Dokument v0.31 · Aktualisiert April 2026 ·
+  Stack: Python · Tkinter · SQLite · CAMT.052 · ZUGFeRD · KI-OCR · v0.30 ✅ · v0.31 ✅ · GH Issues #89–#93 fertig
 </footer>
 
 <script>
