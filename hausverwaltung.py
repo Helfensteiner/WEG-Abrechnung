@@ -108,6 +108,11 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.35.3 — Beleg öffnen / Ordner öffnen in RechnungenPage (#97):
+#             Zwei neue Buttons: "📂 Beleg öffnen" (os.startfile) und
+#             "📁 Ordner öffnen" (explorer /select,<pfad>);
+#             _get_beleg_pfad(): gemeinsame Prüfung (Auswahl + Pfad vorhanden);
+#             Fehlermeldung wenn Datei/Ordner nicht gefunden.
 #   0.35.2 — Duplikat-Dialog bei Bearbeiten ohne neuen Beleg unterdrücken (#96):
 #             _edit_rechnung: alter beleg_dateipfad wird gemerkt; _beleg_archivieren()
 #             wird nur aufgerufen wenn der Pfad sich geändert hat (neuer Beleg).
@@ -232,7 +237,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.35.2"
+APP_VERSION = "0.35.3"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -4043,6 +4048,8 @@ class RechnungenPage(tk.Frame):
             make_btn(btn_row, "📎 Buchung zuordnen", self._buchung_zuordnen, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
             make_btn(btn_row, "📄 Buchungen anzeigen", self._show_buchungen, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
             make_btn(btn_row, "🏷 Differenz ausbuchen", self._differenz_ausbuchen, color=ACCENT, fg="#000").pack(side="left", padx=(0, 6))  # #94
+        make_btn(btn_row, "📂 Beleg öffnen",    self._beleg_oeffnen,    color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "📁 Ordner öffnen",   self._ordner_oeffnen,   color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
         if hat_recht("Buchhaltung", "loeschen"):
             make_btn(btn_row, "🗑 Löschen", self._delete_rechnung, color=DANGER).pack(side="left")
 
@@ -4346,6 +4353,55 @@ class RechnungenPage(tk.Frame):
             rechnungsbetrag=r["betrag_brutto"] or 0,
             callback=self._load
         )
+
+    # ── Beleg öffnen / Ordner öffnen ─────────────────────────────────────────
+
+    def _get_beleg_pfad(self) -> str | None:
+        """Liefert den beleg_dateipfad der gewählten Rechnung oder None."""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Auswahl", "Bitte eine Rechnung auswählen.", parent=self)
+            return None
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT beleg_dateipfad FROM rechnungen WHERE id=?",
+                (int(sel[0]),)).fetchone()
+        finally:
+            conn.close()
+        if not row or not row["beleg_dateipfad"]:
+            messagebox.showinfo("Kein Beleg",
+                                "Dieser Rechnung ist kein Beleg-Dokument zugeordnet.",
+                                parent=self)
+            return None
+        return row["beleg_dateipfad"].strip()
+
+    def _beleg_oeffnen(self):
+        """Öffnet den Beleg der gewählten Rechnung mit dem Standard-Programm."""
+        import os
+        pfad = self._get_beleg_pfad()
+        if not pfad:
+            return
+        if not os.path.isfile(pfad):
+            messagebox.showerror("Datei nicht gefunden",
+                                 f"Die Datei wurde nicht gefunden:\n{pfad}", parent=self)
+            return
+        os.startfile(pfad)
+
+    def _ordner_oeffnen(self):
+        """Öffnet den Ordner des Belegs im Explorer und markiert die Datei."""
+        import os, subprocess
+        pfad = self._get_beleg_pfad()
+        if not pfad:
+            return
+        if os.path.isfile(pfad):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(pfad)])
+        elif os.path.isdir(os.path.dirname(pfad)):
+            os.startfile(os.path.dirname(pfad))
+        else:
+            messagebox.showerror("Ordner nicht gefunden",
+                                 f"Der Ordner wurde nicht gefunden:\n{os.path.dirname(pfad)}",
+                                 parent=self)
 
     # ── ZUGFeRD / xRechnung Parser ────────────────────────────────────────────
 
