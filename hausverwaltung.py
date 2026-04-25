@@ -4853,7 +4853,7 @@ class DifferenzBuchenDialog(BaseDialog):
                                  parent=self)
             return
         beschreibung = self._beschr_var.get().strip() or self._art_var.get()
-        heute = datetime.date.today().isoformat()
+        heute = date.today().isoformat()
         conn = get_db()
         try:
             conn.execute(
