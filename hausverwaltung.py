@@ -108,6 +108,16 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.34.0 — Direktbuchung aus Kontoauszug (ohne Rechnungsbeleg):
+#             KontoauszugPage Haupttab: Button "📝 Direkt buchen" in Aktions-Leiste.
+#             _direkt_buchen(): Kontoauszug-Eintrag → ZahlungDialog (vorbelegt aus
+#             Buchungstext + kategorie_vorschlag); speichert zahlungen-Eintrag ohne
+#             rechnung_id; aktualisiert kontoauszug (zugeordnet=1, zahlung_id,
+#             als_buchung_uebernommen=1); lerne_buchung() für künftiges Auto-Matching.
+#             Optional: Rechnung aus ZahlungDialog heraus zuordnen; Warnung bei
+#             bereits gebuchten Einträgen.
+#             ZahlungDialog: gelber Hinweisbalken "Direktbuchung – kein Rechnungsbeleg"
+#             wenn _direktbuchung=True übergeben; Dialogtitel entsprechend.
 #   0.33.0 — GH Issues #81/#82:
 #             #81  Leistungs-/Abrechnungsjahr in Rechnungen: DB-Spalten
 #                  leistungsjahr + abrechnungsjahr (INTEGER) in rechnungen;
@@ -205,7 +215,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.33.0"
+APP_VERSION = "0.34.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -3427,8 +3437,19 @@ class BuchhaltungPage(tk.Frame):
 
 class ZahlungDialog(BaseDialog):
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Buchung", 560, 520)
         r = dict(row) if row else {}
+        titel = "Direktbuchung (ohne Rechnungsbeleg)" if r.get("_direktbuchung") else "Buchung"
+        super().__init__(parent, titel, 560, 520)
+
+        # Hinweis bei Direktbuchung ohne Rechnungsdokument
+        if r.get("_direktbuchung"):
+            hinweis = tk.Frame(self._body, bg="#FFF8E1", bd=1, relief="solid")
+            hinweis.pack(fill="x", padx=20, pady=(0, 6))
+            tk.Label(hinweis,
+                     text="ℹ  Direktbuchung – kein Rechnungsbeleg vorhanden. "
+                          "Rechnung kann optional unten zugeordnet werden.",
+                     bg="#FFF8E1", fg="#7B5800", font=FONT_SMALL,
+                     wraplength=480, justify="left").pack(padx=8, pady=5, anchor="w")
 
         # ── Buchungsdaten (#56: Buchungsdatum klar als solches kennzeichnen) ──
         self._add_field("Buchungsdatum (JJJJ-MM-TT) *", "datum",
@@ -7802,6 +7823,8 @@ class KontoauszugPage(tk.Frame):
         # Aktions-Buttons (unten)
         btn_row = tk.Frame(self._view_kontoauszug, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0, 10))
+        make_btn(btn_row, "📝 Direkt buchen", self._direkt_buchen,
+                 color=ACCENT2).pack(side="left", padx=(0, 6))  # #GH-Direktbuchung
         make_btn(btn_row, "🗑 Alle löschen", self._clear,
                  color=DANGER).pack(side="left")
 
@@ -8135,6 +8158,96 @@ class KontoauszugPage(tk.Frame):
             conn.commit(); conn.close()
             lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False)
             self._load_vorschlaege()
+
+    def _direkt_buchen(self):
+        """Kontoauszug-Eintrag direkt als Buchung erfassen – ohne Rechnungsdokument.
+
+        Funktioniert für beliebige Einträge im Haupttab (unabhängig vom Auto-Matching).
+        """
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Hinweis", "Bitte einen Kontoauszug-Eintrag auswählen.",
+                                parent=self)
+            return
+        if not hat_recht("Buchhaltung", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
+            return
+        conn = get_db()
+        row_raw = conn.execute("SELECT * FROM kontoauszug WHERE id=?",
+                               (int(sel[0]),)).fetchone()
+        conn.close()
+        if not row_raw:
+            return
+        row = dict(row_raw)
+
+        if row.get("als_buchung_uebernommen") or row.get("zugeordnet"):
+            weiter = messagebox.askyesno(
+                "Bereits gebucht",
+                "Dieser Eintrag ist bereits als Buchung übernommen.\n\n"
+                "Trotzdem eine neue Direktbuchung erfassen?",
+                icon="warning", parent=self)
+            if not weiter:
+                return
+
+        # Buchungstext aufsplitten: "Gegenkonto || Verwendungszweck"
+        raw = row["buchungstext"] or ""
+        gegenkonto = raw.split("||")[0].strip() if "||" in raw else ""
+        vzweck     = raw.split("||")[1].strip() if "||" in raw else raw.strip()
+        beschr     = f"{gegenkonto} – {vzweck}".strip(" –") if gegenkonto else vzweck
+
+        # Kategorie-Vorschlag + konto_typ aus Buchungsregel oder Kontoauszug-Feld
+        kat_v, typ_v, kto_v, _ = vorschlag_kategorie(raw)
+        kat_v = row.get("kategorie_vorschlag") or kat_v
+        kt    = row.get("konto_typ") or kto_v or "Wohngeldkonto"
+
+        pseudo = {
+            "datum":         row["datum"] or date.today().isoformat(),
+            "betrag":        abs(row["betrag"] or 0),
+            "typ":           "Einnahme" if (row["betrag"] or 0) >= 0 else "Ausgabe",
+            "kategorie":     kat_v,
+            "beschreibung":  beschr,
+            "belegnr":       "",
+            "status":        "Neu",
+            "_direktbuchung": True,   # Hinweis-Flag für ZahlungDialog
+        }
+        d = ZahlungDialog(self, pseudo)
+        self.wait_window(d)
+        if not d.result:
+            return
+        v = d.result
+        betrag = float(v["betrag"] or 0)
+        if v["typ"] == "Ausgabe":
+            betrag = -abs(betrag)
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO zahlungen "
+                "(datum,betrag,typ,kategorie,beschreibung,belegnr,konto_typ,status,"
+                " abrechnungsrelevant,abrechnungsjahr,rechnung_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"],
+                 v["belegnr"], kt, v.get("status", "Neu"),
+                 int(v.get("abrechnungsrelevant", 1)),
+                 v.get("abrechnungsjahr") or None,
+                 v.get("rechnung_id") or None))
+            zahlung_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
+                "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
+                (v["kategorie"], zahlung_id, int(sel[0])))
+            if v.get("rechnung_id"):
+                _sync_kategorie_von_rechnung(conn, zahlung_id, v["rechnung_id"])
+                _auto_update_rechnung_status(conn, v["rechnung_id"])
+            conn.commit()
+        finally:
+            conn.close()
+        lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False)
+        self._load()   # Haupttab neu laden
+        messagebox.showinfo(
+            "Direktbuchung gespeichert",
+            f"✅ Buchung erfasst: {v['beschreibung'] or '–'}\n"
+            f"   {fmt_euro(abs(betrag))} · {v['typ']} · {v['kategorie'] or '–'}",
+            parent=self)
 
     def _batch_uebernehmen(self):
         """Grün markierte Vorschläge automatisch übernehmen."""

@@ -7,6 +7,25 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.34.0] — 2026-04-25
+
+### Neu
+
+- **Direktbuchung aus Kontoauszug (ohne Rechnungsbeleg):**
+  - Neuer Button `📝 Direkt buchen` in der Aktions-Leiste des Kontoauszug-Haupttabs.
+  - `KontoauszugPage._direkt_buchen()`: öffnet `ZahlungDialog` vorbelegt aus Buchungstext
+    (Gegenkonto, Verwendungszweck), `kategorie_vorschlag` und `konto_typ`. Der Nutzer
+    kann alle Felder anpassen und optional eine Rechnung zuordnen.
+  - Beim Speichern: neuer `zahlungen`-Eintrag ohne `rechnung_id`; Kontoauszug-Eintrag
+    wird als `zugeordnet=1 / als_buchung_uebernommen=1 / zahlung_id=<neu>` markiert.
+  - `lerne_buchung()` wird aufgerufen → Buchungsregel für zukünftiges Auto-Matching.
+  - Warnung per `askyesno` wenn der Eintrag bereits gebucht ist.
+  - `ZahlungDialog`: gelber Hinweisbalken „Direktbuchung – kein Rechnungsbeleg vorhanden"
+    wenn `_direktbuchung=True` übergeben; Dialogtitel lautet „Direktbuchung (ohne
+    Rechnungsbeleg)" statt „Buchung".
+
+---
+
 ## [0.33.0] — 2026-04-25
 
 ### Neu
