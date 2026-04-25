@@ -108,6 +108,10 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.36.5 — Kontoauszug-Zuordnung beim Buchung-Löschen zurücksetzen (#103):
+#             _delete_buchung: vor DELETE zahlungen → UPDATE kontoauszug
+#             SET zugeordnet=0, als_buchung_uebernommen=0, zahlung_id=NULL
+#             WHERE zahlung_id=<gelöschte ID>; gilt für Mehrfach-Auswahl.
 #   0.36.4 — Abrechnungsjahr bei Auto-Matching ermitteln (#102):
 #             _ermittle_abrechnungsjahr(datum, kategorie, beschr): leitet Jahr
 #             aus Buchungsdatum ab; Sonderregel: Nebenkostenvorauszahlungen
@@ -268,7 +272,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.36.4"
+APP_VERSION = "0.36.5"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -3247,8 +3251,15 @@ class BuchhaltungPage(tk.Frame):
         if messagebox.askyesno("Löschen", frage):
             conn = get_db()
             for iid in sel:
-                conn.execute("DELETE FROM zahlungen WHERE id=?", (int(iid),))
-            conn.commit(); conn.close()
+                zahlung_id = int(iid)
+                # #103 – Kontoauszug-Zuordnung zurücksetzen bevor die Zahlung gelöscht wird
+                conn.execute(
+                    "UPDATE kontoauszug SET zugeordnet=0, als_buchung_uebernommen=0, "
+                    "zahlung_id=NULL WHERE zahlung_id=?",
+                    (zahlung_id,))
+                conn.execute("DELETE FROM zahlungen WHERE id=?", (zahlung_id,))
+            conn.commit()
+            conn.close()
             self._load_buchungen()
 
     def _jahresabschluss_html(self):
