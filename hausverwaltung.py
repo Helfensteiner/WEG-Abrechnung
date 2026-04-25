@@ -108,6 +108,13 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.35.0 — Skonto / Differenz-Verbuchung (#94):
+#             DifferenzBuchenDialog: zeigt Rechnungsbetrag, Gebucht, Differenz;
+#             Buchungsart wählbar (Skonto / Nachlass / Rundungsdifferenz / Sonstiges);
+#             erzeugt Korrektur-Zahlung mit betrag=-differenz, rechnung_id gesetzt;
+#             _auto_update_rechnung_status() setzt Rechnung danach auf "Bezahlt".
+#             RechnungenPage: neuer Button "🏷 Differenz ausbuchen" (nur bei Teilbezahlt).
+#             BuchungZuordnenDialog: "🏷 Differenz ausbuchen" Button wenn Differenz != 0.
 #   0.34.0 — Direktbuchung aus Kontoauszug (ohne Rechnungsbeleg):
 #             KontoauszugPage Haupttab: Button "📝 Direkt buchen" in Aktions-Leiste.
 #             _direkt_buchen(): Kontoauszug-Eintrag → ZahlungDialog (vorbelegt aus
@@ -215,7 +222,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.34.0"
+APP_VERSION = "0.35.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -4025,6 +4032,7 @@ class RechnungenPage(tk.Frame):
             make_btn(btn_row, "✏ Bearbeiten",    self._edit_rechnung,  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
             make_btn(btn_row, "📎 Buchung zuordnen", self._buchung_zuordnen, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
             make_btn(btn_row, "📄 Buchungen anzeigen", self._show_buchungen, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+            make_btn(btn_row, "🏷 Differenz ausbuchen", self._differenz_ausbuchen, color=ACCENT, fg="#000").pack(side="left", padx=(0, 6))  # #94
         if hat_recht("Buchhaltung", "loeschen"):
             make_btn(btn_row, "🗑 Löschen", self._delete_rechnung, color=DANGER).pack(side="left")
 
@@ -4285,6 +4293,48 @@ class RechnungenPage(tk.Frame):
         make_btn(win, "Schließen", win.destroy, color=BG_INPUT, fg=TEXT).pack(
             side="bottom", anchor="e", padx=20, pady=8)
 
+    # ── #94 – Differenz / Skonto ausbuchen ───────────────────────────────────
+
+    def _differenz_ausbuchen(self):
+        """#94 – Öffnet DifferenzBuchenDialog für die gewählte Rechnung."""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Auswahl", "Bitte eine Rechnung auswählen.", parent=self)
+            return
+        rechnung_id = int(sel[0])
+        conn = get_db()
+        try:
+            r = conn.execute(
+                "SELECT betrag_brutto, status FROM rechnungen WHERE id=?",
+                (rechnung_id,)).fetchone()
+            gebucht = conn.execute(
+                "SELECT COALESCE(SUM(ABS(betrag)), 0) FROM zahlungen WHERE rechnung_id=?",
+                (rechnung_id,)).fetchone()[0] or 0.0
+        finally:
+            conn.close()
+        if not r:
+            return
+        differenz = (r["betrag_brutto"] or 0) - gebucht
+        if abs(differenz) < 0.01:
+            messagebox.showinfo(
+                "Kein Unterschied",
+                "Rechnungsbetrag und gebuchter Betrag stimmen bereits überein.",
+                parent=self)
+            return
+        if differenz < 0:
+            messagebox.showwarning(
+                "Überzahlung",
+                f"Der gebuchte Betrag überschreitet den Rechnungsbetrag um "
+                f"{fmt_euro(abs(differenz))}.\nBitte manuell prüfen.",
+                parent=self)
+            return
+        DifferenzBuchenDialog(
+            self,
+            rechnung_id=rechnung_id,
+            rechnungsbetrag=r["betrag_brutto"] or 0,
+            callback=self._load
+        )
+
     # ── ZUGFeRD / xRechnung Parser ────────────────────────────────────────────
 
     @staticmethod
@@ -4506,6 +4556,10 @@ class BuchungZuordnenDialog(tk.Toplevel):
         btn_row = tk.Frame(self, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0, 12))
         make_btn(btn_row, "Schließen", self._close, color=ACCENT2).pack(side="right")
+        # #94 – Differenz ausbuchen
+        self._diff_btn = make_btn(btn_row, "🏷 Differenz ausbuchen",
+                                  self._differenz_ausbuchen, color=BG_INPUT, fg=TEXT)
+        self._diff_btn.pack(side="left")
 
     # ── GH#77: Sortierung einrichten ──────────────────────────────────────────
 
@@ -4672,6 +4726,146 @@ class BuchungZuordnenDialog(tk.Toplevel):
             self._callback()
 
     def _close(self):
+        if self._callback:
+            self._callback()
+        self.destroy()
+
+    # #94 – Differenz ausbuchen aus BuchungZuordnenDialog heraus ─────────────
+    def _differenz_ausbuchen(self):
+        """#94 – Öffnet DifferenzBuchenDialog für die aktuelle Rechnung."""
+        diff = self._betrag_gesamt - self._gebucht_total()
+        if abs(diff) < 0.01:
+            messagebox.showinfo("Kein Unterschied",
+                                "Rechnungsbetrag und gebuchter Betrag stimmen überein.",
+                                parent=self)
+            return
+        DifferenzBuchenDialog(
+            self,
+            rechnung_id=self._rechnung_id,
+            rechnungsbetrag=self._betrag_gesamt,
+            callback=lambda: (self._load(), self._callback() if self._callback else None)
+        )
+
+    def _gebucht_total(self):
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(ABS(betrag)), 0) FROM zahlungen WHERE rechnung_id=?",
+                (self._rechnung_id,)).fetchone()
+            return row[0] if row else 0.0
+        finally:
+            conn.close()
+
+
+class DifferenzBuchenDialog(BaseDialog):
+    """#94 – Skonto / Differenz-Verbuchung: erzeugt eine Korrektur-Zahlung,
+    damit _auto_update_rechnung_status() die Rechnung auf 'Bezahlt' setzen kann.
+    """
+
+    _ARTEN = ["Skonto", "Nachlass", "Rundungsdifferenz", "Sonstiges"]
+
+    def __init__(self, parent, rechnung_id: int, rechnungsbetrag: float,
+                 callback=None):
+        self._rechnung_id    = rechnung_id
+        self._rechnungsbetrag = rechnungsbetrag
+        self._callback       = callback
+        # Aktuellen gebuchten Betrag + Rechnungssteller lesen
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT rechnungssteller, kategorie FROM rechnungen WHERE id=?",
+                (rechnung_id,)).fetchone()
+            self._rechnungssteller = row["rechnungssteller"] if row else ""
+            self._kategorie        = row["kategorie"] if row else ""
+            gebucht_row = conn.execute(
+                "SELECT COALESCE(SUM(ABS(betrag)), 0) FROM zahlungen WHERE rechnung_id=?",
+                (rechnung_id,)).fetchone()
+            self._gebucht = gebucht_row[0] if gebucht_row else 0.0
+        finally:
+            conn.close()
+
+        super().__init__(parent, "Differenz ausbuchen", width=460, height=360)
+        self._build_body()
+
+    def _build_body(self):
+        body = self._body
+        differenz = self._rechnungsbetrag - self._gebucht
+
+        # Informations-Labels
+        info_fr = tk.Frame(body, bg=BG_CARD)
+        info_fr.pack(fill="x", padx=20, pady=(10, 10))
+        def _info_row(lbl, val, color=TEXT):
+            r = tk.Frame(info_fr, bg=BG_CARD)
+            r.pack(fill="x", pady=1)
+            tk.Label(r, text=lbl, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     width=20, anchor="w").pack(side="left")
+            tk.Label(r, text=val, bg=BG_CARD, fg=color,
+                     font=FONT_BODY).pack(side="left")
+        _info_row("Rechnungsbetrag:",  fmt_euro(self._rechnungsbetrag))
+        _info_row("Bereits gebucht:",  fmt_euro(self._gebucht))
+        _info_row("Differenz:",        fmt_euro(differenz),
+                  color=ACCENT2 if differenz > 0.009 else DANGER)
+
+        # Buchungsart
+        tk.Label(body, text="Buchungsart", bg=BG_CARD, fg=TEXT,
+                 font=FONT_BODY).pack(anchor="w", padx=20, pady=(4, 0))
+        self._art_var = tk.StringVar(value=self._ARTEN[0])
+        art_fr = tk.Frame(body, bg=BG_CARD)
+        art_fr.pack(fill="x", padx=20, pady=(2, 8))
+        for art in self._ARTEN:
+            tk.Radiobutton(art_fr, text=art, variable=self._art_var, value=art,
+                           bg=BG_CARD, fg=TEXT, font=FONT_SMALL,
+                           activebackground=BG_CARD, selectcolor=BG_CARD,
+                           command=self._update_beschreibung).pack(side="left", padx=6)
+
+        # Betrag
+        tk.Label(body, text="Betrag (€)", bg=BG_CARD, fg=TEXT,
+                 font=FONT_BODY).pack(anchor="w", padx=20)
+        self._betrag_var = tk.StringVar(value=f"{differenz:.2f}".replace(".", ","))
+        make_entry(body, textvariable=self._betrag_var).pack(
+            fill="x", padx=20, ipady=6, pady=(2, 8))
+
+        # Beschreibung
+        tk.Label(body, text="Beschreibung", bg=BG_CARD, fg=TEXT,
+                 font=FONT_BODY).pack(anchor="w", padx=20)
+        self._beschr_var = tk.StringVar()
+        make_entry(body, textvariable=self._beschr_var).pack(
+            fill="x", padx=20, ipady=6, pady=(2, 8))
+        self._update_beschreibung()
+
+    def _update_beschreibung(self):
+        art = self._art_var.get()
+        steller = self._rechnungssteller or "Rechnungssteller"
+        self._beschr_var.set(f"{art} – {steller}")
+
+    def _on_save(self):
+        betrag_str = self._betrag_var.get().strip()
+        try:
+            betrag = parse_betrag(betrag_str)
+        except Exception:
+            messagebox.showerror("Ungültiger Betrag",
+                                 "Bitte einen gültigen Betrag eingeben.",
+                                 parent=self)
+            return
+        if betrag <= 0:
+            messagebox.showerror("Ungültiger Betrag",
+                                 "Betrag muss größer als 0 sein.",
+                                 parent=self)
+            return
+        beschreibung = self._beschr_var.get().strip() or self._art_var.get()
+        heute = datetime.date.today().isoformat()
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO zahlungen (datum, betrag, typ, kategorie, beschreibung, rechnung_id) "
+                "VALUES (?, ?, 'Ausgabe', ?, ?, ?)",
+                (heute, -betrag, self._kategorie or self._art_var.get(),
+                 beschreibung, self._rechnung_id)
+            )
+            _auto_update_rechnung_status(conn, self._rechnung_id)
+            conn.commit()
+        finally:
+            conn.close()
         if self._callback:
             self._callback()
         self.destroy()

@@ -7,6 +7,25 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.35.0] — 2026-04-25
+
+### Neu
+
+- **GH#94 Skonto / Differenz-Verbuchung:**
+  - Neuer `DifferenzBuchenDialog`: zeigt Rechnungsbetrag, bereits gebuchten Betrag und
+    offene Differenz. Buchungsart wählbar: Skonto / Nachlass / Rundungsdifferenz / Sonstiges.
+    Betrag und Beschreibung sind editierbar; Beschreibung wird automatisch vorbelegt
+    (z. B. „Skonto – Muster GmbH").
+  - Beim Speichern: neuer `zahlungen`-Eintrag mit `betrag = -differenz`, `typ = Ausgabe`,
+    `rechnung_id` gesetzt. `_auto_update_rechnung_status()` setzt die Rechnung danach
+    auf „Bezahlt" (sofern Differenz jetzt < 0,01 €).
+  - `RechnungenPage`: neuer Button `🏷 Differenz ausbuchen` in der Button-Leiste.
+    Prüft ob Differenz vorhanden und ob Überzahlung vorliegt, öffnet dann den Dialog.
+  - `BuchungZuordnenDialog`: neuer Button `🏷 Differenz ausbuchen` im Summenbereich,
+    aktivierbar direkt nach Zuordnen einer Buchung wenn noch eine Differenz verbleibt.
+
+---
+
 ## [0.34.0] — 2026-04-25
 
 ### Neu
