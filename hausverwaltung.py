@@ -108,6 +108,11 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.36.2 — Kategorie-Zuweisung beim Rechnungs-Import (#100):
+#             _felder_befuellen: "kategorie" in Fill-Loop; Fallback via
+#             vorschlag_kategorie(steller+beschr) wenn Feld leer bleibt.
+#             KI-OCR-Prompt: "kategorie"-Feld ergänzt mit Auswahl-Liste
+#             aus BuchhaltungPage.aktive_kategorien() (max. 30 Einträge).
 #   0.36.1 — Kostenart umbenennen mit DB-Synchronisierung (#99):
 #             _edit_kostenart: neues Namensfeld; bei Umbenennung:
 #             KATEGORIEN-Liste + KOSTENARTEN-Dict in-memory aktualisiert;
@@ -251,7 +256,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.36.1"
+APP_VERSION = "0.36.2"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -5493,6 +5498,7 @@ class RechnungDialog(BaseDialog):
         for key in ("rechnungsnummer", "rechnungssteller", "rechnungsdatum",
                     "faelligkeitsdatum", "betrag_brutto", "betrag_netto",
                     "mwst_satz", "mwst_betrag", "lohnanteil",
+                    "kategorie",            # #100
                     "beschreibung",         # #95
                     "leistungsjahr", "abrechnungsjahr"):  # #GH81
             _set(key, daten.get(key))
@@ -5511,6 +5517,16 @@ class RechnungDialog(BaseDialog):
                 _set("beschreibung", f"Rechnung {rnr} – {steller}")
             elif steller:
                 _set("beschreibung", f"Rechnung von {steller}")
+        # #100: Kategorie aus Buchungsregeln vorschlagen wenn noch leer
+        kat_feld = self._fields.get("kategorie")
+        kat_aktuell = kat_feld.get() if kat_feld and hasattr(kat_feld, "get") else ""
+        if not kat_aktuell:
+            suchtext = " ".join(filter(None, [
+                daten.get("rechnungssteller"), daten.get("beschreibung")]))
+            kat_vorschlag, _, _, konfidenz = vorschlag_kategorie(
+                suchtext, daten.get("betrag_brutto"))
+            if kat_vorschlag and konfidenz >= 0.50:
+                _set("kategorie", kat_vorschlag)
 
     def _on_save(self):
         v = self._get_values()
@@ -5567,6 +5583,7 @@ def _ki_ocr_rechnung_static(pdf_pfad: str) -> dict:
     except Exception:
         return {}
 
+    kat_liste = ", ".join(BuchhaltungPage.aktive_kategorien()[:30])  # #100
     prompt = (
         "Analysiere diese Rechnung (PDF). Führe OCR durch und extrahiere die Daten.\n"
         "Antworte NUR mit einem gültigen JSON-Objekt ohne Markdown-Formatierung.\n\n"
@@ -5580,7 +5597,8 @@ def _ki_ocr_rechnung_static(pdf_pfad: str) -> dict:
         '  "mwst_satz": MwSt-Satz in Prozent (z.B. 19.0 oder null)\n'
         '  "mwst_betrag": MwSt-Betrag als Dezimalzahl (oder null)\n'
         '  "lohnanteil": Lohnanteil (§35a EStG) als Dezimalzahl (oder null)\n'
-        '  "beschreibung": Kurze Leistungsbeschreibung\n'
+        '  "beschreibung": Kurze Leistungsbeschreibung (1-2 Sätze)\n'
+        f'  "kategorie": Passende Kostenkategorie – wähle eine aus: {kat_liste} (oder null)\n'  # #100
         '  "leistungsjahr": Jahr der erbrachten Leistung als Integer (z.B. 2025 oder null)\n'  # #GH81
         '  "abrechnungsjahr": Jahr der Abrechnung/Rechnungsstellung als Integer (oder null)'   # #GH81
     )
