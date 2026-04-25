@@ -108,6 +108,15 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.32.0 — GH Issues #76/#77/#80:
+#             #80  Buchhaltung Belegnr.-Spalte: LEFT JOIN rechnungen; zeigt
+#                  rechnungsnummer der verknüpften Rechnung (rg_nummer) statt
+#                  leerem belegnr-Feld; Spalte in "Rg.-Nr./Belegnr." umbenannt;
+#                  CSV-Export ebenfalls angepasst (COALESCE(r.rechnungsnummer, z.belegnr)).
+#             #76  BuchungZuordnenDialog: Suchfeld + Suchfilter (_filter_offen)
+#                  bereits vollständig in v0.29.0 implementiert — Issue geschlossen.
+#             #77  BuchungZuordnenDialog: Click-to-Sort (_setup_sort/_sort_tree)
+#                  bereits vollständig in v0.29.0 implementiert — Issue geschlossen.
 #   0.31.0 — GH Issues #78/#89/#90/#91/#92/#93:
 #             #78  Differenzbeträge/Skonto in BuchungZuordnenDialog: Prüfung der Differenz
 #                  zwischen Bankbetrag und Rechnungsbetrag; Toleranz ≤ 2 € oder ≤ 2 %
@@ -182,7 +191,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.31.0"
+APP_VERSION = "0.32.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -3003,10 +3012,10 @@ class BuchhaltungPage(tk.Frame):
                            command=self._load_buchungen).pack(side="left", padx=6)
 
         # ── Buchungen-Tabelle ──────────────────────────────────────────────────
-        cols_b = ("Buchungsdatum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Belegnr.", "📎")  # #56
+        cols_b = ("Buchungsdatum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Rg.-Nr./Belegnr.", "📎")  # #56 #GH80
         fb, self.tree_b = make_table(self, cols_b, height=16)
         fb.pack(fill="both", expand=True, padx=20, pady=6)
-        for c, w in zip(cols_b, [100, 200, 110, 100, 80, 80, 80, 28]):
+        for c, w in zip(cols_b, [100, 200, 110, 100, 80, 80, 100, 28]):
             self.tree_b.heading(c, text=c); self.tree_b.column(c, width=w, anchor="w")
         self.tree_b.tag_configure("einnahme", foreground=SUCCESS)
         self.tree_b.tag_configure("ausgabe",  foreground=DANGER)
@@ -3027,14 +3036,18 @@ class BuchhaltungPage(tk.Frame):
         for i in self.tree_b.get_children(): self.tree_b.delete(i)
         conn = get_db()
         typ = self._typ_var.get()
-        # Parametrisierte Abfrage – kein String-Formatting (SQL-Injection-Schutz)
+        # #GH80: LEFT JOIN rechnungen, um rechnungsnummer der zugeordneten Rechnung anzuzeigen
+        base_sql = (
+            "SELECT z.*, r.rechnungsnummer AS rg_nummer "
+            "FROM zahlungen z LEFT JOIN rechnungen r ON z.rechnung_id = r.id"
+        )
         if typ != "Alle":
             rows = conn.execute(
-                "SELECT * FROM zahlungen WHERE typ=? ORDER BY datum DESC, erstellt_am DESC",
+                f"{base_sql} WHERE z.typ=? ORDER BY z.datum DESC, z.erstellt_am DESC",
                 (typ,)).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM zahlungen ORDER BY datum DESC, erstellt_am DESC").fetchall()
+                f"{base_sql} ORDER BY z.datum DESC, z.erstellt_am DESC").fetchall()
         einnahmen = ausgaben = 0.0
         for r in rows:
             rd = dict(r)
@@ -3043,10 +3056,12 @@ class BuchhaltungPage(tk.Frame):
             if status == "Neu":
                 tags_list.append("neu")
             beleg_ind = "📎" if rd.get("beleg_dateipfad") else ""
+            # #GH80: rechnungsnummer der verknüpften Rechnung hat Vorrang vor eigenem belegnr
+            belegnr_display = rd.get("rg_nummer") or rd.get("belegnr") or "–"
             self.tree_b.insert("", "end", iid=rd["id"], values=(
                 fmt_date(rd["datum"]), rd["beschreibung"] or "–",
                 rd["kategorie"] or "–", fmt_euro(rd["betrag"]),
-                rd["typ"], status, rd["belegnr"] or "–", beleg_ind), tags=tuple(tags_list))
+                rd["typ"], status, belegnr_display, beleg_ind), tags=tuple(tags_list))
             if rd["typ"] == "Einnahme": einnahmen += rd["betrag"] or 0
             else:                       ausgaben  += abs(rd["betrag"] or 0)
         conn.close()
@@ -3353,13 +3368,15 @@ class BuchhaltungPage(tk.Frame):
             params.append(typ)
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         rows = conn.execute(
-            f"SELECT datum,beschreibung,kategorie,betrag,typ,belegnr "
-            f"FROM zahlungen {where_sql} ORDER BY datum DESC",
+            f"SELECT z.datum, z.beschreibung, z.kategorie, z.betrag, z.typ, "
+            f"COALESCE(r.rechnungsnummer, z.belegnr) AS belegnr "
+            f"FROM zahlungen z LEFT JOIN rechnungen r ON z.rechnung_id = r.id "
+            f"{where_sql} ORDER BY z.datum DESC",
             params).fetchall()
         conn.close()
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f, delimiter=";")
-            w.writerow(["Datum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Belegnr."])
+            w.writerow(["Datum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Rg.-Nr./Belegnr."])
             for r in rows:
                 w.writerow([fmt_date(r[0]), r[1], r[2],
                              str(r[3]).replace(".", ","), r[4], r[5]])

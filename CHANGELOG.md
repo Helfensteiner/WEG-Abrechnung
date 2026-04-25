@@ -7,6 +7,24 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.32.0] — 2026-04-25
+
+### Behoben
+
+- **GH#80 Buchhaltung: Rechnungsnummer der verknüpften Rechnung wird jetzt angezeigt:**
+  In `BuchhaltungPage._load_buchungen()` wird die Buchungstabelle nun per `LEFT JOIN rechnungen`
+  abgefragt. Die Spalte `"Belegnr."` wurde in `"Rg.-Nr./Belegnr."` umbenannt und zeigt
+  priorisiert die `rechnungsnummer` der verknüpften Rechnung; nur wenn keine Rechnung
+  verknüpft ist, wird das eigene `belegnr`-Feld der Zahlung angezeigt.
+  Der CSV-Export verwendet `COALESCE(r.rechnungsnummer, z.belegnr)` analog.
+
+### Sonstiges
+
+- **GH#76 + GH#77** (Suchfeld & Sortierung im `BuchungZuordnenDialog`) waren bereits
+  vollständig in v0.29.0 implementiert — Issues auf GitHub geschlossen.
+
+---
+
 ## [0.31.0] — 2026-04-25
 
 ### Neu
