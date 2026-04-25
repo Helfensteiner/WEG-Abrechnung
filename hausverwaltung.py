@@ -4177,7 +4177,7 @@ class RechnungenPage(tk.Frame):
         finally:
             conn.close()
         if not row: return
-        alter_beleg = (row.get("beleg_dateipfad") or "").strip()
+        alter_beleg = (row["beleg_dateipfad"] or "").strip()
         d = RechnungDialog(self, dict(row))
         self.wait_window(d)
         if d.result:
