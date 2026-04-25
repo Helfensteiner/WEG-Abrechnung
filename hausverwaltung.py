@@ -108,6 +108,12 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.36.1 — Kostenart umbenennen mit DB-Synchronisierung (#99):
+#             _edit_kostenart: neues Namensfeld; bei Umbenennung:
+#             KATEGORIEN-Liste + KOSTENARTEN-Dict in-memory aktualisiert;
+#             Config: Custom-Eintrag umbenannt; Built-in: neuer Custom-Eintrag +
+#             alter Name in deaktivierte_kategorien; DB-UPDATE auf 4 Tabellen:
+#             zahlungen, rechnungen, kontoauszug, buchungsregeln.
 #   0.36.0 — Auto-Match + Kategorie nach Rechnungserfassung (#98):
 #             _auto_match_neue_rechnung(rechnung_id, parent_win): neue Modulfunktion;
 #             läuft nach jedem INSERT in rechnungen:
@@ -245,7 +251,7 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.36.0"
+APP_VERSION = "0.36.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -11194,7 +11200,7 @@ class EinstellungenPage(tk.Frame):
         make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
 
     def _edit_kostenart(self):
-        """Bestehende Kategorie bearbeiten."""
+        """Bestehende Kategorie bearbeiten — inkl. Umbenennung (#99)."""
         sel = self.tree_k.selection()
         if not sel: return
         idx = int(sel[0])
@@ -11203,46 +11209,119 @@ class EinstellungenPage(tk.Frame):
         meta = BuchhaltungPage.KOSTENARTEN.get(kat_name, {})
         win = tk.Toplevel(self)
         win.title("Kostenkategorie bearbeiten")
-        win.geometry("400x280")
+        win.geometry("420x340")
         win.configure(bg=BG_CARD)
         win.grab_set()
         win.resizable(False, False)
         hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
         hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr, text=f"Kategorie: {kat_name}", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+        tk.Label(hdr, text=f"Kategorie bearbeiten", bg=BG_SIDEBAR, fg=TEXT_WHITE,
                  font=FONT_H3).pack(side="left", padx=14, pady=10)
         body = tk.Frame(win, bg=BG_CARD)
         body.pack(fill="both", expand=True, padx=20, pady=12)
-        tk.Label(body, text="Oberkategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+        # ── Name ──────────────────────────────────────────────────────────────
+        tk.Label(body, text="Name der Kategorie *", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w")
+        name_var = tk.StringVar(value=kat_name)
+        make_entry(body, textvariable=name_var).pack(fill="x", ipady=6)
+        # ── Oberkategorie ─────────────────────────────────────────────────────
+        tk.Label(body, text="Oberkategorie", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w", pady=(8, 0))
         ober_var = tk.StringVar(value=meta.get("kategorie", "Sonstiges"))
-        ober_vals = sorted(set(m.get("kategorie", "Sonstiges") for m in BuchhaltungPage.KOSTENARTEN.values()))
-        ttk.Combobox(body, textvariable=ober_var, values=ober_vals, font=FONT_BODY).pack(fill="x", ipady=4)
-        tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        _namen_e, _name_zu_typ_e, _typ_zu_name_e, _tooltips_e = self._umlageschluessel_aus_aufteilungen()
+        ober_vals = sorted(set(m.get("kategorie", "Sonstiges")
+                               for m in BuchhaltungPage.KOSTENARTEN.values()))
+        ttk.Combobox(body, textvariable=ober_var, values=ober_vals,
+                     font=FONT_BODY).pack(fill="x", ipady=4)
+        # ── Umlageschlüssel ───────────────────────────────────────────────────
+        tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w", pady=(8, 0))
+        _namen_e, _name_zu_typ_e, _typ_zu_name_e, _tooltips_e = \
+            self._umlageschluessel_aus_aufteilungen()
         gespeicherter_typ = meta.get("schluessel", "MEA")
         anzeige_start = _typ_zu_name_e.get(gespeicherter_typ, gespeicherter_typ)
         schluessel_var = tk.StringVar(value=anzeige_start)
         schluessel_cb_e = ttk.Combobox(body, textvariable=schluessel_var,
-                     values=_namen_e, font=FONT_BODY)
+                                       values=_namen_e, font=FONT_BODY)
         schluessel_cb_e.pack(fill="x", ipady=4)
         make_tooltip(schluessel_cb_e, lambda: _tooltips_e.get(schluessel_var.get(), ""))
         uml = meta.get("umlagefaehig", False)
         uml_var = tk.BooleanVar(value=uml if isinstance(uml, bool) else False)
         tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
-                       fg=TEXT, font=FONT_BODY, activebackground=BG_CARD).pack(anchor="w", pady=(8,0))
+                       fg=TEXT, font=FONT_BODY,
+                       activebackground=BG_CARD).pack(anchor="w", pady=(8, 0))
+
         def _save():
+            neuer_name = name_var.get().strip()
+            if not neuer_name:
+                messagebox.showwarning("Pflichtfeld",
+                                       "Name der Kategorie darf nicht leer sein.", parent=win)
+                return
+            if neuer_name != kat_name and neuer_name in BuchhaltungPage.KATEGORIEN:
+                messagebox.showwarning("Duplikat",
+                                       f"Kategorie '{neuer_name}' existiert bereits.", parent=win)
+                return
             angezeigter_name = schluessel_var.get()
             typ_schluessel = _name_zu_typ_e.get(angezeigter_name, angezeigter_name)
-            BuchhaltungPage.KOSTENARTEN[kat_name] = {
+            neue_meta = {
                 "kategorie": ober_var.get(),
                 "umlagefaehig": uml_var.get(),
-                "schluessel": typ_schluessel
+                "schluessel": typ_schluessel,
             }
+
+            # ── In-Memory-Strukturen aktualisieren ────────────────────────────
+            pos = BuchhaltungPage.KATEGORIEN.index(kat_name)
+            BuchhaltungPage.KATEGORIEN[pos] = neuer_name
+            if neuer_name != kat_name:
+                del BuchhaltungPage.KOSTENARTEN[kat_name]
+            BuchhaltungPage.KOSTENARTEN[neuer_name] = neue_meta
+
+            # ── Config aktualisieren ──────────────────────────────────────────
+            cfg = load_config()
+            custom = cfg.get("custom_kategorien", [])
+            existing_idx = next((i for i, c in enumerate(custom)
+                                 if c.get("name") == kat_name), None)
+            if existing_idx is not None:
+                # War bereits eine Custom-Kategorie → Namen + Meta ersetzen
+                custom[existing_idx] = {"name": neuer_name, **neue_meta}
+            else:
+                # War eine Built-in-Kategorie → als Custom-Eintrag mit neuem Namen anlegen
+                # und alten Namen deaktivieren (damit er nicht doppelt erscheint)
+                custom.append({"name": neuer_name, **neue_meta})
+                deakt = set(cfg.get("deaktivierte_kategorien", []))
+                deakt.add(kat_name)
+                cfg["deaktivierte_kategorien"] = sorted(deakt)
+            # Falls alter Name in deaktivierte_kategorien, auf neuen umschreiben
+            deakt = set(cfg.get("deaktivierte_kategorien", []))
+            if kat_name in deakt and neuer_name != kat_name:
+                deakt.discard(kat_name)
+                deakt.add(neuer_name)
+                cfg["deaktivierte_kategorien"] = sorted(deakt)
+            cfg["custom_kategorien"] = custom
+            save_config(cfg)
+
+            # ── DB-Umbenennung: alle Zuordnungen auf neuen Namen aktualisieren ─
+            if neuer_name != kat_name:
+                conn = get_db()
+                try:
+                    conn.execute("UPDATE zahlungen    SET kategorie=? WHERE kategorie=?",
+                                 (neuer_name, kat_name))
+                    conn.execute("UPDATE rechnungen   SET kategorie=? WHERE kategorie=?",
+                                 (neuer_name, kat_name))
+                    conn.execute("UPDATE kontoauszug  SET kategorie_vorschlag=? "
+                                 "WHERE kategorie_vorschlag=?", (neuer_name, kat_name))
+                    conn.execute("UPDATE buchungsregeln SET kategorie=? WHERE kategorie=?",
+                                 (neuer_name, kat_name))
+                    conn.commit()
+                finally:
+                    conn.close()
+
             win.destroy()
             self._load_kostenarten()
+
         btn_row = tk.Frame(win, bg=BG_CARD)
-        btn_row.pack(fill="x", padx=20, pady=(0,12))
-        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
+        btn_row.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(btn_row, "Abbrechen", win.destroy,
+                 color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6, 0))
         make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
 
     def _toggle_kostenart(self):
