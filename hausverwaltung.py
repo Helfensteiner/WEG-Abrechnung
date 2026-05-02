@@ -1,4 +1,4 @@
-﻿"""
+"""
 Hausverwaltung – Eigentümergemeinschaft
 Desktop-App mit Tkinter · SQLite-Datenbank
 """
@@ -346,7 +346,28 @@ from pathlib import Path
 #             Eigentümerwechsel Pro-Rata-Temporis; _load_wohngeld() zeigt
 #             korrektes Soll/Ist/Saldo; Status-Ampel: ausgeglichen / Rückstand /
 #             X Monate offen; Hinweis wenn kein Hausgeld hinterlegt.
-APP_VERSION = "0.39.1"
+#   0.39.2 — Mehrfach-Kategorien pro Auftraggeber:
+#             vzweck_muster-Spalte in buchungsregeln; lerne_buchung() erkennt
+#             wenn gleicher Auftraggeber eine andere Kategorie bekommt und legt
+#             separate Regel mit Verwendungszweck-Schlüsselwort an;
+#             vorschlag_kategorie() löst Mehrdeutigkeit via vzweck_muster
+#             (Konfidenz 0.90 bei Auftraggeber+Vzweck-Treffer, 0.35 wenn
+#             Auftraggeber passt aber kein vzweck_muster matcht);
+#             Vorschläge-Tab: neue Spalte "Konfidenz" (▲/◆/▼ Farb-Ampel);
+#             Button "🤖 KI für unklare" → Claude/Ollama kategorisiert
+#             Einträge mit Konfidenz < 0.50, speichert Vorschlag und lernt.
+#   0.39.3 — Bugfixes + Grundsetup Export/Import:
+#             GrundsetupDialog: selektiver Export/Import von Einstellungen,
+#             Buchungsregeln, Kostenarten, Eigentümer, Wohnungen, Mieter als
+#             JSON-Datei; Export nutzt SELECT * (schema-robust, keine hardcodierten
+#             Spalten); Import deaktiviert FK-Checks temporär um korrekte
+#             Lösch-Reihenfolge zu ermöglichen; FK-Fehler bei Rechnungen-
+#             Mehrfachlöschen behoben (kontoauszug_match_log wurde nicht geleert);
+#             Buchungsregeln Mehrfachlöschen + "Alle markieren"-Button;
+#             Kostenarten-Tab: Filter "Nur aktive / mit Verwendung" (Standard: an).
+# 0.39.4    — AufteilungDialog: neuer Aufteilungstyp "Heizkostenverteilung" mit
+#             gelbem Hinweis-Label; _on_typ_change für alle 3 Spezialtypen erweitert.
+APP_VERSION = "0.39.4"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -1210,6 +1231,8 @@ CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
         "ALTER TABLE wohnungen ADD COLUMN ista_einheit_nr TEXT",
         # v0.39.1 – Monatliches Hausgeld pro Wohnung (für Soll/Ist-Kontrolle)
         "ALTER TABLE wohnungen ADD COLUMN hausgeld_monatlich REAL DEFAULT 0",
+        # v0.39.2 – Mehrfach-Kategorien pro Auftraggeber: Verwendungszweck-Muster zur Disambiguierung
+        "ALTER TABLE buchungsregeln ADD COLUMN vzweck_muster TEXT",
         # v0.39.0 – Eigentümer-Zeiträume (Eigentümerwechsel pro Wohnung)
         """CREATE TABLE IF NOT EXISTS eigentuemer_zeitraeume (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1737,14 +1760,37 @@ def _bereinige_text(text: str) -> str:
     words = text.lower().split()
     return " ".join(w for w in words if w not in FUELLWOERTER and len(w) > 2)
 
+def _extrahiere_vzweck_schluessel(vzweck: str, max_len: int = 40) -> str:
+    """Extrahiert den charakteristischsten Teil eines Verwendungszwecks.
+
+    Entfernt Ziffernfolgen (Referenznummern, Daten), Füllwörter und
+    gibt die ersten bedeutsamen Wörter zurück — als Disambiguierungs-
+    Schlüssel wenn ein Auftraggeber mehrere Kategorien haben kann.
+    """
+    if not vzweck:
+        return ""
+    import re as _re
+    # Lange Ziffernfolgen (Referenznummern) entfernen
+    clean = _re.sub(r'\b\d{4,}\b', ' ', vzweck)
+    # Sonderzeichen → Leerzeichen
+    clean = _re.sub(r'[·\-/\\,;:]+', ' ', clean)
+    words = [w.strip().lower() for w in clean.split() if len(w.strip()) > 2]
+    words = [w for w in words if w not in FUELLWOERTER]
+    # Erste 3 bedeutsame Wörter, zusammengefasst zu max max_len Zeichen
+    schluessel = " ".join(words[:3])
+    return schluessel[:max_len].strip()
+
 def vorschlag_kategorie(buchungstext: str, betrag: float = None) -> tuple:
     """Gibt (kategorie, typ, konto_typ, konfidenz) zurück basierend auf gelernten Regeln.
 
     Konfidenz-Stufen:
-    - 0.95: Exakter Treffer + Betrag im erlaubten Bereich
-    - 0.85: Exakter Text-Treffer, kein Betragsfilter
-    - 0.70: Auftraggeber-Treffer (bereinigt)
-    - 0.50: Keyword-Treffer im Verwendungszweck
+    - 0.95: Auftraggeber + vzweck_muster + Betrag passt
+    - 0.90: Auftraggeber + vzweck_muster passt (eindeutig)
+    - 0.85: Exakter Text-Treffer, nur eine Regel für diesen Auftraggeber
+    - 0.70: Auftraggeber-Treffer (bereinigt), keine Mehrdeutigkeit
+    - 0.65: Keyword-Treffer
+    - 0.50: Verwendungszweck-Treffer
+    - 0.35: Auftraggeber passt, aber kein vzweck_muster-Treffer (mehrdeutig)
     - 0.00: Kein Treffer
     """
     if not buchungstext:
@@ -1772,7 +1818,6 @@ def vorschlag_kategorie(buchungstext: str, betrag: float = None) -> tuple:
         k = regel["kategorie"] or ""
         t = regel["typ"] or "Einnahme"
         kt = regel["konto_typ"] or "Wohngeldkonto"
-        # Betragsfilter erhöht Konfidenz
         if betrag is not None:
             bmin = regel.get("betrag_min")
             bmax = regel.get("betrag_max")
@@ -1783,27 +1828,62 @@ def vorschlag_kategorie(buchungstext: str, betrag: float = None) -> tuple:
                     return k, t, kt, max(basis_konfidenz - 0.15, 0.0)
         return k, t, kt, basis_konfidenz
 
-    # Stufe 1: Exakter Muster-Match im gesamten Text
+    # ── Stufe 1: Alle Regeln sammeln die den Auftraggeber/Text treffen ──────────
+    direkt_treffer = []   # exakter muster-Match im Gesamttext
     for regel in regeln:
         muster = regel["muster"].lower() if regel["muster"] else ""
         if muster and muster in text_lower:
-            return _treffer(regel, 0.85)
+            direkt_treffer.append(regel)
 
-    # Stufe 1b: Keyword-Suche in Buchungsregeln (#40)
+    if direkt_treffer:
+        if len(direkt_treffer) == 1:
+            # Eindeutig → 0.85
+            return _treffer(direkt_treffer[0], 0.85)
+        # Mehrere Regeln für diesen Auftraggeber → vzweck_muster zur Disambiguierung
+        vzweck_hits = [r for r in direkt_treffer
+                       if (r.get("vzweck_muster") or "").lower() and
+                          (r.get("vzweck_muster") or "").lower() in vzweck]
+        if len(vzweck_hits) == 1:
+            # Eindeutig via Verwendungszweck → 0.90
+            return _treffer(vzweck_hits[0], 0.90)
+        if len(vzweck_hits) > 1:
+            # Noch mehrdeutig, aber vzweck hilft → 0.75
+            return _treffer(vzweck_hits[0], 0.75)
+        # Kein vzweck-Match → Fallback auf Regel ohne vzweck_muster (generische Regel)
+        fallback = [r for r in direkt_treffer if not r.get("vzweck_muster")]
+        if fallback:
+            return _treffer(fallback[0], 0.70)
+        # Alle haben vzweck_muster aber keins passt → niedrige Konfidenz
+        return _treffer(direkt_treffer[0], 0.35)
+
+    # ── Stufe 1b: Keyword-Suche ─────────────────────────────────────────────────
     for regel in regeln:
         kws = [k.strip().lower() for k in (regel.get("keywords") or "").split(",") if k.strip()]
         if any(kw and kw in text_lower for kw in kws):
-            return _treffer(regel, 0.65)  # Etwas unter direktem Muster-Match
+            return _treffer(regel, 0.65)
 
-    # Stufe 2: Auftraggeber-Match (bereinigt)
+    # ── Stufe 2: Auftraggeber-Match (bereinigt) ─────────────────────────────────
     if auftraggeber:
         auftr_bereinigt = _bereinige_text(auftraggeber)
+        auftr_kandidaten = []
         for regel in regeln:
             muster = _bereinige_text(regel["muster"] if regel["muster"] else "")
             if muster and muster in auftr_bereinigt:
-                return _treffer(regel, 0.70)
+                auftr_kandidaten.append(regel)
+        if auftr_kandidaten:
+            if len(auftr_kandidaten) == 1:
+                return _treffer(auftr_kandidaten[0], 0.70)
+            vzweck_hits = [r for r in auftr_kandidaten
+                           if (r.get("vzweck_muster") or "").lower() and
+                              (r.get("vzweck_muster") or "").lower() in vzweck]
+            if len(vzweck_hits) == 1:
+                return _treffer(vzweck_hits[0], 0.80)
+            fallback = [r for r in auftr_kandidaten if not r.get("vzweck_muster")]
+            if fallback:
+                return _treffer(fallback[0], 0.65)
+            return _treffer(auftr_kandidaten[0], 0.35)
 
-    # Stufe 3: Keyword-Match im Verwendungszweck
+    # ── Stufe 3: Verwendungszweck-Match ─────────────────────────────────────────
     vzweck_bereinigt = _bereinige_text(vzweck)
     for regel in regeln:
         muster = _bereinige_text(regel["muster"] if regel["muster"] else "")
@@ -1851,37 +1931,80 @@ def pro_rata_temporis(einzug, auszug, jahr: int) -> float:
 def lerne_buchung(buchungstext: str, kategorie: str, typ: str, konto_typ: str, ist_korrektur: bool = False):
     """Speichert oder aktualisiert eine Buchungsregel.
 
-    Muster-Extraktion:
-    - Bei buchungstext mit || → Auftraggeber/Empfänger (vor ||) als Muster
-    - Sonst: gesamten Text (max 40 Zeichen) als Muster
-    - Füllwörter werden nicht entfernt (das passiert beim Matching)
+    Mehrfach-Kategorien pro Auftraggeber:
+    - Gleicher Auftraggeber, gleiche Kategorie → treffer erhöhen
+    - Gleicher Auftraggeber, andere Kategorie → vzweck_muster zur Disambiguierung
+      einfügen; die neue Buchung bekommt ein vzweck_muster aus dem Verwendungszweck
+    - Neuer Auftraggeber → einfache Regel ohne vzweck_muster
     """
     if not buchungstext or not kategorie:
         return
     if "||" in buchungstext:
         auftraggeber = buchungstext.split("||")[0].strip()
-        # Auftraggeber als primäres Muster (max 60 Zeichen)
+        vzweck = buchungstext.split("||", 1)[1].strip()
         muster = auftraggeber[:60] if auftraggeber else buchungstext[:40]
     else:
+        auftraggeber = ""
+        vzweck = buchungstext
         muster = buchungstext[:40]
     if not muster:
         return
+
+    korr_flag = 1 if ist_korrektur else 0
     conn = get_db()
-    existing = conn.execute(
-        "SELECT * FROM buchungsregeln WHERE muster=?", (muster,)
-    ).fetchone()
-    if existing:
-        conn.execute(
-            "UPDATE buchungsregeln SET kategorie=?, typ=?, konto_typ=?, treffer=treffer+1, ist_korrektur=? WHERE id=?",
-            (kategorie, typ, konto_typ, 1 if ist_korrektur else 0, existing["id"])
-        )
-    else:
-        conn.execute(
-            "INSERT INTO buchungsregeln (muster, kategorie, typ, konto_typ, treffer, ist_korrektur) VALUES (?,?,?,?,1,?)",
-            (muster, kategorie, typ, konto_typ, 1 if ist_korrektur else 0)
-        )
-    conn.commit()
-    conn.close()
+    try:
+        # Alle bestehenden Regeln für diesen Auftraggeber
+        bestehende = [dict(r) for r in conn.execute(
+            "SELECT * FROM buchungsregeln WHERE muster=? ORDER BY ist_korrektur DESC, treffer DESC",
+            (muster,)
+        ).fetchall()]
+
+        if not bestehende:
+            # Komplett neue Regel — kein vzweck_muster nötig
+            conn.execute(
+                "INSERT INTO buchungsregeln (muster, kategorie, typ, konto_typ, treffer, ist_korrektur)"
+                " VALUES (?,?,?,?,1,?)",
+                (muster, kategorie, typ, konto_typ, korr_flag)
+            )
+        else:
+            # Gibt es bereits eine Regel mit genau dieser Kategorie?
+            gleiche_kat = [r for r in bestehende if r["kategorie"] == kategorie]
+            andere_kat  = [r for r in bestehende if r["kategorie"] != kategorie]
+
+            if gleiche_kat:
+                # Bekannte Kategorie → treffer erhöhen, ggf. Korrekturflag setzen
+                r = gleiche_kat[0]
+                conn.execute(
+                    "UPDATE buchungsregeln SET treffer=treffer+1, ist_korrektur=MAX(ist_korrektur,?)"
+                    " WHERE id=?",
+                    (korr_flag, r["id"])
+                )
+            elif andere_kat:
+                # Gleicher Auftraggeber, ANDERE Kategorie → vzweck_muster zur Unterscheidung
+                vzweck_key = _extrahiere_vzweck_schluessel(vzweck)
+
+                # Prüfen ob es schon eine Regel mit diesem vzweck_muster gibt
+                existing_vzweck = [r for r in bestehende
+                                   if (r.get("vzweck_muster") or "").lower() == vzweck_key.lower()
+                                   and vzweck_key]
+                if existing_vzweck:
+                    # Dieses vzweck_muster kennen wir schon → aktualisieren
+                    conn.execute(
+                        "UPDATE buchungsregeln SET kategorie=?, typ=?, konto_typ=?,"
+                        " treffer=treffer+1, ist_korrektur=MAX(ist_korrektur,?) WHERE id=?",
+                        (kategorie, typ, konto_typ, korr_flag, existing_vzweck[0]["id"])
+                    )
+                else:
+                    # Neues vzweck_muster → neue Zeile einfügen
+                    conn.execute(
+                        "INSERT INTO buchungsregeln"
+                        " (muster, vzweck_muster, kategorie, typ, konto_typ, treffer, ist_korrektur)"
+                        " VALUES (?,?,?,?,?,1,?)",
+                        (muster, vzweck_key or None, kategorie, typ, konto_typ, korr_flag)
+                    )
+        conn.commit()
+    finally:
+        conn.close()
 
 # ── Dialog-Basis ──────────────────────────────────────────────────────────────
 
@@ -5174,22 +5297,37 @@ class RechnungenPage(tk.Frame):
             messagebox.showwarning("Berechtigung", "Keine Löschberechtigung.", parent=self); return
         sel = self.tree.selection()
         if not sel: return
+        ids = [int(s) for s in sel]
         conn = get_db()
         try:
-            cnt = conn.execute(
-                "SELECT COUNT(*) FROM zahlungen WHERE rechnung_id=?", (int(sel[0]),)
-            ).fetchone()[0]
+            cnt_z = sum(
+                conn.execute("SELECT COUNT(*) FROM zahlungen WHERE rechnung_id=?", (rid,)).fetchone()[0]
+                for rid in ids
+            )
+            cnt_l = sum(
+                conn.execute("SELECT COUNT(*) FROM kontoauszug_match_log WHERE rechnung_id=?", (rid,)).fetchone()[0]
+                for rid in ids
+            )
         finally:
             conn.close()
-        hinweis = f"\n\n⚠ {cnt} Buchung(en) sind dieser Rechnung zugeordnet." if cnt else ""
-        if not messagebox.askyesno("Löschen",
-            f"Rechnung wirklich löschen?{hinweis}", parent=self):
+        n = len(ids)
+        msg = f"{n} Rechnung(en) wirklich löschen?"
+        hinweise = []
+        if cnt_z:
+            hinweise.append(f"⚠ {cnt_z} Buchungszuordnung(en) werden aufgehoben.")
+        if cnt_l:
+            hinweise.append(f"⚠ {cnt_l} Match-Log-Einträge werden entfernt.")
+        if hinweise:
+            msg += "\n\n" + "\n".join(hinweise)
+        if not messagebox.askyesno("Löschen", msg, parent=self):
             return
         conn = get_db()
         try:
-            # Zuordnungen aufheben
-            conn.execute("UPDATE zahlungen SET rechnung_id=NULL WHERE rechnung_id=?", (int(sel[0]),))
-            conn.execute("DELETE FROM rechnungen WHERE id=?", (int(sel[0]),))
+            for rid in ids:
+                # FK-Referenzen zuerst auflösen
+                conn.execute("UPDATE zahlungen SET rechnung_id=NULL WHERE rechnung_id=?", (rid,))
+                conn.execute("DELETE FROM kontoauszug_match_log WHERE rechnung_id=?", (rid,))
+                conn.execute("DELETE FROM rechnungen WHERE id=?", (rid,))
             conn.commit()
         finally:
             conn.close()
@@ -7219,11 +7357,6 @@ class NebenkostenPage(tk.Frame):
         )
 
         conn = get_db()
-        hg_ist_rows = conn.execute(
-            "SELECT eigentuemer_id, SUM(betrag) as s FROM zahlungen "
-            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=? "
-            "GROUP BY eigentuemer_id", (str(jahr),)
-        ).fetchall()
         hg_gesamt_ist = conn.execute(
             "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
             "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=?",
@@ -7242,9 +7375,46 @@ class NebenkostenPage(tk.Frame):
         ).fetchall():
             eid = r["eigentuemer_id"]
             monatlich_map[eid] = monatlich_map.get(eid, 0.0) + (parse_float(r["hausgeld_monatlich"]) or 0.0)
+
+        # Alle Hausgeld-Buchungen laden (einzeln für Name-Matching)
+        hg_buchungen = conn.execute(
+            "SELECT eigentuemer_id, beschreibung, betrag FROM zahlungen "
+            "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=?",
+            (str(jahr),)
+        ).fetchall()
         conn.close()
 
-        hg_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hg_ist_rows}
+        # Name-Lookup: Vor+Nachname sowie Nachname allein → eigentuemer_id
+        name_lookup: dict = {}
+        for e in eigentuemer:
+            vn = (e["vorname"] or "").strip().lower()
+            nn = (e["name"]    or "").strip().lower()
+            if vn and nn:
+                name_lookup[f"{vn} {nn}"] = e["id"]
+                name_lookup[f"{nn} {vn}"] = e["id"]
+            if nn:
+                name_lookup[nn] = e["id"]
+            if vn:
+                name_lookup[vn] = e["id"]
+
+        # Ist-Beträge zuordnen: eigentuemer_id direkt → sonst Name in Beschreibung
+        hg_map: dict = {}
+        for r in hg_buchungen:
+            betrag = r["betrag"] or 0.0
+            eid = r["eigentuemer_id"]
+            if eid:
+                hg_map[eid] = hg_map.get(eid, 0.0) + betrag
+            else:
+                beschr = (r["beschreibung"] or "").lower()
+                matched = False
+                for name, neid in name_lookup.items():
+                    if len(name) >= 3 and name in beschr:
+                        hg_map[neid] = hg_map.get(neid, 0.0) + betrag
+                        matched = True
+                        break
+                if not matched:
+                    # Nicht zuordenbar — unter Sonder-Key sammeln
+                    hg_map["__unbekannt__"] = hg_map.get("__unbekannt__", 0.0) + betrag
         hg_gesamt_soll = sum(soll_map.values())
 
         # KPI-Karten
@@ -7261,19 +7431,19 @@ class NebenkostenPage(tk.Frame):
             tk.Label(karte, text=label, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
             tk.Label(karte, text=wert,  bg=BG_INPUT, fg=color,      font=FONT_H3).pack(anchor="w")
 
-        if not any(soll_map.values()):
-            # Kein Hausgeld hinterlegt — Hinweis in Tabelle
-            for i in self._tree_wg.get_children():
-                self._tree_wg.delete(i)
-            self._tree_wg.insert("", "end", iid="__empty__",
-                values=("⚠ Kein monatliches Hausgeld hinterlegt — bitte in Wohnungen eintragen",
-                        "", "", "", "", ""), tags=("hint",))
-            self._tree_wg.tag_configure("hint", foreground=DANGER)
-            return
+        kein_soll_konfiguriert = not any(soll_map.values())
 
         # Pro-Eigentümer-Tabelle
         for i in self._tree_wg.get_children():
             self._tree_wg.delete(i)
+
+        # Hinweiszeile wenn noch kein monatliches Hausgeld in Wohnungen hinterlegt
+        if kein_soll_konfiguriert:
+            self._tree_wg.insert("", "end", iid="__hint__",
+                values=("ℹ Kein Soll konfiguriert — bitte monatliches Hausgeld in Wohnungen eintragen",
+                        "", "", "", "", ""), tags=("hint",))
+            self._tree_wg.tag_configure("hint", foreground="#E67E22")
+
         for e in eigentuemer:
             soll      = soll_map.get(e["id"], 0.0)
             ist       = hg_map.get(e["id"], 0.0)
@@ -7282,7 +7452,10 @@ class NebenkostenPage(tk.Frame):
                 continue  # Eigentümer ohne Wohnung/Hausgeld ausblenden
             saldo     = ist - soll
             name      = f"{e['vorname'] or ''} {e['name']}".strip()
-            if saldo >= -0.01:
+            if kein_soll_konfiguriert:
+                status    = "– kein Soll hinterlegt"
+                color_tag = "wg_neutral"
+            elif saldo >= -0.01:
                 status    = "✔ ausgeglichen"
                 color_tag = "wg_plus"
             elif saldo >= -(monatlich * 1.5) and monatlich:
@@ -7299,10 +7472,18 @@ class NebenkostenPage(tk.Frame):
                 fmt_euro(ist),
                 fmt_euro(saldo),
                 status), tags=(color_tag,))
+        # Nicht zuordenbare Hausgeld-Beträge anzeigen
+        unbekannt = hg_map.get("__unbekannt__", 0.0)
+        if unbekannt:
+            self._tree_wg.insert("", "end", values=(
+                "⚠ Nicht zuordenbar (kein Eigentümer-Match)",
+                "–", "–", fmt_euro(unbekannt), "–",
+                "Beschreibung prüfen"), tags=("wg_warn",))
         tree_empty_hint(self._tree_wg)
-        self._tree_wg.tag_configure("wg_plus",  foreground=SUCCESS)
-        self._tree_wg.tag_configure("wg_warn",  foreground="#E67E22")
-        self._tree_wg.tag_configure("wg_minus", foreground=DANGER)
+        self._tree_wg.tag_configure("wg_plus",    foreground=SUCCESS)
+        self._tree_wg.tag_configure("wg_warn",    foreground="#E67E22")
+        self._tree_wg.tag_configure("wg_minus",   foreground=DANGER)
+        self._tree_wg.tag_configure("wg_neutral", foreground=TEXT_LIGHT)
 
     # ── §28 WEG Eigentümer ─────────────────────────────────────────────────────
 
@@ -9008,7 +9189,8 @@ class AufteilungenPage(tk.Frame):  # #39
 
 class AufteilungDialog(BaseDialog):
     TYPEN = ["Wohnfläche", "Personenanzahl", "Einheiten gleich", "Verbrauch",
-             "MEA", "Wasserkosten nach Punkten", "Ausgewählte Wohnungen", "Sonstiges"]  # #39
+             "MEA", "Heizkostenverteilung", "Wasserkosten nach Punkten",
+             "Ausgewählte Wohnungen", "Sonstiges"]  # #39
 
     def __init__(self, parent, row=None):
         super().__init__(parent, "Aufteilung " + ("bearbeiten" if row else "hinzufügen"), 520, 640)  # #39
@@ -9055,30 +9237,43 @@ class AufteilungDialog(BaseDialog):
             justify="left", anchor="w")
         self._wk_hinweis.pack(fill="x", padx=20, pady=(0, 6))
 
+        # Hinweis-Label: wird bei Typ "Heizkostenverteilung" eingeblendet
+        self._hkv_hinweis = tk.Label(self._body, bg="#FFF8E1", fg="#7B5800", font=FONT_SMALL,
+            text="\u2139  Die Aufteilung erfolgt \u00fcber individuelle Heizkostenverteiler. Die Abrechnung wird extern erstellt"
+                 " und kann unter 'Nebenkosten' importiert werden.",
+            justify="left", anchor="w", relief="flat", padx=8, pady=4)
+        self._hkv_hinweis.pack(fill="x", padx=20, pady=(0, 6))
+
         # Auf Combobox-Widget binden (nicht auf StringVar)
         self._typ_combo.bind("<<ComboboxSelected>>", self._on_typ_change)
         self._on_typ_change()  # Initialzustand setzen
 
     def _on_typ_change(self, event=None):
-        """Zeigt/versteckt den Wasserkosten-Hinweis und Wohnungsauswahl je nach gewähltem Typ."""
+        """Zeigt/versteckt Hinweise und Wohnungsauswahl je nach gewähltem Typ."""
         typ = self._fields["typ"].get()
+        # Alle optionalen Widgets zuerst verstecken
+        self._wk_hinweis.pack_forget()
+        self._hkv_hinweis.pack_forget()
+        self._wohn_frame.pack_forget()
+        self._bezug_entry.configure(state="normal")
+
         if typ == "Wasserkosten nach Punkten":
             self._wk_hinweis.pack(fill="x", padx=20, pady=(0, 6))
-            self._wohn_frame.pack_forget()
             self._bezug_entry.configure(state="disabled")
             if not self._fields["bezug"].get():
                 self._bezug_entry.configure(state="normal")
                 self._bezug_entry.delete(0, "end")
                 self._bezug_entry.insert(0, "Aus Wasserkosten-Berechnung")
                 self._bezug_entry.configure(state="disabled")
+        elif typ == "Heizkostenverteilung":
+            self._hkv_hinweis.pack(fill="x", padx=20, pady=(0, 6))
+            if not self._fields["bezug"].get():
+                self._bezug_entry.delete(0, "end")
+                self._bezug_entry.insert(0, "Heizkostenverteiler (extern)")
         elif typ == "Ausgewählte Wohnungen":  # #39
-            self._wk_hinweis.pack_forget()
             self._wohn_frame.pack(fill="x", padx=20, pady=(0, 8))
-            self._bezug_entry.configure(state="normal")
-        else:
-            self._wk_hinweis.pack_forget()
-            self._wohn_frame.pack_forget()
-            self._bezug_entry.configure(state="normal")
+        # else: alle bereits versteckt, bezug_entry normal
+
 
     def _on_save(self):
         v = self._get_values()
@@ -9255,21 +9450,29 @@ class KontoauszugPage(tk.Frame):
         self._vs_konto_combo.pack(side="left", padx=(4, 0))
         self._vs_konto_combo.bind("<<ComboboxSelected>>", lambda e: self._load_vorschlaege())
 
-        cols_v = ("Datum", "Auftraggeber", "Verwendungszweck", "Betrag", "Konto", "Vorschlag Kat.")
+        cols_v = ("Datum", "Auftraggeber", "Verwendungszweck", "Betrag", "Konto", "Vorschlag Kat.", "Konfidenz")
         fv, self.tree_v = make_table(self._view_vorschlaege, cols_v, height=12)
         fv.pack(fill="both", expand=True, padx=20, pady=4)
-        for c, w in zip(cols_v, [88, 180, 250, 100, 90, 120]):
+        for c, w in zip(cols_v, [88, 180, 230, 100, 90, 130, 80]):
             self.tree_v.heading(c, text=c); self.tree_v.column(c, width=w, anchor="w")
         _treeview_sort_setup(self.tree_v, cols_v)
-        self.tree_v.tag_configure("mit_vorschlag", foreground="#2E7D32")
-        # Mehrfachauswahl aktivieren
+        self.tree_v.tag_configure("konf_hoch",   foreground=SUCCESS)
+        self.tree_v.tag_configure("konf_mittel", foreground="#E67E22")
+        self.tree_v.tag_configure("konf_niedrig",foreground=DANGER)
+        # Mehrfachauswahl + Interaktion
         self.tree_v.configure(selectmode="extended")
+        self.tree_v.bind("<Double-1>",  self._vorschlag_detail)
+        self.tree_v.bind("<Motion>",    self._vorschlag_tooltip_show)
+        self.tree_v.bind("<Leave>",     self._vorschlag_tooltip_hide)
+        self._vs_tooltip_win  = None   # aktives Tooltip-Fenster
+        self._vs_tooltip_iid  = None   # iid für das zuletzt gezeigte Tooltip
         btn_v = tk.Frame(self._view_vorschlaege, bg=BG_CARD)
         btn_v.pack(fill="x", padx=20, pady=(0, 8))
-        make_btn(btn_v, "✔ Übernehmen",              self._uebernehmen,      color=SUCCESS).pack(side="left", padx=(0,6))
-        make_btn(btn_v, "✔✔ Alle grünen übernehmen", self._batch_uebernehmen,color="#2E7D32").pack(side="left", padx=(0,6))
-        make_btn(btn_v, "✏ Kategorie korrigieren",    self._korrigieren,      color=ACCENT2).pack(side="left", padx=(0,6))
-        make_btn(btn_v, "✗ Falsch zugeordnet",        self._falsch_markieren, color=DANGER).pack(side="left")
+        make_btn(btn_v, "✔ Übernehmen",              self._uebernehmen,         color=SUCCESS).pack(side="left", padx=(0,6))
+        make_btn(btn_v, "✔✔ Alle grünen übernehmen", self._batch_uebernehmen,   color="#2E7D32").pack(side="left", padx=(0,6))
+        make_btn(btn_v, "✏ Kategorie korrigieren",    self._korrigieren,         color=ACCENT2).pack(side="left", padx=(0,6))
+        make_btn(btn_v, "✗ Falsch zugeordnet",        self._falsch_markieren,    color=DANGER).pack(side="left", padx=(0,6))
+        make_btn(btn_v, "🤖 KI für unklare",          self._ki_unklare_zuordnen, color=BG_INPUT, fg=TEXT).pack(side="left")
 
         self._switch_ka_tab("kontoauszug")
 
@@ -9507,8 +9710,22 @@ class KontoauszugPage(tk.Frame):
             raw = r["buchungstext"] or ""
             gegenkonto = raw.split("||")[0] if "||" in raw else ""
             vzweck     = raw.split("||")[1] if "||" in raw else raw
-            vorschlag  = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
-            tag = "mit_vorschlag" if vorschlag else ""
+            # Konfidenz immer frisch berechnen (Regeln können sich geändert haben)
+            kat_neu, _, _, konf = vorschlag_kategorie(raw, r.get("betrag"))
+            vorschlag = r.get("kategorie_vorschlag") or kat_neu
+            # Konfidenz-Tag für Farb-Ampel
+            if not vorschlag:
+                konf_tag = "konf_niedrig"
+                konf_txt = "–"
+            elif konf >= 0.80:
+                konf_tag = "konf_hoch"
+                konf_txt = f"▲ {konf:.0%}"
+            elif konf >= 0.50:
+                konf_tag = "konf_mittel"
+                konf_txt = f"◆ {konf:.0%}"
+            else:
+                konf_tag = "konf_niedrig"
+                konf_txt = f"▼ {konf:.0%}" if konf > 0 else "? unklar"
             iban_kurz = f"···{r['iban'][-8:]}" if r.get("iban") else r.get("konto_typ") or "–"
             self.tree_v.insert("", "end", iid=r["id"], values=(
                 fmt_date(r["datum"]),
@@ -9516,8 +9733,9 @@ class KontoauszugPage(tk.Frame):
                 vzweck or "–",
                 fmt_euro(r["betrag"] or 0),
                 iban_kurz,
-                vorschlag or "–"),
-                tags=(tag,) if tag else ())
+                vorschlag or "–",
+                konf_txt),
+                tags=(konf_tag,))
 
     def _uebernehmen(self):
         """Kontoauszug-Eintrag als Buchung in zahlungen übernehmen."""
@@ -9809,6 +10027,301 @@ class KontoauszugPage(tk.Frame):
         conn.execute("UPDATE kontoauszug SET falsch_zugeordnet=1 WHERE id=?", (int(sel[0]),))
         conn.commit(); conn.close()
         self._load_vorschlaege()
+
+    # ── Detailansicht & Tooltip ───────────────────────────────────────────────
+
+    def _vorschlag_detail(self, event=None):
+        """Doppelklick → Detaildialog mit allen Feldern der Kontoauszug-Buchung."""
+        sel = self.tree_v.selection()
+        if not sel:
+            return
+        self._vorschlag_tooltip_hide()
+        conn = get_db()
+        row = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(sel[0]),)).fetchone()
+        conn.close()
+        if not row:
+            return
+        r = dict(row)
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Buchungsdetails")
+        dlg.configure(bg=BG_CARD)
+        dlg.geometry("560x460")
+        dlg.resizable(True, True)
+        dlg.grab_set()
+
+        # Header
+        hdr = tk.Frame(dlg, bg=BG_SIDEBAR, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="📄  Buchungsdetails", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H2).pack(side="left", padx=16)
+        tk.Label(hdr, text=fmt_date(r.get("datum") or ""),
+                 bg=BG_SIDEBAR, fg=ACCENT, font=FONT_H2).pack(side="right", padx=16)
+
+        # Felder
+        body = tk.Frame(dlg, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=20, pady=12)
+
+        raw = r.get("buchungstext") or ""
+        auftraggeber = raw.split("||")[0].strip() if "||" in raw else "–"
+        vzweck       = raw.split("||")[1].strip() if "||" in raw else raw
+
+        kat_vorschlag, _, _, konf = vorschlag_kategorie(raw, r.get("betrag"))
+        kat_anzeige = r.get("kategorie_vorschlag") or kat_vorschlag or "–"
+        konf_anzeige = f"{konf:.0%}" if konf > 0 else "–"
+
+        felder = [
+            ("Datum",               fmt_date(r.get("datum") or "")),
+            ("Auftraggeber",        auftraggeber),
+            ("Verwendungszweck",    vzweck),
+            ("Betrag",              fmt_euro(r.get("betrag") or 0)),
+            ("Kontoauszug-Saldo",   fmt_euro(r.get("saldo") or 0) if r.get("saldo") else "–"),
+            ("Konto / IBAN",        r.get("iban") or r.get("konto_typ") or "–"),
+            ("Kategorie-Vorschlag", kat_anzeige),
+            ("Konfidenz",           konf_anzeige),
+            ("Status Übernahme",    "✔ übernommen" if r.get("als_buchung_uebernommen") else "○ offen"),
+            ("Importiert am",       str(r.get("importiert_am") or "–")[:19]),
+            ("Interne ID",          str(r.get("id"))),
+        ]
+
+        for i, (label, wert) in enumerate(felder):
+            bg = BG_CARD if i % 2 == 0 else BG_INPUT
+            row_f = tk.Frame(body, bg=bg)
+            row_f.pack(fill="x")
+            tk.Label(row_f, text=label, width=22, anchor="w",
+                     bg=bg, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left", padx=(8, 4), pady=4)
+            # Lange Texte in ein Text-Widget damit sie umgebrochen werden
+            if len(str(wert)) > 60:
+                t = tk.Text(row_f, height=2, wrap="word", bg=bg, fg=TEXT,
+                            font=FONT_BODY, relief="flat", bd=0)
+                t.insert("1.0", wert)
+                t.config(state="disabled")
+                t.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            else:
+                tk.Label(row_f, text=wert, anchor="w",
+                         bg=bg, fg=TEXT, font=FONT_BODY).pack(side="left", padx=(0, 8))
+
+        # Schließen-Button
+        btn_row = tk.Frame(dlg, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(btn_row, "✏ Kategorie korrigieren",
+                 lambda: (dlg.destroy(), self._korrigieren()),
+                 color=ACCENT2).pack(side="left", padx=(0, 8))
+        make_btn(btn_row, "Schließen", dlg.destroy,
+                 color=BG_INPUT, fg=TEXT).pack(side="left")
+
+    def _vorschlag_tooltip_show(self, event):
+        """MouseOver → kleines Tooltip-Popup mit Auftraggeber + vollem Verwendungszweck."""
+        iid = self.tree_v.identify_row(event.y)
+        if not iid or iid == "__empty__":
+            self._vorschlag_tooltip_hide()
+            return
+        # Nur neu aufbauen wenn sich die Zeile geändert hat
+        if iid == self._vs_tooltip_iid and self._vs_tooltip_win:
+            return
+        self._vorschlag_tooltip_hide()
+        self._vs_tooltip_iid = iid
+
+        conn = get_db()
+        row = conn.execute("SELECT * FROM kontoauszug WHERE id=?", (int(iid),)).fetchone()
+        conn.close()
+        if not row:
+            return
+        r = dict(row)
+        raw = r.get("buchungstext") or ""
+        auftr  = raw.split("||")[0].strip() if "||" in raw else ""
+        vzweck = raw.split("||")[1].strip() if "||" in raw else raw
+
+        # Tooltip-Fenster
+        tw = tk.Toplevel(self.tree_v)
+        tw.wm_overrideredirect(True)       # kein Fensterrahmen
+        tw.wm_attributes("-topmost", True)
+        tw.configure(bg="#FFFDE7", relief="solid", bd=1)
+        self._vs_tooltip_win = tw
+
+        pad = tk.Frame(tw, bg="#FFFDE7", padx=10, pady=6)
+        pad.pack()
+
+        def _lbl(text, bold=False):
+            f = ("Segoe UI Semibold", 9) if bold else ("Segoe UI", 9)
+            tk.Label(pad, text=text, bg="#FFFDE7", fg="#333333",
+                     font=f, justify="left", anchor="w", wraplength=380).pack(anchor="w")
+
+        _lbl(f"Auftraggeber:  {auftr or '–'}", bold=True)
+        _lbl(f"Zweck:  {vzweck[:200] or '–'}")
+        _lbl(f"Betrag: {fmt_euro(r.get('betrag') or 0)}   Datum: {fmt_date(r.get('datum') or '')}")
+        kat_v = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0] or "–"
+        _lbl(f"Vorschlag: {kat_v}")
+        _lbl("Doppelklick für vollständige Details", bold=False)
+
+        # Position: leicht rechts und unterhalb des Mauszeigers
+        x = self.tree_v.winfo_rootx() + event.x + 16
+        y = self.tree_v.winfo_rooty() + event.y + 16
+        # Bildschirmrand nicht überschreiten
+        sw = tw.winfo_screenwidth()
+        tw.update_idletasks()
+        if x + tw.winfo_reqwidth() > sw - 10:
+            x = sw - tw.winfo_reqwidth() - 10
+        tw.wm_geometry(f"+{x}+{y}")
+
+    def _vorschlag_tooltip_hide(self, event=None):
+        """Tooltip schließen."""
+        if self._vs_tooltip_win:
+            try:
+                self._vs_tooltip_win.destroy()
+            except Exception:
+                pass
+            self._vs_tooltip_win = None
+            self._vs_tooltip_iid = None
+
+    def _ki_unklare_zuordnen(self):
+        """KI-Kategorisierung für Einträge mit niedriger Konfidenz (< 0.50 oder kein Vorschlag)."""
+        import threading, time as _time
+
+        # Kandidaten sammeln: keine oder schwache Kategorie
+        kandidaten = []
+        for iid in self.tree_v.get_children():
+            vals = self.tree_v.item(iid, "values")
+            konf_txt = vals[6] if len(vals) > 6 else ""
+            vorschlag = vals[5] if len(vals) > 5 else "–"
+            if vorschlag == "–" or "?" in konf_txt or (konf_txt.startswith("▼")):
+                kandidaten.append(int(iid))
+
+        if not kandidaten:
+            messagebox.showinfo("KI-Analyse",
+                "Keine unklaren Einträge gefunden — alle Buchungen haben bereits einen Vorschlag.",
+                parent=self)
+            return
+
+        cfg = load_config()
+        key = cfg.get("anthropic_api_key", "").strip()
+        ollama_url = cfg.get("ollama_url", "").strip()
+        anbieter   = cfg.get("ki_anbieter", "anthropic")
+        if not key and not ollama_url:
+            messagebox.showwarning("KI nicht konfiguriert",
+                "Bitte zuerst in Einstellungen → KI-Administration einen API-Key\n"
+                "oder eine Ollama-URL hinterlegen.",
+                parent=self)
+            return
+
+        # Buchungsdaten laden
+        conn = get_db()
+        rows = [dict(conn.execute("SELECT * FROM kontoauszug WHERE id=?", (kid,)).fetchone())
+                for kid in kandidaten[:20]]  # max 20
+        conn.close()
+
+        kat_liste = ", ".join(WEG_KATEGORIEN_LISTE[:20])
+        zeilen = []
+        for r in rows:
+            bt = r["buchungstext"] or ""
+            auftr = bt.split("||")[0].strip() if "||" in bt else ""
+            vzweck = bt.split("||")[1].strip() if "||" in bt else bt
+            zeilen.append(f"ID {r['id']}: Auftraggeber={auftr!r}  Zweck={vzweck[:80]!r}  Betrag={r['betrag']}")
+
+        prompt = (
+            f"Du hilfst bei der Kategorisierung von Bankbuchungen für eine Wohnungseigentümergemeinschaft (WEG).\n"
+            f"Verfügbare Kategorien: {kat_liste}\n\n"
+            f"Weise jeder Buchung genau eine Kategorie zu. Antworte NUR mit Zeilen im Format:\n"
+            f"ID: <id> | Kategorie: <kategorie> | Typ: Einnahme oder Ausgabe\n\n"
+            f"Buchungen:\n" + "\n".join(zeilen)
+        )
+
+        dlg_var = tk.StringVar(value="🤖 KI analysiert…")
+        dlg = tk.Toplevel(self)
+        dlg.title("KI-Kategorisierung läuft…")
+        dlg.geometry("420x120")
+        dlg.configure(bg=BG_CARD)
+        dlg.grab_set()
+        tk.Label(dlg, textvariable=dlg_var, bg=BG_CARD, fg=TEXT,
+                 font=FONT_BODY, wraplength=390).pack(padx=20, pady=30)
+
+        def _thread():
+            t0 = _time.time()
+            try:
+                messages = [{"role": "user", "content": prompt}]
+                if anbieter == "anthropic" and key:
+                    modell = cfg.get("ki_modell", "claude-haiku-4-5")
+                    payload = json.dumps({
+                        "model": modell, "max_tokens": 800,
+                        "messages": messages
+                    }).encode("utf-8")
+                    req = urllib.request.Request(
+                        "https://api.anthropic.com/v1/messages",
+                        data=payload,
+                        headers={"x-api-key": key,
+                                 "anthropic-version": "2023-06-01",
+                                 "content-type": "application/json"}
+                    )
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        data = json.loads(resp.read().decode())
+                    antwort = data["content"][0]["text"]
+                    modell_name = modell
+                    anbieter_name = "anthropic"
+                elif ollama_url:
+                    modell = cfg.get("ollama_modell", "llama3.2")
+                    payload = json.dumps({
+                        "model": modell, "stream": False,
+                        "messages": messages
+                    }).encode("utf-8")
+                    req = urllib.request.Request(
+                        ollama_url.rstrip("/") + "/api/chat",
+                        data=payload,
+                        headers={"content-type": "application/json"}
+                    )
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        data = json.loads(resp.read().decode())
+                    antwort = data.get("message", {}).get("content", "")
+                    modell_name = modell
+                    anbieter_name = "ollama"
+                else:
+                    dlg.after(0, lambda: dlg_var.set("❌ Kein KI-Anbieter konfiguriert."))
+                    return
+
+                # Antwort parsen: "ID: 42 | Kategorie: Hausgeld | Typ: Einnahme"
+                import re as _re
+                # Erst alle Ergebnisse sammeln, dann in einem Schritt schreiben
+                ergebnisse = []
+                for zeile in antwort.splitlines():
+                    m = _re.search(r'ID[:\s]+(\d+).*?Kategorie[:\s]+([^|]+).*?Typ[:\s]+(Einnahme|Ausgabe)', zeile, _re.I)
+                    if not m:
+                        continue
+                    kid = int(m.group(1))
+                    kat = m.group(2).strip()
+                    typ = m.group(3).strip()
+                    if kid not in kandidaten:
+                        continue
+                    r_row = next((r for r in rows if r["id"] == kid), None)
+                    ergebnisse.append((kid, kat, typ, r_row))
+
+                # Schritt 1: kontoauszug updaten (eine Verbindung, direkt schließen)
+                conn2 = get_db()
+                for kid, kat, typ, _ in ergebnisse:
+                    conn2.execute(
+                        "UPDATE kontoauszug SET kategorie_vorschlag=? WHERE id=?",
+                        (kat, kid))
+                conn2.commit()
+                conn2.close()
+
+                # Schritt 2: Buchungsregeln lernen (jetzt keine offene Verbindung mehr)
+                gespeichert = 0
+                for kid, kat, typ, r_row in ergebnisse:
+                    if r_row:
+                        lerne_buchung(r_row["buchungstext"] or "", kat, typ,
+                                      r_row.get("konto_typ") or "Wohngeldkonto",
+                                      ist_korrektur=False)
+                    gespeichert += 1
+                ms = int((_time.time() - t0) * 1000)
+                ki_log("Kontoauszug", "KI-Kategorisierung",
+                       f"{len(kandidaten)} Buchungen", f"{gespeichert} kategorisiert",
+                       modell_name, anbieter_name, ms)
+                dlg.after(0, lambda n=gespeichert: (
+                    dlg_var.set(f"✔ {n} Buchung(en) kategorisiert — Tabelle wird aktualisiert…"),
+                    dlg.after(1200, dlg.destroy)))
+                self.after(1400, self._load_vorschlaege)
+            except Exception as ex:
+                dlg.after(0, lambda e=str(ex): dlg_var.set(f"❌ Fehler: {e}"))
+
+        threading.Thread(target=_thread, daemon=True).start()
 
     # ── Import ────────────────────────────────────────────────────────────────
 
@@ -11847,6 +12360,432 @@ class KiProtokollPage(tk.Frame):
         messagebox.showinfo("Gespeichert", f"KI-Training für '{bereich}' gespeichert.", parent=self)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  GrundsetupDialog – selektiver Export / Import eines Grundsetups
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GrundsetupDialog(tk.Toplevel):
+    """Erlaubt das selektive Exportieren/Importieren eines WEG-Grundsetups als JSON.
+
+    Modus "export": Abschnitte auswählen → JSON-Datei speichern.
+    Modus "import": JSON-Datei laden → Abschnitte auswählen → anwenden.
+    """
+
+    # Config-Schlüssel je Einstellungs-Abschnitt (kein API-Key im Export!)
+    _CFG_KEYS: dict = {
+        "stammdaten":    ["weg_name", "weg_strasse", "weg_plz", "weg_ort",
+                          "weg_email", "weg_telefon"],
+        "bankdaten":     ["bez_wohngeld", "iban_wohngeld",
+                          "bez_ruecklage", "iban_ruecklage"],
+        "speicherpfade": ["pfad_kontoauszug_import", "pfad_belege",
+                          "pfad_dokumente", "pfad_backup", "pfad_datenbank"],
+        "matching":      ["matching_schwelle_auto", "matching_schwelle_vorschlag"],
+        "ki_config":     ["ki_anbieter", "ki_modell", "ki_aktives_modell",
+                          "ollama_host", "ollama_modell"],
+    }
+
+    # Reihenfolge + Metadaten aller Abschnitte
+    _SECTIONS = [
+        # (key,           icon, label,                 beschreibung,                       standard_an)
+        ("stammdaten",    "🏛", "Stammdaten",          "WEG-Name, Adresse, Kontaktdaten",  True),
+        ("bankdaten",     "🏦", "Bankdaten",           "IBAN und Bezeichnung der Konten",  True),
+        ("speicherpfade", "📁", "Speicherpfade",       "Ordnerpfade (rechner-spezifisch)", False),
+        ("matching",      "🔗", "Matching",            "Auto-Matching-Schwellwerte",        True),
+        ("buchungsregeln","⚙",  "Buchungsregeln",      "{n} gelernte Regel(n) in DB",      True),
+        ("kostenarten",   "📋", "Kostenarten",         "Deaktivierte/eigene Kategorien",   True),
+        ("ki_config",     "🤖", "KI-Konfiguration",   "Anbieter + Modell (kein API-Key)", False),
+        ("eigentuemer",   "👥", "Eigentümer",          "{n} Eigentümer in DB",             True),
+        ("wohnungen",     "🏠", "Wohnungen",           "{n} Wohnung(en) in DB",            True),
+        ("mieter",        "👤", "Mieter",              "{n} Mieter in DB",                 True),
+    ]
+
+    def __init__(self, parent, modus: str = "export"):
+        super().__init__(parent)
+        self._modus = modus
+        self._checks: dict = {}     # section_key → BooleanVar
+        self._setup_data: dict = {} # geladenes JSON (Import-Modus)
+        self._counts: dict = {}     # section_key → int (Anzahl Einträge)
+        self.title("Grundsetup exportieren" if modus == "export" else "Grundsetup importieren")
+        self.geometry("560x620")
+        self.configure(bg=BG_CARD)
+        self.resizable(False, True)
+        self.grab_set()
+        self._load_counts()
+        self._build()
+
+    # ── Zähler aus DB laden ───────────────────────────────────────────────────
+
+    def _load_counts(self, data: dict = None):
+        """Zählt Einträge in DB-Tabellen (live oder aus Import-Daten)."""
+        if data:
+            self._counts["buchungsregeln"] = len(data.get("buchungsregeln") or [])
+            self._counts["eigentuemer"]    = len(data.get("eigentuemer")    or [])
+            self._counts["wohnungen"]      = len(data.get("wohnungen")      or [])
+            self._counts["mieter"]         = len(data.get("mieter")         or [])
+        else:
+            conn = get_db()
+            try:
+                self._counts["buchungsregeln"] = conn.execute(
+                    "SELECT COUNT(*) FROM buchungsregeln").fetchone()[0]
+                self._counts["eigentuemer"]    = conn.execute(
+                    "SELECT COUNT(*) FROM eigentuemer").fetchone()[0]
+                self._counts["wohnungen"]      = conn.execute(
+                    "SELECT COUNT(*) FROM wohnungen").fetchone()[0]
+                self._counts["mieter"]         = conn.execute(
+                    "SELECT COUNT(*) FROM mieter").fetchone()[0]
+            finally:
+                conn.close()
+
+    # ── UI aufbauen ───────────────────────────────────────────────────────────
+
+    def _build(self):
+        # Header
+        hdr = tk.Frame(self, bg=BG_SIDEBAR, height=48)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        icon = "📦" if self._modus == "export" else "📥"
+        titel = "Grundsetup exportieren" if self._modus == "export" else "Grundsetup importieren"
+        tk.Label(hdr, text=f"{icon}  {titel}", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H3).pack(side="left", padx=14, pady=12)
+
+        # Hinweis-Text
+        hinweis = (
+            "Wählen Sie die Abschnitte, die in die Setup-Datei exportiert werden sollen.\n"
+            "Speicherpfade und KI-Konfiguration sind standardmäßig deaktiviert."
+        ) if self._modus == "export" else (
+            "Wählen Sie, welche Abschnitte aus der Setup-Datei übernommen werden sollen.\n"
+            "Vorhandene Einträge in DB-Tabellen werden dabei ersetzt."
+        )
+        tk.Label(self, text=hinweis, bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL, justify="left", wraplength=520
+                 ).pack(anchor="w", padx=20, pady=(10, 4))
+
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(0, 6))
+
+        # Scrollbares Abschnitt-Panel
+        canvas_fr = tk.Frame(self, bg=BG_CARD)
+        canvas_fr.pack(fill="both", expand=True, padx=20, pady=0)
+        canvas = tk.Canvas(canvas_fr, bg=BG_CARD, highlightthickness=0)
+        sb = ttk.Scrollbar(canvas_fr, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=BG_CARD)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfig(win_id, width=e.width))
+
+        # Abschnitte gruppieren
+        gruppen = [
+            ("Einstellungen", ["stammdaten","bankdaten","speicherpfade","matching",
+                               "buchungsregeln","kostenarten","ki_config"]),
+            ("Stammdaten (Datenbank)", ["eigentuemer","wohnungen","mieter"]),
+        ]
+
+        for gruppe_label, keys in gruppen:
+            tk.Label(inner, text=gruppe_label, bg=BG_CARD, fg=ACCENT2,
+                     font=FONT_H3).pack(anchor="w", padx=8, pady=(10, 2))
+            tk.Frame(inner, bg=ACCENT2, height=1).pack(fill="x", padx=8, pady=(0, 4))
+
+            for key, icon_k, label, beschr, standard in self._SECTIONS:
+                if key not in keys:
+                    continue
+                # Zähler in Beschreibung einsetzen
+                n = self._counts.get(key)
+                if n is not None:
+                    beschr = beschr.replace("{n}", str(n))
+
+                row = tk.Frame(inner, bg=BG_CARD)
+                row.pack(fill="x", padx=8, pady=2)
+
+                var = tk.BooleanVar(value=standard)
+                # Im Import-Modus: nur aktivieren wenn Abschnitt in Daten vorhanden
+                if self._modus == "import" and self._setup_data:
+                    hat_daten = bool(self._setup_data.get("abschnitte", {}).get(key))
+                    var.set(hat_daten and standard)
+                self._checks[key] = var
+
+                cb = tk.Checkbutton(row, variable=var, bg=BG_CARD,
+                                    activebackground=BG_CARD,
+                                    selectcolor=BG_INPUT, relief="flat")
+                cb.pack(side="left")
+
+                lbl_fr = tk.Frame(row, bg=BG_CARD)
+                lbl_fr.pack(side="left", fill="x", expand=True, padx=(2, 0))
+                tk.Label(lbl_fr, text=f"{icon_k} {label}", bg=BG_CARD,
+                         fg=TEXT, font=FONT_BODY).pack(anchor="w")
+                tk.Label(lbl_fr, text=beschr, bg=BG_CARD,
+                         fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+
+                # Im Import-Modus: Abschnitt ohne Daten deaktivieren
+                if self._modus == "import" and self._setup_data:
+                    hat_daten = bool(self._setup_data.get("abschnitte", {}).get(key))
+                    if not hat_daten:
+                        cb.config(state="disabled")
+                        var.set(False)
+                        tk.Label(lbl_fr, text="– nicht in Setup-Datei enthalten",
+                                 bg=BG_CARD, fg=DANGER, font=FONT_SMALL).pack(anchor="w")
+
+        # Alle / Keine Buttons
+        sel_row = tk.Frame(self, bg=BG_CARD)
+        sel_row.pack(fill="x", padx=20, pady=(4, 0))
+        tk.Button(sel_row, text="Alle auswählen",
+                  command=lambda: [v.set(True) for v in self._checks.values()],
+                  bg=BG_INPUT, fg=TEXT, font=FONT_SMALL, relief="flat",
+                  cursor="hand2").pack(side="left", padx=(0, 6))
+        tk.Button(sel_row, text="Keine",
+                  command=lambda: [v.set(False) for v in self._checks.values()],
+                  bg=BG_INPUT, fg=TEXT, font=FONT_SMALL, relief="flat",
+                  cursor="hand2").pack(side="left")
+
+        # Aktions-Buttons
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(8, 0))
+        btn_row = tk.Frame(self, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=10)
+        make_btn(btn_row, "Abbrechen", self.destroy,
+                 color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6, 0))
+        if self._modus == "export":
+            make_btn(btn_row, "📦 Exportieren", self._do_export,
+                     color=ACCENT2).pack(side="right")
+        else:
+            if self._setup_data:
+                make_btn(btn_row, "📥 Importieren", self._do_import,
+                         color=SUCCESS).pack(side="right")
+            else:
+                make_btn(btn_row, "📂 Datei laden", self._load_file,
+                         color=ACCENT2).pack(side="right")
+
+    # ── Export ────────────────────────────────────────────────────────────────
+
+    def _do_export(self):
+        ausgewaehlt = [k for k, v in self._checks.items() if v.get()]
+        if not ausgewaehlt:
+            messagebox.showwarning("Auswahl", "Bitte mindestens einen Abschnitt auswählen.",
+                                   parent=self)
+            return
+        from tkinter import filedialog as _fd
+        pfad = _fd.asksaveasfilename(
+            parent=self,
+            title="Grundsetup speichern",
+            defaultextension=".json",
+            filetypes=[("JSON-Datei", "*.json"), ("Alle Dateien", "*.*")],
+            initialfile=f"weg_grundsetup_{datetime.now().strftime('%Y%m%d')}.json",
+        )
+        if not pfad:
+            return
+
+        cfg = load_config()
+        conn = get_db()
+        abschnitte: dict = {}
+
+        for key in ausgewaehlt:
+            if key in self._CFG_KEYS:
+                abschnitte[key] = {k: cfg.get(k, "") for k in self._CFG_KEYS[key]}
+            elif key == "buchungsregeln":
+                rows = conn.execute(
+                    "SELECT muster, kategorie, typ, konto_typ, vzweck_muster, "
+                    "ist_korrektur FROM buchungsregeln ORDER BY muster"
+                ).fetchall()
+                abschnitte[key] = [dict(r) for r in rows]
+            elif key == "kostenarten":
+                abschnitte[key] = {
+                    "deaktivierte_kategorien": cfg.get("deaktivierte_kategorien", []),
+                    "custom_kategorien":       cfg.get("custom_kategorien", []),
+                }
+            elif key == "eigentuemer":
+                # FK-Spalten (id) werden beim Export weggelassen
+                _skip_e = {"id"}
+                rows = conn.execute("SELECT * FROM eigentuemer ORDER BY name").fetchall()
+                abschnitte[key] = [{k: v for k, v in dict(r).items()
+                                     if k not in _skip_e} for r in rows]
+            elif key == "wohnungen":
+                # id + FK-Referenzen zu eigentuemer/mieter weglassen
+                _skip_w = {"id", "eigentuemer_id", "mieter_id"}
+                rows = conn.execute(
+                    "SELECT * FROM wohnungen ORDER BY bezeichnung").fetchall()
+                abschnitte[key] = [{k: v for k, v in dict(r).items()
+                                     if k not in _skip_w} for r in rows]
+            elif key == "mieter":
+                # id + FK wohnung_id weglassen
+                _skip_m = {"id", "wohnung_id"}
+                rows = conn.execute("SELECT * FROM mieter ORDER BY name").fetchall()
+                abschnitte[key] = [{k: v for k, v in dict(r).items()
+                                     if k not in _skip_m} for r in rows]
+
+        conn.close()
+
+        export = {
+            "format":      "WEG-Grundsetup",
+            "format_version": 1,
+            "app_version": APP_VERSION,
+            "erstellt_am": datetime.now().isoformat(timespec="seconds"),
+            "abschnitte":  abschnitte,
+        }
+        try:
+            with open(pfad, "w", encoding="utf-8") as f:
+                json.dump(export, f, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            messagebox.showerror("Fehler", f"Export fehlgeschlagen:\n{exc}", parent=self)
+            return
+
+        # Zusammenfassung
+        zeilen = [f"• {k}: {len(v) if isinstance(v, (list,dict)) else '✔'}"
+                  for k, v in abschnitte.items()]
+        messagebox.showinfo("Export erfolgreich",
+                            f"Setup exportiert nach:\n{pfad}\n\n"
+                            + "\n".join(zeilen), parent=self)
+        self.destroy()
+
+    # ── Import: Datei laden ───────────────────────────────────────────────────
+
+    def _load_file(self):
+        from tkinter import filedialog as _fd
+        pfad = _fd.askopenfilename(
+            parent=self,
+            title="Grundsetup-Datei öffnen",
+            filetypes=[("JSON-Datei", "*.json"), ("Alle Dateien", "*.*")],
+        )
+        if not pfad:
+            return
+        try:
+            with open(pfad, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            messagebox.showerror("Fehler", f"Datei konnte nicht gelesen werden:\n{exc}",
+                                 parent=self)
+            return
+        if data.get("format") != "WEG-Grundsetup":
+            messagebox.showerror("Ungültige Datei",
+                                 "Dies ist keine WEG-Grundsetup-Datei.", parent=self)
+            return
+        self._setup_data = data
+        self._load_counts(data.get("abschnitte", {}))
+        # Dialog neu aufbauen mit geladenen Daten
+        for w in self.winfo_children():
+            w.destroy()
+        self._checks.clear()
+        self._build()
+        # Titel aktualisieren
+        von = data.get("erstellt_am", "")[:10]
+        ver = data.get("app_version", "?")
+        self.title(f"Grundsetup importieren – v{ver}, erstellt {von}")
+
+    # ── Import: Daten anwenden ────────────────────────────────────────────────
+
+    def _do_import(self):
+        ausgewaehlt = [k for k, v in self._checks.items() if v.get()]
+        if not ausgewaehlt:
+            messagebox.showwarning("Auswahl", "Bitte mindestens einen Abschnitt auswählen.",
+                                   parent=self)
+            return
+
+        # DB-Tabellen die ersetzt werden
+        db_tabellen = [k for k in ausgewaehlt
+                       if k in ("eigentuemer", "wohnungen", "mieter", "buchungsregeln")]
+        hinweis = ""
+        if db_tabellen:
+            hinweis = ("\n\n⚠ Folgende Tabellen werden vollständig ersetzt:\n"
+                       + ", ".join(db_tabellen))
+
+        if not messagebox.askyesno(
+            "Importieren bestätigen",
+            f"Ausgewählte Abschnitte importieren?\n"
+            f"Abschnitte: {', '.join(ausgewaehlt)}{hinweis}",
+            parent=self
+        ):
+            return
+
+        abschnitte = self._setup_data.get("abschnitte", {})
+        cfg = load_config()
+        conn = get_db()
+        # FK-Checks während des Imports deaktivieren, damit DELETE-Reihenfolge
+        # keine Rolle spielt (eigentuemer_zeitraeume, wohnungen etc. referenzieren
+        # eigentuemer ohne CASCADE – würde sonst FOREIGN KEY constraint failed liefern)
+        conn.execute("PRAGMA foreign_keys = OFF")
+        bericht: list = []
+
+        try:
+            for key in ausgewaehlt:
+                daten = abschnitte.get(key)
+                if not daten:
+                    continue
+
+                if key in self._CFG_KEYS:
+                    for k, v in daten.items():
+                        cfg[k] = v
+                    bericht.append(f"• {key}: {len(daten)} Einstellung(en) übernommen")
+
+                elif key == "kostenarten":
+                    if "deaktivierte_kategorien" in daten:
+                        cfg["deaktivierte_kategorien"] = daten["deaktivierte_kategorien"]
+                    if "custom_kategorien" in daten:
+                        cfg["custom_kategorien"] = daten["custom_kategorien"]
+                    bericht.append("• kostenarten: Konfiguration übernommen")
+
+                elif key == "buchungsregeln":
+                    conn.execute("DELETE FROM buchungsregeln")
+                    for r in daten:
+                        conn.execute(
+                            "INSERT INTO buchungsregeln "
+                            "(muster, kategorie, typ, konto_typ, vzweck_muster, ist_korrektur) "
+                            "VALUES (?,?,?,?,?,?)",
+                            (r.get("muster"), r.get("kategorie"), r.get("typ"),
+                             r.get("konto_typ"), r.get("vzweck_muster"),
+                             r.get("ist_korrektur", 0)))
+                    bericht.append(f"• buchungsregeln: {len(daten)} Regel(n) importiert")
+
+                elif key == "eigentuemer":
+                    conn.execute("DELETE FROM eigentuemer")
+                    # Spalten dynamisch aus erstem Datensatz ermitteln
+                    _skip = {"id"}
+                    for r in daten:
+                        cols = [c for c in r.keys() if c not in _skip]
+                        ph   = ",".join("?" * len(cols))
+                        conn.execute(
+                            f"INSERT OR IGNORE INTO eigentuemer ({','.join(cols)}) VALUES ({ph})",
+                            [r.get(c) for c in cols])
+                    bericht.append(f"• eigentuemer: {len(daten)} Eintrag/Einträge importiert")
+
+                elif key == "wohnungen":
+                    conn.execute("DELETE FROM wohnungen")
+                    _skip = {"id", "eigentuemer_id", "mieter_id"}
+                    for r in daten:
+                        cols = [c for c in r.keys() if c not in _skip]
+                        ph   = ",".join("?" * len(cols))
+                        conn.execute(
+                            f"INSERT OR IGNORE INTO wohnungen ({','.join(cols)}) VALUES ({ph})",
+                            [r.get(c) for c in cols])
+                    bericht.append(f"• wohnungen: {len(daten)} Eintrag/Einträge importiert")
+
+                elif key == "mieter":
+                    conn.execute("DELETE FROM mieter")
+                    _skip = {"id", "wohnung_id"}
+                    for r in daten:
+                        cols = [c for c in r.keys() if c not in _skip]
+                        ph   = ",".join("?" * len(cols))
+                        conn.execute(
+                            f"INSERT OR IGNORE INTO mieter ({','.join(cols)}) VALUES ({ph})",
+                            [r.get(c) for c in cols])
+                    bericht.append(f"• mieter: {len(daten)} Eintrag/Einträge importiert")
+
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")   # FK-Prüfung wieder aktivieren
+        except Exception as exc:
+            conn.rollback()
+            conn.execute("PRAGMA foreign_keys = ON")
+            messagebox.showerror("Fehler", f"Import fehlgeschlagen:\n{exc}", parent=self)
+            return
+        finally:
+            conn.close()
+
+        save_config(cfg)
+        messagebox.showinfo("Import erfolgreich",
+                            "Grundsetup wurde übernommen:\n\n" + "\n".join(bericht),
+                            parent=self)
+        self.destroy()
+
+
 class EinstellungenPage(tk.Frame):
     """Einstellungen-Seite: Tabs für Stammdaten, Bankdaten, Speicherpfade, KI."""
 
@@ -11861,7 +12800,13 @@ class EinstellungenPage(tk.Frame):
         hdr = tk.Frame(self, bg=BG_CARD)
         hdr.pack(fill="x", padx=20, pady=(18, 0))
         tk.Label(hdr, text="Einstellungen", bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(side="left")
-        make_btn(hdr, "💾 Speichern", self._save, color=SUCCESS).pack(side="right")
+        make_btn(hdr, "💾 Speichern", self._save, color=SUCCESS).pack(side="right", padx=(6, 0))
+        make_btn(hdr, "📥 Setup importieren",
+                 lambda: GrundsetupDialog(self, "import"),
+                 color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 6))
+        make_btn(hdr, "📦 Setup exportieren",
+                 lambda: GrundsetupDialog(self, "export"),
+                 color=ACCENT).pack(side="right", padx=(0, 4))
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(6, 0))
 
         tk.Label(self, text=f"Konfiguration: {CONFIG_PATH}",
@@ -11993,9 +12938,10 @@ class EinstellungenPage(tk.Frame):
         _treeview_sort_setup(self.tree_r, cols_r)
         btn_r = tk.Frame(parent, bg=BG_CARD)
         btn_r.pack(fill="x", padx=20, pady=(0, 8))
-        make_btn(btn_r, "✏ Korrigieren", self._edit_regel, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
-        make_btn(btn_r, "🗑 Löschen",    self._delete_regel, color=DANGER).pack(side="left")
-        make_btn(btn_r, "🔄 Aktualisieren", self._load_regeln, color=BG_INPUT, fg=TEXT).pack(side="right")
+        make_btn(btn_r, "✏ Korrigieren",    self._edit_regel,   color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
+        make_btn(btn_r, "🗑 Löschen",       self._delete_regel, color=DANGER).pack(side="left", padx=(0,6))
+        make_btn(btn_r, "☑ Alle markieren", self._select_all_regeln, color=BG_INPUT, fg=TEXT).pack(side="left")
+        make_btn(btn_r, "🔄 Aktualisieren", self._load_regeln,  color=BG_INPUT, fg=TEXT).pack(side="right")
         self._load_regeln()
 
     def _load_regeln(self):
@@ -12052,13 +12998,26 @@ class EinstellungenPage(tk.Frame):
         make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
         make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
 
+    def _select_all_regeln(self):
+        """Alle sichtbaren Buchungsregeln markieren."""
+        self.tree_r.selection_set(self.tree_r.get_children())
+
     def _delete_regel(self):
         sel = self.tree_r.selection()
         if not sel: return
-        if messagebox.askyesno("Löschen", "Buchungsregel löschen?"):
+        n = len(sel)
+        msg = (f"{n} Buchungsregel(n) wirklich löschen?"
+               if n > 1 else "Buchungsregel löschen?")
+        if messagebox.askyesno("Löschen", msg, parent=self):
+            ids = [int(s) for s in sel]
             conn = get_db()
-            conn.execute("DELETE FROM buchungsregeln WHERE id=?", (int(sel[0]),))
-            conn.commit(); conn.close(); self._load_regeln()
+            try:
+                for rid in ids:
+                    conn.execute("DELETE FROM buchungsregeln WHERE id=?", (rid,))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load_regeln()
 
     # ── Tab: Kostenarten (#85) ────────────────────────────────────────────────
 
@@ -12078,18 +13037,38 @@ class EinstellungenPage(tk.Frame):
         make_btn(btn_k, "＋ Neue Kategorie", self._new_kostenart, color=ACCENT2).pack(side="left", padx=(0,6))
         make_btn(btn_k, "✏ Bearbeiten", self._edit_kostenart, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
         make_btn(btn_k, "🔄 Aktivieren/Deaktivieren", self._toggle_kostenart, color=WARNING, fg=TEXT_WHITE).pack(side="left", padx=(0,6))
-        make_btn(btn_k, "🗑 Löschen", self._delete_kostenart, color=DANGER).pack(side="left")
+        make_btn(btn_k, "🗑 Löschen", self._delete_kostenart, color=DANGER).pack(side="left", padx=(0, 16))
+        # Filter: deaktivierte ohne Verwendung ausblenden (Standard: ein)
+        self._kat_filter_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            btn_k,
+            text="Nur aktive / mit Verwendung",
+            variable=self._kat_filter_var,
+            command=self._load_kostenarten,
+            bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+            activebackground=BG_CARD, selectcolor=BG_INPUT,
+            relief="flat", bd=0
+        ).pack(side="left", padx=(0, 4))
         self._load_kostenarten()
 
     def _load_kostenarten(self):
         for i in self.tree_k.get_children(): self.tree_k.delete(i)
+        nur_aktive = getattr(self, "_kat_filter_var", None)
+        nur_aktive = nur_aktive.get() if nur_aktive else False
         conn = get_db()
         deaktiviert = BuchhaltungPage._deaktivierte_kategorien()
+        sichtbar = 0
+        ausgeblendet = 0
         for idx, kat_name in enumerate(BuchhaltungPage.KATEGORIEN):
             meta = BuchhaltungPage.KOSTENARTEN.get(kat_name, {})
             count = conn.execute(
                 "SELECT COUNT(*) FROM zahlungen WHERE kategorie=?", (kat_name,)
             ).fetchone()[0]
+            ist_deaktiviert = kat_name in deaktiviert
+            # Filter: deaktivierte ohne Verwendung ausblenden
+            if nur_aktive and ist_deaktiviert and count == 0:
+                ausgeblendet += 1
+                continue
             uml = meta.get("umlagefaehig", False)
             if uml is True:
                 uml_str = "✔ Ja"
@@ -12097,8 +13076,8 @@ class EinstellungenPage(tk.Frame):
                 uml_str = "~ Teilweise"
             else:
                 uml_str = "✗ Nein"
-            status = "Deaktiviert" if kat_name in deaktiviert else "Aktiv"
-            tag = "deaktiviert" if kat_name in deaktiviert else ""
+            status = "Deaktiviert" if ist_deaktiviert else "Aktiv"
+            tag = "deaktiviert" if ist_deaktiviert else ""
             self.tree_k.insert("", "end", iid=str(idx), values=(
                 kat_name,
                 meta.get("kategorie", "–"),
@@ -12106,7 +13085,15 @@ class EinstellungenPage(tk.Frame):
                 meta.get("schluessel", "–"),
                 status,
                 count), tags=(tag,) if tag else ())
+            sichtbar += 1
         conn.close()
+        # Info-Zeile: wie viele ausgeblendet
+        if nur_aktive and ausgeblendet > 0:
+            self.tree_k.insert("", "end", iid="__hidden_hint__",
+                values=(f"ℹ {ausgeblendet} deaktivierte Kategorie(n) ohne Verwendung ausgeblendet",
+                        "", "", "", "", ""),
+                tags=("hint_row",))
+            self.tree_k.tag_configure("hint_row", foreground=TEXT_LIGHT)
 
     @staticmethod
     def _umlageschluessel_aus_aufteilungen() -> tuple:
@@ -12501,32 +13488,37 @@ class EinstellungenPage(tk.Frame):
             make_btn(row, "…", browse, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(4,0))
 
     def _save(self):
+        # Aktuellen Dateistand laden, damit Änderungen anderer Methoden
+        # (z. B. _edit_kostenart, _toggle_kostenart, GrundsetupDialog)
+        # nicht durch den veralteten self._cfg überschrieben werden.
+        cfg = load_config()
         iban_keys = {"iban_wohngeld", "iban_ruecklage"}
         for key, var in self._vars.items():
             val = var.get()
             # IBAN ohne Leerzeichen speichern
             if key in iban_keys:
                 val = val.replace(" ", "")
-            self._cfg[key] = val
+            cfg[key] = val
         # KI-Anbieter-Auswahl speichern + ki_aktives_modell synchronisieren
         if hasattr(self, "_ki_anbieter_var"):
             anbieter = self._ki_anbieter_var.get()
-            self._cfg["ki_anbieter"] = anbieter
+            cfg["ki_anbieter"] = anbieter
             # ki_aktives_modell aus Anbieter-Wahl ableiten, damit alle Code-Pfade
             # (Ista, Rechnungen, Kontoauszug) dasselbe Modell verwenden
             if anbieter == "ollama":
-                ollama_m = self._cfg.get("ollama_modell", "").strip() or "llama3.2"
-                self._cfg["ki_aktives_modell"] = f"{ollama_m}  [Ollama]"
+                ollama_m = cfg.get("ollama_modell", "").strip() or "llama3.2"
+                cfg["ki_aktives_modell"] = f"{ollama_m}  [Ollama]"
             else:
-                claude_m = self._cfg.get("ki_modell", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
-                self._cfg["ki_aktives_modell"] = f"{claude_m}  [Anthropic]"
-        save_config(self._cfg)
+                claude_m = cfg.get("ki_modell", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
+                cfg["ki_aktives_modell"] = f"{claude_m}  [Anthropic]"
+        save_config(cfg)
+        self._cfg = cfg   # self._cfg aktuell halten
         # Verzeichnisse für Speicherpfade automatisch anlegen (#38)
         for pk, sd in [("pfad_kontoauszug_import", "Kontoauszüge"),
                        ("pfad_belege", "Belege"),
                        ("pfad_dokumente", "Dokumente"),
                        ("pfad_backup", "Backup")]:
-            p = self._cfg.get(pk, "")
+            p = cfg.get(pk, "")
             if p:
                 try: Path(p).mkdir(parents=True, exist_ok=True)
                 except Exception: pass

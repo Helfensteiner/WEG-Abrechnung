@@ -7,6 +7,298 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.39.4] — 2026-05-02
+
+### Added
+- **AufteilungDialog**: Neuer Aufteilungstyp „Heizkostenverteilung" — zeigt bei Auswahl ein gelbes Hinweis-Label mit Erklärung; `_on_typ_change` behandelt jetzt alle drei Spezialtypen (Wasserkosten, Heizkostenverteilung, Ausgewählte Wohnungen)
+
+---
+
+## [0.39.3] — 2026-05-02
+
+### Added
+- **Grundsetup Export/Import** (`GrundsetupDialog`):
+  - Selektiver Export von Einstellungen + Stammdaten als JSON-Datei
+  - Auswählbare Abschnitte: Stammdaten, Bankdaten, Speicherpfade, Matching, Buchungsregeln, Kostenarten, KI-Konfiguration, Eigentümer, Wohnungen, Mieter
+  - Export nutzt `SELECT *` (schema-robust, keine hardcodierten Spalten)
+  - Import mit `PRAGMA foreign_keys = OFF` während der Transaktion (vermeidet Reihenfolge-Probleme)
+  - Zwei Buttons in Einstellungen-Header: „📦 Setup exportieren" / „📥 Setup importieren"
+
+### Fixed
+- **Rechnungen Mehrfachlöschen**: `kontoauszug_match_log.rechnung_id` FK-Referenz wird jetzt vor `DELETE FROM rechnungen` aufgelöst; alle selektierten IDs werden in Schleife gelöscht (vorher nur `sel[0]`)
+- **Buchungsregeln**: Mehrfachlöschen jetzt korrekt (alle selektierten IDs); neuer Button „☑ Alle markieren"
+- **Kostenarten-Tab**: Checkbox „Nur aktive / mit Verwendung" (Standard: aktiv) blendet deaktivierte Kategorien ohne Verwendungen aus; Info-Zeile zeigt Anzahl ausgeblendeter Einträge
+
+---
+
+## [0.39.1] — 2026-05-02
+
+### Fixed / Rebuilt
+
+- **Hausgeld-Kontrolle komplett neu aufgebaut**
+  - Bisher: Soll = anteilige Jahresausgaben der WEG (durch Vorzeichenfehler immer "ausgeglichen")
+  - Neu: Soll = vereinbarter monatlicher Betrag × Anzahl fälliger Monate
+  - Neues DB-Feld `wohnungen.hausgeld_monatlich` (monatlicher Hausgeld-Betrag pro Wohnung)
+  - Neues Eingabefeld "Monatliches Hausgeld (€)" im Wohnungs-Dialog
+  - Neue Hilfsfunktion `hausgeld_soll_fuer_jahr(conn, jahr)`:
+    - Vergangene Jahre: × 12 Monate
+    - Laufendes Jahr: × aktuelle Monatsnummer (z. B. Mai → × 5)
+    - Eigentümerwechsel innerhalb des Jahres: Pro-Rata-Temporis (tagegenau)
+    - Fallback auf `wohnungen.eigentuemer_id` wenn keine Zeiträume hinterlegt
+  - Spalten: Eigentümer / Soll/Monat / Soll (fällig) / Ist (gezahlt) / Saldo / Status
+  - Status-Ampel: ✔ ausgeglichen (grün) / ⚠ kleiner Rückstand (orange) / ✖ X Monate offen (rot)
+  - Infozeile zeigt fälligen Zeitraum (z. B. "Januar–Mai 2026 – 5 Monate fällig")
+  - Hinweismeldung wenn noch kein Hausgeld in Wohnungen hinterlegt
+
+---
+
+## [0.39.0] — 2026-05-02
+
+### Added
+
+- **Eigentümerwechsel mit Zeiträumen**
+  - Neue DB-Tabelle `eigentuemer_zeitraeume` (Felder: `wohnung_id`, `eigentuemer_id`,
+    `von`, `bis`); `bis = NULL` bedeutet aktueller Eigentümer.
+  - `EigentuemerZeitraumDialog`: zeigt den vollständigen Eigentümerverlauf einer
+    Wohnung, erlaubt das Hinzufügen eines Wechsels (mit Stichtagsangabe) sowie das
+    Löschen einzelner Einträge. Offener Zeitraum wird beim Wechsel automatisch
+    geschlossen (`bis = Stichtag − 1 Tag`). Nach dem Wechsel wird `wohnungen.eigentuemer_id`
+    und `eigentuemer.anteil_prozent` (via `sync_mea_eigentuemer`) aktualisiert.
+  - **„📋 Eigentümerverlauf"-Button** im `WohnungDialog` — erscheint nur bei
+    bestehenden Wohnungen (nicht im Neu-Dialog).
+  - **Pro-Rata-Temporis-Berechnung** `_eigentuemer_anteile_fuer_jahr(conn, jahr)`:
+    berechnet für jedes Jahr den zeitgewichteten MEA-Anteil aller Eigentümer analog
+    zur bestehenden Mieter-Pro-Rata-Logik. Fallback auf `wohnungen.eigentuemer_id`
+    wenn `eigentuemer_zeitraeume` noch leer ist.
+  - **Jahresabgrenzungen aktualisiert**: `_load_wohngeld()`, `_load_weg()` sowie
+    PDF- und HTML-Export der §28-Abrechnung nutzen jetzt `_eigentuemer_anteile_fuer_jahr()`
+    statt des statischen `anteil_prozent`-Felds.
+  - **DB-Migration**: `eigentuemer_zeitraeume` wird beim ersten Start automatisch aus
+    vorhandenen `wohnungen.eigentuemer_id`-Daten befüllt (Startdatum 1900-01-01,
+    offenes Ende).
+
+---
+
+## [0.38.1] — 2026-05-02
+
+### Added
+
+- **Sortierung für alle Tabellen**
+  - Neue generische Hilfsfunktion `_treeview_sort_setup(tree, col_names)`: setzt klickbare
+    Spalten-Header mit ▲/▼-Anzeige auf beliebigen Treeviews.
+  - Sortierung erfolgt client-seitig (in-place `tree.move`), ohne DB-Reload.
+  - Intelligente Sortierschlüssel: deutsches Datumsformat `DD.MM.YYYY`, Währungsbeträge
+    (€), Prozentwerte (%), Promille (‰) werden korrekt numerisch sortiert;
+    Leer- und Stricheinträge (–) werden ans Ende sortiert.
+  - Betrifft 27 Tabellen: DashboardPage, MieterPage, MietpreisPage, EigentümerPage,
+    WohnungenPage, RechnungenPage, WartungPage, NachrichtenPage, DokumentePage,
+    AufteilungenPage, KontoauszugPage (Buchungen + Vorschläge), BuchungsregelPage
+    (Regeln + Kostenarten), BenutzerPage, RollenPage, IstaWärmePage (Abrechnungen +
+    Positionen), NebenkostenPage (§28-Kategorie, §28-Eigentümer, §556-Kategorie,
+    §556-Mieter, Wirtschaftsplan, Verbrauch, Hausgeld-Kontrolle) sowie alle
+    Dialog-Tabellen (Rechnungsdetail, Soll/Ist-Vergleich, Festgestellte Abrechnungen,
+    Matching-Log, Eigentuemer-als-Bewohner).
+
+---
+
+## [0.38.0] — 2026-04-25
+
+### Added
+
+- **Nebenkosten Einzelbuchungen: Sortierung + Löschen**
+  - Alle fünf Spalten (Datum, Beschreibung, Rechnungssteller, Betrag, Relevant) sind
+    per Klick auf den Spalten-Header sortierbar; aktive Sortierrichtung wird mit ▲/▼ angezeigt.
+  - Neuer Button **🗑 Löschen** entfernt die gewählte Buchung mit identischem Kaskaden-Verhalten
+    wie `BuchhaltungPage._delete_buchung`: `kontoauszug.zugeordnet`, `als_buchung_uebernommen`
+    und `zahlung_id` werden zurückgesetzt, anschließend wird die Zahlung gelöscht.
+  - Die übergeordnete "Ausgaben nach Kategorie"-Tabelle wird nach dem Löschen automatisch
+    aktualisiert (`_load_weg()`).
+  - `z.id` wird als Treeview-`iid` gespeichert; Tabelleninhalt wird über `_laden()` geladen
+    und ist damit nach Lösch-/Sortieraktionen vollständig neu aufgebaut.
+
+---
+
+## [0.37.10] — 2026-04-26
+
+### Fix
+
+- **Ista-Import: ValueError bei europäischen Zahlenformaten (#116)**
+  - **Problem**: `ValueError: could not convert string to float: '1397,94'` — KI liefert
+    Zahlen manchmal mit Komma als Dezimaltrennzeichen trotz gegenteiliger Prompt-Anweisung.
+  - **Fix**: Neue Hilfsfunktion `_f()` in `_save_import` ersetzt alle `float()`-Aufrufe.
+    Akzeptiert alle Formate: `1234.56`, `'1.234,56'`, `'1234,56'`, `None`, Integer.
+  - Betrifft alle 15 Zahlenfelder in `ista_positionen` sowie die 3 Gesamtkosten-Felder
+    in `ista_abrechnungen`.
+
+---
+
+## [0.37.9] — 2026-04-26
+
+### Fix
+
+- **Ista-Extraktion: Per-Einheit-Kosten korrekt aus Abschnitt 6 extrahieren (#115)**
+  - **Problem**: KI trug Liegenschafts-Gesamtwerte (4.659,79 € Heizkosten / 985,73 € WW)
+    in jede Nutzerposition ein statt der individuellen Kostenanteile.
+  - **Ursache**: Prompt nannte keine Quelle für `heizkosten_grundkosten`,
+    `heizkosten_verbrauchskosten` und `warmwasserkosten_gesamt` pro Nutzer.
+  - **Fix**: Prompt in zwei klare Ebenen gegliedert:
+    - Liegenschafts-Ebene: einmalige Gesamtwerte des Objekts
+    - Nutzer-Ebene: Abschnitt 2 (Gesamtbetrag je Nutzer) + Abschnitt 6
+      (individuelle Heiz-/WW-Aufschlüsselung) + Abschnitt 9 (HKV-Einheiten)
+  - Explizite Warnung: „NICHT die Liegenschaftssummen verwenden!"
+
+---
+
+## [0.37.8] — 2026-04-26
+
+### Verbesserung
+
+- **GH#114 Auto-Zuordnung via ista-Einheitennummer:**
+  - `_auto_zuordnung()` nutzt jetzt `wohnungen.ista_einheit_nr` als primäres Kriterium.
+  - **3-stufige Priorität**:
+    1. Exakter Treffer: `ista_positionen.ista_einheit_nr == wohnungen.ista_einheit_nr`
+    2. Normalisierter Treffer: führende Nullen, `/0`-Suffix, `WE`/`NE`-Präfixe ignoriert
+       (z.B. `"0003/0"` trifft auf `"3"`)
+    3. Namens-Fallback: Bezeichnungs-Substring-Matching (bisheriges Verhalten)
+  - Ergebnis-Dialog: Aufschlüsselung „X via ista-Nr., Y via Bezeichnung".
+
+### Fix
+
+- **Ista-Extraktion: KI-Prompt – Beispielwerte entfernt (#113)**
+  - **Problem**: Kleine Modelle (z.B. `gemma3:4b`) kopierten die Beispielwerte aus dem
+    JSON-Template unverändert ins Ergebnis (`"Musterstraße 1, 12345 Stadt"`, `1234.56`).
+  - **Ursache**: Das JSON-Schema enthielt realistische Platzhalter statt `null`-Werte.
+  - **Fix**: Alle Beispielwerte im JSON-Schema durch `null` ersetzt.
+  - Feldquellen explizit dokumentiert (`objekt_adresse` ← `Liegenschaftsadresse`,
+    `gesamtkosten_gesamt` ← `Gesamtkosten der Liegenschaft`, etc.).
+  - Falschen 50/50-Split korrigiert → korrekt 30 % Grundkosten / 70 % Verbrauchskosten.
+  - WEG-Gesamtabrechnung-Struktur klar beschrieben (alle Nutzer unter „2. Ihre
+    Nutzeraufstellung", Lauf.Nr.-Format `0001/0`).
+
+---
+
+## [0.37.7] — 2026-04-26
+
+### Neu
+
+- **GH#112 ista-Einheitennummer pro Wohnung:**
+  - Neue Spalte `ista_einheit_nr TEXT` in der Tabelle `wohnungen` (Migration automatisch).
+  - **Wohnungen → Bearbeiten**: neuer Abschnitt „ista Heizkostenabrechnung" mit dem Feld
+    „ista-Einheitennummer (laufende Nr. in der Liegenschaft)".
+  - Wohnungsliste zeigt neue Spalte **ista-Nr.** — so ist die Zuordnung zur
+    ista-Gesamtabrechnung auf einen Blick sichtbar.
+
+---
+
+## [0.37.6] — 2026-04-26
+
+### Fix
+
+- **GH#111 Ista-KI: robustes JSON-Parsing + Ollama-Kontextlimit:**
+  - **Problem**: `gemma3:4b` lieferte JSON mit Trailing-Kommas → `json.loads` schlug fehl.
+  - `_parse_ki_json()`: neue statische Methode die LLM-typische Formatfehler bereinigt:
+    Markdown-Codeblöcke (` ```json ``` `), Trailing-Kommas vor `}` / `]`,
+    einzeilige `//`-Kommentare; extrahiert JSON-Objekt mit Regex aus dem Antworttext.
+  - **Kontextlimit je Anbieter**: Anthropic 40.000 Zeichen (voller Text),
+    Ollama 12.000 Zeichen (kleine Modelle haben begrenztes Kontextfenster).
+
+---
+
+## [0.37.5] — 2026-04-26
+
+### Fix
+
+- **GH#110 Einstellungen: ki_aktives_modell beim Speichern synchronisieren:**
+  - **Ursache**: `ki_aktives_modell` fehlte in der Produktiv-Config komplett, da er nur
+    über das Modell-Dropdown im KI-Assistenten geschrieben wird — nie über die
+    Einstellungsseite. Der Legacy-Fallback kombinierte dann `ki_anbieter=ollama` mit
+    `ki_modell=claude-sonnet-4-6` → HTTP 404.
+  - **Fix**: `EinstellungenPage._save()` leitet `ki_aktives_modell` jetzt automatisch
+    aus der Anbieter-Auswahl ab:
+    - Ollama → `"<ollama_modell>  [Ollama]"`
+    - Anthropic → `"<ki_modell>  [Anthropic]"`
+  - Einstellungen speichern reicht jetzt als einziger Schritt — kein manuelles
+    Setzen im KI-Assistenten mehr nötig.
+
+---
+
+## [0.37.4] — 2026-04-26
+
+### Fix / Verbesserung
+
+- **GH#109 Ista-KI: 0 Einheiten erkannt – Ursache und Fix:**
+  - **Ursache**: `pdf_text[:8000]` schnitt die 18-seitige Abrechnung (36.035 Zeichen)
+    nach Seite 2 ab. Einheiten stehen ab Seite 3 → KI hat nie Einheitendaten gesehen.
+  - **Fix**: Limit auf `[:40000]` erhöht – der gesamte PDF-Text wird jetzt übertragen.
+  - **Prompt-Optimierung**:
+    - Systemrolle explizit: „Experte für ista SE Heizkostenabrechnungen"
+    - ista-spezifische Begriffe: HKE, VKE, Grundkosten 50 %, Nutzungseinheit, WW-Kosten
+    - Vollständiges Beispiel-JSON mit korrekten Datentypen
+    - Explizite Anweisung: „Extrahiere ALLE Wohneinheiten"
+    - Fehlende Werte als `null`, nicht weglassen
+  - `max_tokens`: 2048 → 4096 (mehr Platz für mehrere Einheiten)
+  - Timeout Anthropic-API: 60 s → 90 s (größeres Dokument)
+
+---
+
+## [0.37.3] — 2026-04-26
+
+### Fix
+
+- **GH#108 Ista-KI: immer das in KI-Administration aktive Modell verwenden:**
+  - `_ki_extraktion()` liest jetzt ausschließlich `ki_aktives_modell` (das in
+    KI-Administration ausgewählte Modell) via `KIAssistentPage._parse_modell_auswahl()`.
+  - Kein automatischer Fallback auf anderen Anbieter, kein stilles Umschalten.
+  - Legacy-Fallback (`ki_anbieter` / `ki_modell`) greift nur noch wenn
+    `ki_aktives_modell` noch nicht gesetzt ist.
+
+---
+
+## [0.37.2] — 2026-04-25
+
+### Verbesserung
+
+- **GH#107 „Kostenart ändern" – Selektion-Modus:**
+  - **Buchungen markiert**: Dialog wirkt nur auf die markierten IDs. Voraussetzung: alle
+    markierten Buchungen müssen dieselbe Kostenart haben. Bei gemischter Auswahl erscheint
+    eine Warnung mit den vorhandenen Kategorien.
+  - **Keine Markierung**: Dropdown-Auswahl wie bisher (alle Buchungen einer Kategorie).
+  - Im Dialog zeigt ein blauer Banner den aktiven Modus an. Das „Von"-Feld ist bei
+    Selektion als read-only Label dargestellt (nicht änderbar).
+
+---
+
+## [0.37.1] — 2026-04-25
+
+### Neu
+
+- **GH#106 Filter & Sortierung in Buchhaltung:**
+  - **Filter-Zeile 1**: Typ (Alle/Einnahme/Ausgabe) + Kategorie-Dropdown (mit allen vorhandenen
+    Kategorien) + Jahr-Dropdown (aus tatsächlichen Buchungsdaten).
+  - **Filter-Zeile 2**: Freitext-Suche über Beschreibung, Kategorie, Belegnummer und Datum.
+    Schaltfläche „✕" setzt alle Filter auf einmal zurück.
+  - **Spalten-Sortierung**: Klick auf Spaltenheader wechselt zwischen aufsteigend ▲ und
+    absteigend ▼; aktuell sortierte Spalte wird im Header markiert.
+  - Saldo-Zeile zeigt Anzahl gefundener Einträge wenn ein Filter aktiv ist.
+  - Kategorie- und Jahr-Dropdowns werden nach jeder Buchungsänderung automatisch aktualisiert.
+
+---
+
+## [0.37.0] — 2026-04-25
+
+### Neu
+
+- **GH#105 Bulk-Kostenart-Änderung:**
+  - Neuer Button „🔀 Kostenart ändern" in der Buchungen-Toolbar (`BuchhaltungPage`).
+  - Öffnet einen Dialog mit zwei Dropdowns: „Von Kostenart" (inkl. Buchungsanzahl)
+    und „Nach Kostenart". Zeigt Anzahl betroffener Buchungen als Hinweis an.
+  - Die aktuell markierte Buchung wird als Vorauswahl übernommen.
+  - Nach Bestätigung: `UPDATE zahlungen SET kategorie=? WHERE kategorie=?` für alle
+    betroffenen Einträge. Nützlich z.B. um alle 57 „Nebenkostenvorauszahlung"-Buchungen
+    auf „Hausgeld" umzustellen.
+
+---
+
 ## [0.35.2] — 2026-04-25
 
 ### Fix
