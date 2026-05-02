@@ -7,6 +7,13 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.39.5] — 2026-05-02
+
+### Fixed
+- **Kostenart umbenennen** (Built-in → neuer Name, z. B. „Wasser/Abwasser" → „Wasser"): Nach Neustart wurde der neue Name fälschlicherweise selbst deaktiviert und der alte Built-in-Name wieder aktiv angezeigt. Ursache: Die nachgelagerte „Deaktivierung auf neuen Namen übertragen"-Logik griff auch bei frisch deak­tivierten Built-ins. Fix: Dieser Block läuft jetzt nur noch für bereits vorhandene Custom-Kategorien; bei Built-ins wird stattdessen der alte Name deaktiviert und der neue Name explizit von der Deaktivierungsliste ferngehalten.
+
+---
+
 ## [0.39.4] — 2026-05-02
 
 ### Added

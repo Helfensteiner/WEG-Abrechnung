@@ -367,7 +367,9 @@ from pathlib import Path
 #             Kostenarten-Tab: Filter "Nur aktive / mit Verwendung" (Standard: an).
 # 0.39.4    — AufteilungDialog: neuer Aufteilungstyp "Heizkostenverteilung" mit
 #             gelbem Hinweis-Label; _on_typ_change für alle 3 Spezialtypen erweitert.
-APP_VERSION = "0.39.4"
+# 0.39.5    — Bugfix _edit_kostenart: Umbenennung Built-in-Kategorie persistiert jetzt
+#             nach Neustart korrekt (deaktivierte_kategorien-Logik war vertauscht).
+APP_VERSION = "0.39.5"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -13280,18 +13282,20 @@ class EinstellungenPage(tk.Frame):
             if existing_idx is not None:
                 # War bereits eine Custom-Kategorie → Namen + Meta ersetzen
                 custom[existing_idx] = {"name": neuer_name, **neue_meta}
+                # Falls alter Custom-Name in deaktivierte_kategorien war,
+                # Deaktivierung auf neuen Namen übertragen
+                deakt = set(cfg.get("deaktivierte_kategorien", []))
+                if kat_name in deakt and neuer_name != kat_name:
+                    deakt.discard(kat_name)
+                    deakt.add(neuer_name)
+                    cfg["deaktivierte_kategorien"] = sorted(deakt)
             else:
                 # War eine Built-in-Kategorie → als Custom-Eintrag mit neuem Namen anlegen
-                # und alten Namen deaktivieren (damit er nicht doppelt erscheint)
+                # und den alten Built-in-Namen deaktivieren (damit er nicht doppelt erscheint)
                 custom.append({"name": neuer_name, **neue_meta})
                 deakt = set(cfg.get("deaktivierte_kategorien", []))
-                deakt.add(kat_name)
-                cfg["deaktivierte_kategorien"] = sorted(deakt)
-            # Falls alter Name in deaktivierte_kategorien, auf neuen umschreiben
-            deakt = set(cfg.get("deaktivierte_kategorien", []))
-            if kat_name in deakt and neuer_name != kat_name:
-                deakt.discard(kat_name)
-                deakt.add(neuer_name)
+                deakt.add(kat_name)          # alten Built-in-Namen verbergen
+                deakt.discard(neuer_name)    # neuen Namen NICHT deaktivieren
                 cfg["deaktivierte_kategorien"] = sorted(deakt)
             cfg["custom_kategorien"] = custom
             save_config(cfg)
