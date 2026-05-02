@@ -7,6 +7,237 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.23.0] — 2026-04-18
+
+### Hinzugefügt
+- **#64 Wasserkosten – Mietzeiträume (Pro-Rata-Berechnung):**
+  - Neue Hilfsmethode `WasserkostenPage._calc_monate_im_jahr(einzug, auszug, jahr)`:
+    Berechnet anteilige Monate eines Mieters im Abrechnungsjahr tagesgenau
+  - `_import_wohnungen()` komplett neu: Erstellt separate DB-Zeile **pro Mieter**
+    (nicht mehr pro Wohnung); bei Mieterwechsel im Jahr erscheinen beide Mieter
+    mit korrekt berechneten Pro-Rata-Monaten
+  - `_wohnung_dialog()`: Von/Bis-Datum-Felder mit automatischer Monatsberechnung
+    (via `trace_add`); speichert `von_datum`, `bis_datum` in DB
+  - `_load_punkte()`: Anzeige mit Zeitraum-Suffix `[YYYY-MM-DD→YYYY-MM-DD]`
+
+- **#65 Mehrere Buchungen auf eine Rechnung (Abschlagszahlungen):**
+  - Neue DB-Spalte `zahlungen.rechnung_id INTEGER` (FK auf `rechnungen.id`)
+  - `ZahlungDialog`: Neue Sektion „Rechnung zuordnen (optional)" mit Dropdown
+    aller offener/teilbezahlter Rechnungen
+  - `_on_save()` speichert `rechnung_id`, INSERT/UPDATE SQL erweitert
+  - `RechnungenPage`: Tab „Rechnungen zuordnen" mit `BuchungZuordnenDialog`
+    zeigt Soll/Haben/Differenz live-farbkodiert
+
+- **#66 Rechnungsverwaltung (Doppelte Buchführung / GoB):**
+  - Neue DB-Tabelle `rechnungen` (Verbindlichkeiten-Journal): `id`,
+    `rechnungsnummer`, `rechnungssteller`, `rechnungsdatum`, `faelligkeitsdatum`,
+    `betrag_brutto`, `betrag_netto`, `mwst_satz`, `mwst_betrag`, `lohnanteil`,
+    `kategorie`, `beschreibung`, `beleg_dateipfad`, `status`, `zugferd_format`
+  - Neue Seite **`RechnungenPage`** (Navigation: „🧾 Rechnungen"):
+    - Treeview: Nr., Steller, Datum, Brutto €, Gebucht €, Differenz €, Status, Kategorie
+    - Farb-Kodierung: grün (offen/Forderung), rot (Überzahlung), schwarz (bezahlt)
+    - KPI-Leiste: Rechnungen gesamt, Bezahlt, Noch offen, Offene Rechnungen
+    - CRUD: Neu / Bearbeiten / Löschen / Buchung zuordnen / Buchungen anzeigen
+  - Neue Klasse **`RechnungDialog`**: Formular mit allen Rechnungsfeldern,
+    Beleg-Import mit ZUGFeRD/xRechnung-Autoerkennung
+  - Neue Klasse **`BuchungZuordnenDialog`**: Zuordnung von Buchungen zu Rechnungen
+    per Doppelklick; zeigt zugeordnete und nicht zugeordnete Buchungen
+  - **ZUGFeRD (Factur-X / CII)** XML-Parser: `_parse_zugferd_cii(xml_bytes)` —
+    Extraktion aus eingebetteten PDFs via `_extrahiere_zugferd_aus_pdf()`
+  - **xRechnung (UBL 2.1)** XML-Parser: `_parse_xrechnung_ubl(xml_bytes)`
+  - Fallback-Kette: ZUGFeRD XML → xRechnung UBL → KI-OCR → Manuelle Eingabe
+  - WEG Skill `weg-buchfuehrung/SKILL.md` angelegt mit GoB-Grundsätzen,
+    Buchungssätzen, DB-Schema, ZUGFeRD/xRechnung-Namespaces
+
+---
+
+## [0.22.0] — 2026-04-12
+
+### Hinzugefügt
+- **#58 Buchung – erweiterte Rechnungsinformationen:**
+  - Neue DB-Spalten: `rechnungsnummer`, `gesamtrechnungsbetrag`, `lohnanteil`,
+    `handwerker_steuerlich` (INTEGER, §35a EStG Flag)
+  - `ZahlungDialog` – neue Felder in Sektion „Rechnungsinformationen":
+    Rechnungsnummer, Gesamtrechnungsbetrag €, Lohnanteil €, Checkbox
+    „§35a EStG – Handwerkerleistung steuerlich absetzbar"
+  - **Auto-Status „Geprüft"**: wenn Betrag == Gesamtrechnungsbetrag UND
+    Belegnummer == Rechnungsnummer, wird der Status automatisch auf „Geprüft" gesetzt
+  - `_ki_felder_befuellen`: Datum und Betrag werden durch KI nicht mehr überschrieben,
+    wenn das Feld bereits ausgefüllt ist
+
+- **#59 Mieter – NK-Vorauszahlung mit Zeiträumen (§556 BGB):**
+  - Neue Tabelle `nk_vorauszahlung_zeitraeume` mit Von/Bis-Datum und Monatsbetrag
+  - Neue Klasse `NKZeitraumDialog`: Verwaltung der Zeiträume mit Überschneidungscheck
+  - „📅 NK-Zeiträume verwalten"-Button im `MieterDialog` (bei bestehenden Mietern)
+  - Hilfsfunktion `nk_vorauszahlung_fuer_jahr(mieter_id, jahr, fallback)`: berechnet
+    tagesgenau die gewichtete Jahres-Vorauszahlung aus den Zeiträumen (Pro-Rata-Temporis);
+    Fallback auf `nebenkosten_vorauszahlung × 12` wenn keine Zeiträume definiert
+  - §556 BGB Abrechnung nutzt `nk_vorauszahlung_fuer_jahr()` statt statischem Wert
+
+- **#60 Ista – Abrechnungsjahr aktualisiert Zeitraum automatisch:**
+  - `trace_add` auf `abrechnungsjahr`-Feld in `_manuell_erfassen_komplett`:
+    Ändert Zeitraum-von/bis automatisch auf `{Jahr}-01-01` / `{Jahr}-12-31`
+
+- **#62 Ista – „Alle Wohnungen laden" filtert nach Abrechnungsjahr:**
+  - Liest Abrechnungsjahr aus Formular, fragt Mieter mit Überschneidungs-Filter
+    (`einzug ≤ {Jahr}-12-31` UND `auszug ≥ {Jahr}-01-01`) ab
+  - Bei Mieterwechsel im Jahr erscheinen beide Mieter als separate Zeilen
+
+- **#63 Wasserkosten – „Aus Stamm" aktualisiert bestehende Einträge:**
+  - `_import_wohnungen` verwendet jetzt `UPDATE` für vorhandene Zeilen (Stammdaten-Sync)
+    statt nur neue Zeilen einzufügen; Meldung zeigt „X neu hinzugefügt, Y aktualisiert"
+  - `_jahr_var.trace_add`: Jahreswechsel löst automatisch `_refresh()` aus
+
+### Behoben
+- **#61 Ista – Liegenschaftsnummer statt Auftragsnummer:**
+  - Label „Ista-Auftragsnummer" → **„Liegenschaftsnummer"** im manuellen Erfassungsdialog
+    und in den KI-Prompts (DB-Spalte `ista_auftragsnummer` bleibt unverändert)
+
+---
+
+## [0.21.0] — 2026-04-11
+
+### Hinzugefügt
+- **#56 Buchungsdatum & Rechnungsdatum:** Die `zahlungen`-Tabelle erhält eine neue
+  Spalte `rechnungsdatum`. Der `ZahlungDialog` ist neu strukturiert:
+  - Oberer Bereich: **Buchungsdatum** (klar als solches bezeichnet), Typ, Betrag,
+    Kategorie, Beschreibung, Belegnummer, Status, Abrechnungsjahr
+  - Neue Sektion **„Rechnungsinformationen"**: Rechnungsdatum + Rechnungssteller
+    (zusammengefasst für Transparenz zwischen Buchungs- und Rechnungsdatum)
+  - Buchungsliste: Spaltenbezeichnung „Datum" → **„Buchungsdatum"** (#56-AC3)
+
+### Behoben
+- **#57 Aufteilung ↔ Kostenarten:** Neue Hilfsmethode
+  `BuchhaltungPage._umlageschluessel_aus_aufteilungen()` liest aktive Einträge
+  aus der `aufteilungen`-Tabelle (Spalte `typ`) und liefert eine dynamische
+  Liste für den Umlageschlüssel-Dropdown in Kostenkategorien. Neue Aufteilungstypen
+  erscheinen automatisch in den Kostenarten-Dialogen. Basis-Schlüssel (MEA,
+  Wohnfläche, Verbrauch, HeizKV, Wasserkosten nach Punkten …) bleiben immer
+  verfügbar als Fallback.
+
+---
+
+## [0.20.1] — 2026-04-11
+
+### Hinzugefügt
+- **#55 ISTA-Werte manuell erfassen:** Neuer Button „✏️ Manuell erfassen" direkt im
+  Ista-Wärmeabrechnung-Header. Öffnet einen vollständigen Dialog mit:
+  - **Gesamtwerte** (Heizkosten, Warmwasser, Gesamt, Zeitraum, Adresse, Auftragsnummer)
+  - **Positionen pro Wohnung/Mieter** – beliebig viele Zeilen, jede mit Heizkosten,
+    Warmwasser, Gesamt, Vorauszahlung und Nachzahlung/Guthaben. Auto-Berechnung
+    Gesamt = Heizung + Warmwasser.
+  - **„📋 Alle Wohnungen laden"** – übernimmt alle aktiven Wohnungen inkl. Bewohner-
+    name aus der Datenbank als Startpunkt.
+  - **Plausibilitätsprüfung** (#55-AC3): Vergleich Summe Positionen vs. Gesamtwerte
+    mit farbiger Rückmeldung (grün/gelb/rot). Warnung bei Speichern mit Abweichung.
+  - Scrollbarer Dialog mit Mausrad-Unterstützung.
+- Der bisherige „✏️ Manuell eingeben"-Button nach fehlgeschlagenem PDF-Import
+  öffnet jetzt ebenfalls diesen vollständigen Dialog.
+
+---
+
+## [0.20.0] — 2026-04-10
+
+### Hinzugefügt
+- **#51 WohnungDialog vereinfacht:** Balkon, Terrasse, Garten, Stellplatz und
+  Carport werden jetzt als einzelnes Dropdown (0–5) eingegeben statt als
+  Ja/Nein-Checkbox + separates Anzahlfeld. Rückwärtskompatible Synchronisation
+  der alten `*_anzahl`-Spalten.
+- **#52 ISTA Bild-PDF-Import:** Gescannte/Bild-PDFs (weniger als 100 Zeichen
+  extrahierbarer Text) werden automatisch erkannt und per Anthropic Vision API
+  als base64-Document-Block analysiert. Fallback auf Text-Extraktion bei
+  normalen PDFs.
+- **#53 KI-Protokoll Detail-Dialog:** Doppelklick oder „🔍 Details anzeigen"-
+  Button öffnet Protokolleinträge in einem eigenen Dialog mit allen Feldern
+  (Eingabe, Ergebnis, Fehler) in voller Länge. „📋 Kopieren"-Button kopiert
+  die ausgewählte Zeile in die Zwischenablage. Versteckte ID-Spalte für
+  eindeutige Selektion.
+- **#54 Buchungsregeln-Spalte umbenannt:** „Muster" → „Auftraggeber / Empfänger"
+  für bessere Verständlichkeit.
+
+---
+
+## [0.19.2] — 2026-04-09
+
+### Behoben
+- **einstellungen.json wurde nicht angelegt:** Bei frischer Installation (ohne
+  alte Dateien) wurde `daten/einstellungen.json` nicht erzeugt, weil die
+  Migration nur kopierte, aber keine Standarddatei anlegte. Jetzt erstellt
+  `_init_data_dir()` beim Start automatisch eine `einstellungen.json` mit
+  sinnvollen Standardwerten (DB-Pfad, Belege, Dokumente, Backup-Ordner).
+- **Fehler bei Migration werden sichtbar geloggt** (print auf Konsole statt
+  stilles `except: pass`).
+
+---
+
+## [0.19.1] — 2026-04-08
+
+### Geändert
+- **Speicherorte vereinheitlicht:** `hausverwaltung.db` und `einstellungen.json`
+  liegen jetzt standardmäßig im Unterordner `daten/` neben der `hausverwaltung.py`
+  (statt `~/hausverwaltung.db` bzw. `einstellungen.json` im App-Verzeichnis).
+- **Netzlaufwerk-Unterstützung:** Der DB-Pfad kann über *Einstellungen →
+  Datenbankdatei* frei gewählt werden (z. B. ein Netzlaufwerk). Änderungen
+  werden sofort ohne Neustart wirksam, da `get_db()` den Pfad bei jedem
+  Verbindungsaufbau neu aus der Konfiguration liest.
+- **Automatische Migration:** Vorhandene `~/hausverwaltung.db` und
+  `einstellungen.json` im App-Verzeichnis werden beim ersten Start nach
+  `daten/` kopiert, falls dort noch keine Datei liegt.
+
+---
+
+## [0.19.0] — 2026-04-08
+
+### Behoben
+- **#50** Bug: Neue Wohnungen wurden beim Klick auf „Speichern" nicht persistiert.
+  Ursache: `WohnungenPage._new()` referenzierte `v["miteigentumsanteil"]`, ein Feld
+  das im `WohnungDialog` nie angelegt wurde → KeyError verschluckte den INSERT.
+  Fix: zentrales `_save_values()` mit Spaltenliste `_COLS`, Fehler werden jetzt
+  per Messagebox angezeigt statt still verschluckt.
+
+### Neu
+- **#48** Wohnfläche und Nutzfläche laut Aufteilungsplan
+  - Neue Spalte `wohnflaeche_qm` (Wohnfläche, MEA-relevant)
+  - Spalte `nutzflaeche_qm` bleibt für nicht-MEA-relevante Flächen
+  - Live-MEA-Kontrollwert im Dialog: 1000 × Wohnfläche / Σ aktive Wohnflächen
+  - Neue Spalte „MEA-Kontr. ‰" in der Wohnungsübersicht
+- **#49** Balkon / Terrasse / Garten / Stellplatz / Carport mit Anzahl
+  - Neue Spalten: `balkon_anzahl`, `terrasse(_anzahl)`, `garten(_anzahl)`,
+    `stellplatz_anzahl`, `carport(_anzahl)`
+- **#50** Wohnung deaktivieren / reaktivieren (Soft-Delete)
+  - Neue Spalte `aktiv` (Default 1)
+  - Buttons „⊘ Deaktivieren" und „↺ Reaktivieren"
+  - Deaktivierte Wohnungen nur für Benutzer mit Löschrecht sichtbar
+
+---
+
+## [0.18.0] — 2026-04-06
+
+### KI-Protokoll, KI-Training und Speicherpfade
+
+#### fix #45 – KI-Protokolle werden jetzt tatsächlich erstellt
+- Neue Hilfsfunktion `_lade_ki_training(bereich)` für einheitlichen DB-Zugriff auf ki_training
+- `ki_log()` wird jetzt in allen KI-Operationen aufgerufen:
+  - `ZahlungDialog._ki_analyse_thread()` → Bereich "Beleg-Analyse"
+  - `KIAssistentPage._anthropic_call_thread()` → Bereich "KI-Assistent"
+  - `KIAssistentPage._ollama_call_thread()` → Bereich "KI-Assistent"
+  - `IstaImportPage._ki_extrahieren()` → Bereich "Ista-Extraktion"
+- Protokoll-Tab: Bereich-Filter aktualisiert (Beleg-Analyse, Ista-Extraktion, KI-Assistent)
+
+#### fix #46 – KI-Training-Daten werden in KI-Prompts verwendet
+- `_lade_ki_training()` wird vor jedem API-Call aufgerufen
+- `system_zusatz` wird dem System-Prompt vorangestellt
+- `feld_hinweise` werden als "Zusätzliche Hinweise" an den Benutzer-Prompt angehängt
+- Training-Tab: Bereiche auf tatsächlich genutzte Werte aktualisiert (KI-Assistent, Beleg-Analyse, Ista-Extraktion)
+- Beschreibungstext erklärt welcher Bereich wo verwendet wird
+
+#### feat #47 – Belege & Dokumente Speicherpfad-Logik
+- `ZahlungDialog._browse_beleg()`: öffnet File-Dialog mit `pfad_belege` als Startordner, kopiert Datei dorthin wenn sie von außen stammt
+- `ZahlungDialog._beleg_dateiname_generieren()`: Zielordner ist jetzt `pfad_belege` statt Quelldatei-Verzeichnis
+- `DokumentDialog._browse()`: öffnet File-Dialog mit `pfad_dokumente` als Startordner, kopiert Datei dorthin
+
+---
+
 ## [0.17.1] — 2026-04-06
 
 ### Bugfix

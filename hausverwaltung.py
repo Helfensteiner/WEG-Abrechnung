@@ -72,9 +72,52 @@ from pathlib import Path
 #                 📎-Indikator in Buchungstabelle, "Beleg öffnen"-Button;
 #             #28 Einstellungen: 4-Tab-Layout (Stammdaten, Bankdaten, Speicherpfade, KI-Administration)
 #                 mit Ollama-Integration und Anbieter-Auswahl
-APP_VERSION = "0.17.1"
+#   0.23.0 — Issues #64, #65, #66: Doppelte Buchführung (GoB) + Rechnungsverwaltung:
+#             #64 Wasserkosten Mietzeiträume: Pro-Rata-Monatsberechnung bei Mieterwechsel;
+#                 _calc_monate_im_jahr(), _import_wohnungen() neu, von_datum/bis_datum in Dialog;
+#             #65 Mehrere Buchungen auf Rechnung: rechnung_id FK in zahlungen; Rechnungen-Tab
+#                 zeigt Soll/Haben/Differenz farbkodiert; BuchungZuordnenDialog;
+#             #66 Rechnungsverwaltung: neue RechnungenPage + RechnungDialog; ZUGFeRD (CII XML)
+#                 und xRechnung (UBL 2.1) Import; KI-OCR Fallback; Navigation "🧾 Rechnungen"
+APP_VERSION = "0.23.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
+#   0.22.0 — Issues #58–#63:
+#             #58 Buchung Rechnungsinformationen: rechnungsnummer, gesamtrechnungsbetrag,
+#                 lohnanteil, handwerker_steuerlich (§35a EStG) als neue DB-Spalten;
+#                 ZahlungDialog um diese Felder erweitert; Auto-Status „Geprüft" wenn
+#                 Betrag == Gesamtrechnungsbetrag UND Belegnr == Rechnungsnummer;
+#                 _ki_felder_befuellen: datum + betrag nur überschreiben wenn noch leer.
+#             #59 Mieter NK-Vorauszahlung mit Zeiträumen: neue Tabelle
+#                 nk_vorauszahlung_zeitraeume; NKZeitraumDialog für Verwaltung;
+#                 nk_vorauszahlung_fuer_jahr() Hilfsfunktion (Pro-Rata-Temporis);
+#                 §556 BGB Berechnung nutzt Zeitraum-basierte Vorauszahlungen.
+#             #60 Ista-Abrechnungsjahr: Trace auf Abrechnungsjahr-Feld aktualisiert
+#                 Zeitraum-von/bis automatisch auf 01-01 / 12-31.
+#             #61 Ista-Auftragsnummer → Liegenschaftsnummer (Label + KI-Prompts).
+#             #62 „Alle Wohnungen laden" filtert Mieter nach Abrechnungsjahr;
+#                 separate Zeile je Mieter bei Mieterwechsel im Jahr.
+#             #63 Wasserkosten „Aus Stamm": UPDATE bestehende Zeilen statt nur INSERT;
+#                 _jahr_var trace_add für automatische Aktualisierung bei Jahreswechsel.
+#   0.21.0 — Issues #56, #57:
+#             #56 Buchungsdatum + Rechnungsdatum: zahlungen.rechnungsdatum (ALTER TABLE),
+#                 ZahlungDialog umstrukturiert — Buchungsdatum oben, Sektion
+#                 „Rechnungsinformationen" mit Rechnungsdatum + Rechnungssteller (#35/#56).
+#                 BuchhaltungPage Spalte „Datum" → „Buchungsdatum".
+#             #57 Aufteilung ↔ Kostenarten: _umlageschluessel_aus_aufteilungen() liest
+#                 aktive aufteilungen.typ aus DB; _new_kostenart/_edit_kostenart nutzen
+#                 dynamische Liste statt hardcodierter Werte.
+#   0.20.1 — Issue #55: Ista-Werte manuell erfassen (_manuell_erfassen_komplett):
+#             Gesamtwerte + Positionen pro Wohnung, „Alle Wohnungen laden"-Button,
+#             Plausibilitätsprüfung (Summe Positionen vs. Gesamtwerte) mit Farbstatus.
+#   0.20.0 — Issues #51–#54:
+#             #51 WohnungDialog: Balkon/Terrasse/Garten/Stellplatz/Carport als Dropdown 0-5
+#                 statt Ja/Nein + separate Anzahlfelder; vereinfachte Eingabe.
+#             #52 ISTA PDF-Import: Bild-/Scan-PDFs per Anthropic Vision API (base64 Document-Block)
+#                 analysieren; automatische Erkennung von gescannten vs. Text-PDFs.
+#             #53 KI-Protokoll: Detail-Dialog (Doppelklick/Button), Kopieren-Funktion,
+#                 versteckte ID-Spalte für eindeutige Selektion.
+#             #54 Buchungsregeln: Spalte „Muster" → „Auftraggeber / Empfänger" für Klarheit.
 #   0.16.0 — Issues #38–#41:
 #             #38 Default Speicherpfade: get_pfad() anlegt Unterordner automatisch,
 #                 _get_default_import_dir, DokumentePage, EinstellungenPage.
@@ -181,12 +224,52 @@ def _git_info() -> dict:
     return info
 
 
-DB_PATH = Path.home() / "hausverwaltung.db"
+# ── Pfad-Setup ──────────────────────────────────────────────────────────────
+# v0.20.0: DB + Konfiguration liegen standardmäßig im Unterordner "daten"
+# neben der hausverwaltung.py. Der DB-Pfad ist über die Einstellungen
+# anpassbar (z. B. auf ein Netzlaufwerk).
 
-# ── Konfiguration ───────────────────────────────────────────────────────────
+APP_DIR = Path(__file__).parent                # Verzeichnis der Programmdatei (#38)
+DATA_DIR = APP_DIR / "daten"                   # Standard-Datenverzeichnis
 
-CONFIG_PATH = Path(__file__).parent / "einstellungen.json"
-APP_DIR = Path(__file__).parent  # Verzeichnis der Programmdatei (#38)
+DEFAULT_DB_PATH = DATA_DIR / "hausverwaltung.db"
+CONFIG_PATH = DATA_DIR / "einstellungen.json"
+
+def _init_data_dir():
+    """Erstellt daten/-Verzeichnis, migriert alte Dateien und legt eine
+    Standard-einstellungen.json an falls noch keine existiert."""
+    import shutil as _sh
+    # 1. Verzeichnis sicherstellen
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 2. Alte Dateien migrieren (v0.19.0 und früher)
+    _old_config = APP_DIR / "einstellungen.json"
+    _old_db_home = Path.home() / "hausverwaltung.db"
+
+    if _old_config.exists() and not CONFIG_PATH.exists():
+        _sh.copy2(str(_old_config), str(CONFIG_PATH))
+        print(f"[Migration] {_old_config} → {CONFIG_PATH}")
+
+    if _old_db_home.exists() and not DEFAULT_DB_PATH.exists():
+        _sh.copy2(str(_old_db_home), str(DEFAULT_DB_PATH))
+        print(f"[Migration] {_old_db_home} → {DEFAULT_DB_PATH}")
+
+    # 3. Garantiert eine einstellungen.json anlegen (Standardwerte)
+    if not CONFIG_PATH.exists():
+        default_cfg = {
+            "pfad_datenbank": str(DEFAULT_DB_PATH),
+            "pfad_belege": str(APP_DIR / "Belege"),
+            "pfad_dokumente": str(APP_DIR / "Dokumente"),
+            "pfad_backup": str(DATA_DIR / "backups"),
+        }
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(default_cfg, indent=2, ensure_ascii=False, fp=f)
+        print(f"[Init] Standardkonfiguration angelegt: {CONFIG_PATH}")
+
+try:
+    _init_data_dir()
+except Exception as _e:
+    print(f"[Warnung] daten/-Verzeichnis konnte nicht initialisiert werden: {_e}")
 
 def load_config():
     if CONFIG_PATH.exists():
@@ -198,8 +281,36 @@ def load_config():
     return {}
 
 def save_config(cfg: dict):
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+def get_db_path() -> Path:
+    """Liefert aktuellen DB-Pfad: Config 'pfad_datenbank' oder Standard (daten/hausverwaltung.db)."""
+    try:
+        cfg = load_config()
+        p = cfg.get("pfad_datenbank", "")
+        if p:
+            pp = Path(p).expanduser()
+            # Falls nur ein Verzeichnis angegeben wurde → Dateiname anhängen
+            if pp.is_dir():
+                pp = pp / "hausverwaltung.db"
+            try:
+                pp.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            return pp
+    except Exception:
+        pass
+    return DEFAULT_DB_PATH
+
+# DB_PATH wird initial ausgewertet; zur Laufzeit wird stets get_db_path()
+# verwendet, damit Änderungen in den Einstellungen (z. B. Netzlaufwerk)
+# ohne Neustart wirksam werden.
+DB_PATH = get_db_path()
 
 def get_pfad(schluessel: str, standard_unterordner: str) -> str:
     """Gibt den konfigurierten Pfad zurück oder legt einen Standard-Unterordner an.
@@ -239,6 +350,20 @@ def ki_log(bereich: str, aktion: str, eingabe: str = "", ergebnis: str = "",
         conn.close()
     except Exception:
         pass  # Protokollierung darf nie die App blockieren
+
+def _lade_ki_training(bereich: str) -> tuple:
+    """Gibt (feld_hinweise, system_zusatz) aus der ki_training-Tabelle zurück (#46)."""
+    try:
+        conn = get_db()
+        r = conn.execute(
+            "SELECT feld_hinweise, system_zusatz FROM ki_training WHERE bereich=?",
+            (bereich,)).fetchone()
+        conn.close()
+        if r:
+            return r["feld_hinweise"] or "", r["system_zusatz"] or ""
+    except Exception:
+        pass
+    return "", ""
 
 # ── Berechtigungen ──────────────────────────────────────────────────────────
 
@@ -348,7 +473,7 @@ WEG_EINLAGE_KATEGORIEN = {"Erhaltungsrücklage", "Sonderumlage"}
 # ── Datenbank ────────────────────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(str(get_db_path()))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")  # Referentielle Integrität erzwingen
     return conn
@@ -654,6 +779,14 @@ CREATE TABLE IF NOT EXISTS ki_training (
     geaendert_am DATETIME DEFAULT CURRENT_TIMESTAMP,
     geaendert_von INTEGER
 );
+CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mieter_id INTEGER NOT NULL,
+    beginn_datum DATE NOT NULL,
+    ende_datum DATE,
+    betrag REAL NOT NULL,
+    FOREIGN KEY (mieter_id) REFERENCES mieter(id) ON DELETE CASCADE
+);
 """)
     conn.commit()
     # Indizes für häufig abgefragte Spalten (IF NOT EXISTS = idempotent)
@@ -720,6 +853,14 @@ CREATE TABLE IF NOT EXISTS ki_training (
         "ALTER TABLE zahlungen ADD COLUMN abrechnungsrelevant INTEGER DEFAULT 1",
         "ALTER TABLE zahlungen ADD COLUMN abrechnungsjahr INTEGER",
         "ALTER TABLE zahlungen ADD COLUMN kommentar_abrechnung TEXT",
+        "ALTER TABLE zahlungen ADD COLUMN rechnungsdatum DATE",  # #56 Rechnungsdatum
+        "CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (id INTEGER PRIMARY KEY AUTOINCREMENT, mieter_id INTEGER NOT NULL, beginn_datum DATE NOT NULL, ende_datum DATE, betrag REAL NOT NULL)",  # #59
+        "ALTER TABLE zahlungen ADD COLUMN rechnungsnummer TEXT",  # #58
+        "ALTER TABLE zahlungen ADD COLUMN gesamtrechnungsbetrag REAL",  # #58
+        "ALTER TABLE zahlungen ADD COLUMN lohnanteil REAL",  # #58
+        "ALTER TABLE zahlungen ADD COLUMN handwerker_steuerlich INTEGER DEFAULT 0",  # #58 §35a EStG
+        "ALTER TABLE zahlungen ADD COLUMN rechnung_id INTEGER",  # #65 Mehrere Buchungen auf eine Rechnung
+        "CREATE TABLE IF NOT EXISTS rechnungen (id INTEGER PRIMARY KEY AUTOINCREMENT, rechnungsnummer TEXT, rechnungssteller TEXT NOT NULL, rechnungsdatum DATE, faelligkeitsdatum DATE, betrag_brutto REAL NOT NULL DEFAULT 0, betrag_netto REAL, mwst_satz REAL DEFAULT 19.0, mwst_betrag REAL, lohnanteil REAL, kategorie TEXT, beschreibung TEXT, beleg_dateipfad TEXT, status TEXT DEFAULT 'Offen', zugferd_format TEXT, erstellt_am DATETIME DEFAULT CURRENT_TIMESTAMP)",  # #66
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_min REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN betrag_max REAL",
         "ALTER TABLE buchungsregeln ADD COLUMN konfidenz REAL DEFAULT 0.5",
@@ -730,6 +871,19 @@ CREATE TABLE IF NOT EXISTS ki_training (
         "ALTER TABLE aufteilungen ADD COLUMN aktiv INTEGER DEFAULT 1",  # #39
         "ALTER TABLE aufteilungen ADD COLUMN ist_benutzerdefiniert INTEGER DEFAULT 0",  # #39
         "ALTER TABLE buchungsregeln ADD COLUMN keywords TEXT",  # #40
+        # v0.19.0 – #48 Wohnfläche/Nutzfläche
+        "ALTER TABLE wohnungen ADD COLUMN wohnflaeche_qm REAL",
+        # v0.19.0 – #49 Balkon/Terrasse/Garten/Stellplatz/Carport mit Anzahl
+        "ALTER TABLE wohnungen ADD COLUMN balkon_anzahl INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN terrasse INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN terrasse_anzahl INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN garten INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN garten_anzahl INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN stellplatz_anzahl INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN carport INTEGER DEFAULT 0",
+        "ALTER TABLE wohnungen ADD COLUMN carport_anzahl INTEGER DEFAULT 0",
+        # v0.19.0 – #50 Soft-Delete Wohnung
+        "ALTER TABLE wohnungen ADD COLUMN aktiv INTEGER DEFAULT 1",
     ]:
         try:
             c.execute(sql)
@@ -1634,6 +1788,224 @@ class MieterPage(tk.Frame):
         make_btn(btn_row, "✔ Übernehmen", _uebernehmen, color=ACCENT2).pack(side="right")
 
 
+# ── #59 Hilfsfunktion: NK-Vorauszahlung aus Zeiträumen ───────────────────────
+
+def nk_vorauszahlung_fuer_jahr(mieter_id: int, jahr: int,
+                                fallback_monatlich: float = 0.0) -> float:
+    """Berechnet die gewichtete NK-Vorauszahlung für ein Abrechnungsjahr.
+
+    Für jeden Zeitraum, der das Jahr überlappt, wird der tagesgenaue Anteil
+    berechnet (Pro-Rata-Temporis). Wenn keine Zeiträume vorhanden sind,
+    wird der Fallback-Wert × 12 verwendet.
+    """
+    from datetime import date as _date
+    try:
+        conn = get_db()
+        try:
+            reihen = conn.execute(
+                "SELECT beginn_datum, ende_datum, betrag "
+                "FROM nk_vorauszahlung_zeitraeume "
+                "WHERE mieter_id=? ORDER BY beginn_datum",
+                (mieter_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        if not reihen:
+            return fallback_monatlich * 12
+        jahr_von = _date(jahr, 1, 1)
+        jahr_bis = _date(jahr, 12, 31)
+        tage_jahr = 366 if jahr % 4 == 0 and (jahr % 100 != 0 or jahr % 400 == 0) else 365
+        total = 0.0
+        for r in reihen:
+            b = r["beginn_datum"]
+            e = r["ende_datum"]
+            betrag = float(r["betrag"] or 0)
+            try:
+                zr_von = _date.fromisoformat(b) if b else _date(1900, 1, 1)
+                zr_bis = _date.fromisoformat(e) if e else _date(9999, 12, 31)
+            except (ValueError, TypeError):
+                continue
+            # Überschneidung mit Abrechnungsjahr
+            overlap_von = max(zr_von, jahr_von)
+            overlap_bis = min(zr_bis, jahr_bis)
+            if overlap_von > overlap_bis:
+                continue
+            tage = (overlap_bis - overlap_von).days + 1
+            # Jahresanteil × Jahresbetrag (= betrag_monatlich × 12)
+            total += betrag * 12 * (tage / tage_jahr)
+        return total
+    except Exception:
+        return fallback_monatlich * 12
+
+
+class NKZeitraumDialog(tk.Toplevel):
+    """#59 – Verwaltung der NK-Vorauszahlungs-Zeiträume für einen Mieter."""
+
+    def __init__(self, parent, mieter_id: int, mieter_name: str):
+        super().__init__(parent)
+        self.title(f"NK-Vorauszahlungs-Zeiträume – {mieter_name}")
+        self.configure(bg=BG_CARD)
+        self.geometry("580x460")
+        self.resizable(False, False)
+        self.grab_set()
+        self._mieter_id = mieter_id
+        self._build()
+        self._load()
+
+    def _build(self):
+        tk.Label(self, text="NK-Vorauszahlungs-Zeiträume",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 2), anchor="w")
+        tk.Label(self,
+                 text="Kein Ende-Datum = unbefristet. Zeiträume dürfen sich nicht überschneiden.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, anchor="w")
+
+        # Tabelle
+        f, self._tree = make_table(self,
+            ("Von (JJJJ-MM-TT)", "Bis (JJJJ-MM-TT)", "Betrag €/Monat"), height=8)
+        f.pack(fill="both", expand=True, padx=20, pady=8)
+        for col, w in zip(("Von (JJJJ-MM-TT)", "Bis (JJJJ-MM-TT)", "Betrag €/Monat"),
+                           [170, 170, 130]):
+            self._tree.heading(col, text=col)
+            self._tree.column(col, width=w, anchor="w")
+
+        # Formular für neue Zeile
+        frm = tk.Frame(self, bg=BG_INPUT, padx=12, pady=10)
+        frm.pack(fill="x", padx=20, pady=(0, 8))
+        tk.Label(frm, text="Von:", bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 width=6, anchor="w").grid(row=0, column=0)
+        self._von_var = tk.StringVar()
+        tk.Entry(frm, textvariable=self._von_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                 relief="flat", bd=0, width=14).grid(row=0, column=1, padx=(4, 12))
+        tk.Label(frm, text="Bis:", bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 width=4, anchor="w").grid(row=0, column=2)
+        self._bis_var = tk.StringVar()
+        tk.Entry(frm, textvariable=self._bis_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                 relief="flat", bd=0, width=14).grid(row=0, column=3, padx=(4, 12))
+        tk.Label(frm, text="Betrag €:", bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 width=8, anchor="w").grid(row=0, column=4)
+        self._betrag_var = tk.StringVar()
+        tk.Entry(frm, textvariable=self._betrag_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                 relief="flat", bd=0, width=10).grid(row=0, column=5, padx=(4, 12))
+        make_btn(frm, "➕ Hinzufügen", self._add).grid(row=0, column=6)
+
+        # Buttons
+        btn_row = tk.Frame(self, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(btn_row, "🗑 Ausgewählten löschen", self._delete, color=DANGER).pack(side="left")
+        make_btn(btn_row, "Schließen", self.destroy, color=ACCENT2).pack(side="right")
+
+    def _load(self):
+        for i in self._tree.get_children():
+            self._tree.delete(i)
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT id, beginn_datum, ende_datum, betrag "
+                "FROM nk_vorauszahlung_zeitraeume "
+                "WHERE mieter_id=? ORDER BY beginn_datum",
+                (self._mieter_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            self._tree.insert("", "end", iid=r["id"], values=(
+                r["beginn_datum"] or "–",
+                r["ende_datum"] or "unbefristet",
+                fmt_euro(r["betrag"])
+            ))
+        tree_empty_hint(self._tree)
+
+    def _add(self):
+        von = self._von_var.get().strip()
+        bis = self._bis_var.get().strip() or None
+        betrag_str = self._betrag_var.get().strip().replace(",", ".")
+        # Validierung
+        if not von:
+            messagebox.showwarning("Pflichtfeld", "Von-Datum ist erforderlich.", parent=self)
+            return
+        try:
+            from datetime import date as _date
+            _date.fromisoformat(von)
+            if bis:
+                bis_d = _date.fromisoformat(bis)
+                von_d = _date.fromisoformat(von)
+                if bis_d < von_d:
+                    messagebox.showwarning("Datum", "Bis-Datum darf nicht vor Von-Datum liegen.", parent=self)
+                    return
+        except ValueError:
+            messagebox.showwarning("Datum", "Datum im Format JJJJ-MM-TT eingeben.", parent=self)
+            return
+        try:
+            betrag = float(betrag_str)
+            if betrag < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Betrag", "Betrag muss eine positive Zahl sein.", parent=self)
+            return
+        # Überschneidungs-Check
+        if self._hat_ueberschneidung(von, bis):
+            messagebox.showwarning("Überschneidung",
+                "Dieser Zeitraum überschneidet sich mit einem bestehenden Eintrag.\n"
+                "Bitte Zeiträume lückenlos und überschneidungsfrei anlegen.", parent=self)
+            return
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO nk_vorauszahlung_zeitraeume (mieter_id, beginn_datum, ende_datum, betrag) "
+                "VALUES (?,?,?,?)",
+                (self._mieter_id, von, bis, betrag)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._von_var.set("")
+        self._bis_var.set("")
+        self._betrag_var.set("")
+        self._load()
+
+    def _delete(self):
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showwarning("Auswahl", "Bitte einen Eintrag auswählen.", parent=self)
+            return
+        if not messagebox.askyesno("Löschen", "Ausgewählten Zeitraum löschen?", parent=self):
+            return
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM nk_vorauszahlung_zeitraeume WHERE id=?", (int(sel[0]),))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load()
+
+    def _hat_ueberschneidung(self, von: str, bis) -> bool:
+        """Prüft ob der neue Zeitraum einen bestehenden überlappt."""
+        from datetime import date as _date
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT beginn_datum, ende_datum FROM nk_vorauszahlung_zeitraeume "
+                "WHERE mieter_id=?",
+                (self._mieter_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        try:
+            von_d = _date.fromisoformat(von)
+            bis_d = _date.fromisoformat(bis) if bis else _date(9999, 12, 31)
+        except (ValueError, TypeError):
+            return False
+        for r in rows:
+            try:
+                ex_von = _date.fromisoformat(r["beginn_datum"]) if r["beginn_datum"] else _date(1900, 1, 1)
+                ex_bis = _date.fromisoformat(r["ende_datum"]) if r["ende_datum"] else _date(9999, 12, 31)
+            except (ValueError, TypeError):
+                continue
+            if von_d <= ex_bis and bis_d >= ex_von:
+                return True
+        return False
+
+
 class MieterDialog(BaseDialog):
     def __init__(self, parent, row=None):
         super().__init__(parent, "Mieter" + (" bearbeiten" if row else " hinzufügen"), 520, 700)
@@ -1688,7 +2060,20 @@ class MieterDialog(BaseDialog):
         l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
         ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
         self._add_field("Kaltmiete €", "kaltmiete", r.get("kaltmiete",""), row=l)
-        self._add_field("NK-Vorausz. €", "nk", r.get("nebenkosten_vorauszahlung",""), row=ri)
+        self._add_field("NK-Vorausz. € (aktuell)", "nk", r.get("nebenkosten_vorauszahlung",""), row=ri)
+        # #59 – Zeiträume-Button (nur für vorhandene Mieter)
+        self._mieter_id = r.get("id")
+        self._mieter_row = r
+        if self._mieter_id:
+            nk_btn_row = tk.Frame(self._body, bg=BG_CARD)
+            nk_btn_row.pack(fill="x", padx=20, pady=(0, 4))
+            mieter_name = f"{r.get('vorname','')} {r.get('name','')}".strip()
+            make_btn(nk_btn_row, "📅 NK-Zeiträume verwalten",
+                     lambda: NKZeitraumDialog(self, self._mieter_id, mieter_name),
+                     color=BG_INPUT, fg=TEXT).pack(side="left")
+            tk.Label(nk_btn_row,
+                     text="(Zeitraum-basierte Vorauszahlungen für §556 BGB Abrechnung)",
+                     bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left", padx=(8, 0))
 
         self._add_field("Kaution €", "kaution", r.get("kaution",""))
 
@@ -1922,37 +2307,105 @@ class WohnungenPage(tk.Frame):
         super().__init__(parent, bg=BG_CARD)
         self._build()
 
+    # Spalten die im INSERT/UPDATE der Wohnungen verwendet werden (#50 Bug-Fix +
+    # #48/#49 neue Felder).  Eine zentrale Liste verhindert, dass Spalten und
+    # Werte sich auseinander entwickeln.
+    _COLS = (
+        "bezeichnung", "typ", "etage", "lage",
+        "wohnflaeche_qm", "nutzflaeche_qm", "zimmer",
+        "balkon", "balkon_anzahl",
+        "terrasse", "terrasse_anzahl",
+        "garten", "garten_anzahl",
+        "stellplatz", "stellplatz_anzahl",
+        "carport", "carport_anzahl",
+        "keller", "heizungsart",
+        "mea_tausendstel", "eigentuemer_id", "mieter_id",
+        "baujahr", "bewohner_anzahl", "notizen", "aktiv",
+    )
+
     def _build(self):
         section_header(self, "Wohnungen", "＋ Wohnung", self._new)
-        cols = ("Bezeichnung", "Typ", "Lage", "Fläche m²", "Zimmer", "MEA ‰", "Eigentümer", "Mieter")
+        cols = ("Bezeichnung", "Typ", "Lage", "Wohnfl. m²", "Nutzfl. m²", "Zimmer",
+                "MEA ‰", "MEA-Kontr. ‰", "Eigentümer", "Mieter", "Status")
         f, self.tree = make_table(self, cols, height=16)
         f.pack(fill="both", expand=True, padx=20, pady=10)
-        for c, w in zip(cols, [120, 80, 100, 80, 70, 80, 150, 150]):
+        for c, w in zip(cols, [110, 70, 90, 75, 75, 60, 70, 90, 130, 130, 70]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
         self.tree.bind("<Double-1>", self._edit)
         btn_row = tk.Frame(self, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0, 10))
         if hat_recht("Wohnungen", "schreiben"):
             make_btn(btn_row, "✏ Bearbeiten", self._edit, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 8))
+            make_btn(btn_row, "⊘ Deaktivieren", self._deaktivieren, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 8))
+            if hat_recht("Wohnungen", "loeschen"):
+                make_btn(btn_row, "↺ Reaktivieren", self._reaktivieren, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 8))
         if hat_recht("Wohnungen", "loeschen"):
             make_btn(btn_row, "🗑 Löschen", self._delete, color=DANGER).pack(side="left")
+        # Anzeige inaktiver Wohnungen erfordert Löschrecht (#50)
+        self._zeige_inaktive = hat_recht("Wohnungen", "loeschen")
         self._load()
 
     def _load(self):
         for i in self.tree.get_children(): self.tree.delete(i)
         conn = get_db()
-        rows = conn.execute("SELECT w.*, e.name as ename, e.vorname as evname, m.name as mname, m.vorname as mvname FROM wohnungen w LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id LEFT JOIN mieter m ON w.mieter_id=m.id ORDER BY w.bezeichnung").fetchall()
+        where = "" if self._zeige_inaktive else "WHERE COALESCE(w.aktiv,1)=1"
+        rows = conn.execute(
+            "SELECT w.*, e.name as ename, e.vorname as evname, m.name as mname, m.vorname as mvname "
+            "FROM wohnungen w "
+            "LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id "
+            "LEFT JOIN mieter m ON w.mieter_id=m.id "
+            f"{where} ORDER BY w.bezeichnung").fetchall()
+        # Summe der Wohnflächen für MEA-Kontrollberechnung (#48)
+        total_wfl = conn.execute(
+            "SELECT COALESCE(SUM(wohnflaeche_qm),0) FROM wohnungen WHERE COALESCE(aktiv,1)=1"
+        ).fetchone()[0] or 0.0
         for r in rows:
-            ename = f"{r['evname'] or ''} {r['ename'] or ''}".strip() if r['ename'] else "–"
-            mname = f"{r['mvname'] or ''} {r['mname'] or ''}".strip() if r['mname'] else "–"
-            mea = f"{parse_float(r['mea_tausendstel']):.1f}" if r["mea_tausendstel"] else "–"
-            self.tree.insert("", "end", iid=r["id"], values=(
-                r["bezeichnung"], r["typ"] or "–", r["lage"] or "–",
-                f"{parse_float(r['nutzflaeche_qm']):.1f}" if r["nutzflaeche_qm"] else "–",
-                r["zimmer"] or "–", mea,
-                ename, mname))
+            d = dict(r)
+            ename = f"{d.get('evname') or ''} {d.get('ename') or ''}".strip() if d.get('ename') else "–"
+            mname = f"{d.get('mvname') or ''} {d.get('mname') or ''}".strip() if d.get('mname') else "–"
+            mea = f"{parse_float(d.get('mea_tausendstel')):.1f}" if d.get("mea_tausendstel") else "–"
+            wfl = parse_float(d.get("wohnflaeche_qm"))
+            # MEA-Kontrolle nach Wohnfläche: 1000 * (Wohnfläche / Gesamt-Wohnfläche)
+            mea_ctrl = f"{(1000.0 * wfl / total_wfl):.1f}" if (wfl and total_wfl) else "–"
+            status = "aktiv" if (d.get("aktiv") in (None, 1)) else "inaktiv"
+            self.tree.insert("", "end", iid=d["id"], values=(
+                d["bezeichnung"], d.get("typ") or "–", d.get("lage") or "–",
+                f"{wfl:.1f}" if wfl else "–",
+                f"{parse_float(d.get('nutzflaeche_qm')):.1f}" if d.get("nutzflaeche_qm") else "–",
+                d.get("zimmer") or "–", mea, mea_ctrl,
+                ename, mname, status))
         conn.close()
         tree_empty_hint(self.tree)
+
+    def _save_values(self, v: dict, where_id: int = None):
+        """Zentrales INSERT/UPDATE für Wohnungen (#50 Bug-Fix).
+        Verwendet self._COLS damit Spalten und Werte synchron bleiben.
+        Fehler werden dem Benutzer als Messagebox angezeigt."""
+        try:
+            conn = get_db()
+            try:
+                vals = [v.get(c) if v.get(c) not in ("", None) else (0 if c in (
+                    "balkon","balkon_anzahl","terrasse","terrasse_anzahl",
+                    "garten","garten_anzahl","stellplatz_anzahl","carport","carport_anzahl"
+                ) else (1 if c == "aktiv" else None)) for c in self._COLS]
+                if where_id is None:
+                    cols_sql = ",".join(self._COLS)
+                    placeholders = ",".join(["?"] * len(self._COLS))
+                    conn.execute(f"INSERT INTO wohnungen ({cols_sql}) VALUES ({placeholders})", vals)
+                else:
+                    set_sql = ",".join(f"{c}=?" for c in self._COLS)
+                    conn.execute(f"UPDATE wohnungen SET {set_sql} WHERE id=?", vals + [int(where_id)])
+                conn.commit()
+                sync_mea_eigentuemer(conn)
+                conn.commit()
+            finally:
+                conn.close()
+            return True
+        except Exception as ex:
+            messagebox.showerror("Fehler beim Speichern",
+                                 f"Wohnung konnte nicht gespeichert werden:\n{ex}",
+                                 parent=self)
+            return False
 
     def _new(self):
         if not hat_recht("Wohnungen", "schreiben"):
@@ -1960,16 +2413,8 @@ class WohnungenPage(tk.Frame):
         d = WohnungDialog(self)
         self.wait_window(d)
         if d.result:
-            v = d.result
-            conn = get_db()
-            conn.execute("INSERT INTO wohnungen (bezeichnung,typ,lage,nutzflaeche_qm,zimmer,balkon,keller,stellplatz,heizungsart,mea_tausendstel,eigentuemer_id,mieter_id,miteigentumsanteil,baujahr,notizen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (v["bezeichnung"], v["typ"], v["lage"], v["nutzflaeche_qm"] or None, v["zimmer"] or None,
-                 v["balkon"], v["keller"], v["stellplatz"], v["heizungsart"], v["mea_tausendstel"] or None,
-                 v["eigentuemer_id"] or None, v["mieter_id"] or None,
-                 v["miteigentumsanteil"] or None, v["baujahr"] or None, v["notizen"]))
-            conn.commit()
-            sync_mea_eigentuemer(conn)   # #20 MEA-Sync
-            conn.commit(); conn.close(); self._load()
+            if self._save_values(d.result):
+                self._load()
 
     def _edit(self, event=None):
         if not hat_recht("Wohnungen", "schreiben"):
@@ -1979,67 +2424,120 @@ class WohnungenPage(tk.Frame):
         conn = get_db()
         row = conn.execute("SELECT * FROM wohnungen WHERE id=?", (int(sel[0]),)).fetchone()
         conn.close()
+        if not row: return
         d = WohnungDialog(self, row)
         self.wait_window(d)
         if d.result:
-            v = d.result
+            if self._save_values(d.result, where_id=int(sel[0])):
+                self._load()
+
+    def _deaktivieren(self):
+        if not hat_recht("Wohnungen", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Sie haben keine Schreibberechtigung.", parent=self); return
+        sel = self.tree.selection()
+        if not sel: return
+        if messagebox.askyesno("Deaktivieren", "Wohnung deaktivieren?", parent=self):
             conn = get_db()
-            conn.execute("UPDATE wohnungen SET bezeichnung=?,typ=?,lage=?,nutzflaeche_qm=?,zimmer=?,balkon=?,keller=?,stellplatz=?,heizungsart=?,mea_tausendstel=?,eigentuemer_id=?,mieter_id=?,miteigentumsanteil=?,baujahr=?,notizen=? WHERE id=?",
-                (v["bezeichnung"], v["typ"], v["lage"], v["nutzflaeche_qm"] or None, v["zimmer"] or None,
-                 v["balkon"], v["keller"], v["stellplatz"], v["heizungsart"], v["mea_tausendstel"] or None,
-                 v["eigentuemer_id"] or None, v["mieter_id"] or None,
-                 v["miteigentumsanteil"] or None, v["baujahr"] or None, v["notizen"], int(sel[0])))
-            conn.commit()
-            sync_mea_eigentuemer(conn)   # #20 MEA-Sync
-            conn.commit(); conn.close(); self._load()
+            conn.execute("UPDATE wohnungen SET aktiv=0 WHERE id=?", (int(sel[0]),))
+            conn.commit(); sync_mea_eigentuemer(conn); conn.commit(); conn.close()
+            self._load()
+
+    def _reaktivieren(self):
+        if not hat_recht("Wohnungen", "loeschen"):
+            messagebox.showwarning("Berechtigung", "Reaktivieren erfordert Löschrecht.", parent=self); return
+        sel = self.tree.selection()
+        if not sel: return
+        conn = get_db()
+        conn.execute("UPDATE wohnungen SET aktiv=1 WHERE id=?", (int(sel[0]),))
+        conn.commit(); sync_mea_eigentuemer(conn); conn.commit(); conn.close()
+        self._load()
 
     def _delete(self):
         if not hat_recht("Wohnungen", "loeschen"):
             messagebox.showwarning("Berechtigung", "Sie haben keine Löschberechtigung.", parent=self); return
         sel = self.tree.selection()
         if not sel: return
-        if messagebox.askyesno("Löschen", "Wohnung löschen?"):
-            conn = get_db()
-            conn.execute("DELETE FROM wohnungen WHERE id=?", (int(sel[0]),))
-            conn.commit(); conn.close(); self._load()
+        if messagebox.askyesno("Löschen", "Wohnung endgültig löschen?", parent=self):
+            try:
+                conn = get_db()
+                conn.execute("DELETE FROM wohnungen WHERE id=?", (int(sel[0]),))
+                conn.commit(); conn.close()
+            except Exception as ex:
+                messagebox.showerror("Fehler", str(ex), parent=self)
+            self._load()
 
 
 class WohnungDialog(BaseDialog):
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Wohnung " + ("bearbeiten" if row else "hinzufügen"), 540, 700)
+        super().__init__(parent, "Wohnung " + ("bearbeiten" if row else "hinzufügen"), 600, 780)
         r = dict(row) if row else {}
+        self._row = r
+
+        def _two():
+            f = tk.Frame(self._body, bg=BG_CARD); f.pack(fill="x", padx=20)
+            f.columnconfigure((0,1), weight=1)
+            l = tk.Frame(f, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
+            ri = tk.Frame(f, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
+            return l, ri
 
         self._add_field("Bezeichnung *", "bezeichnung", r.get("bezeichnung",""))
-        # Row 1: Typ + Etage
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
-        l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
-        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
+        l, ri = _two()
         self._add_field("Typ", "typ", r.get("typ","Wohnung"), row=l)
         self._add_field("Etage", "etage", r.get("etage",""), row=ri)
-        # Row 2: Lage + Fläche
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
-        l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
-        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
+        l, ri = _two()
         self._add_field("Lage", "lage", r.get("lage",""), row=l)
-        self._add_field("Nutzfläche m²", "nutzflaeche_qm", r.get("nutzflaeche_qm",""), row=ri)
-        # Row 3: Zimmer + Balkon
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
-        l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
-        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
-        self._add_field("Zimmer", "zimmer", r.get("zimmer",""), row=l)
-        balkon_opt = ["Nein", "Ja"]
-        cur_bal = balkon_opt[1] if r.get("balkon") else balkon_opt[0]
-        self._add_field("Balkon", "balkon", cur_bal, widget_type="combo", options=balkon_opt, row=ri)
-        # Row 4: Keller + Stellplatz
-        two = tk.Frame(self._body, bg=BG_CARD); two.pack(fill="x", padx=20); two.columnconfigure((0,1), weight=1)
-        l = tk.Frame(two, bg=BG_CARD); l.grid(row=0, column=0, padx=(0,6), sticky="ew")
-        ri = tk.Frame(two, bg=BG_CARD); ri.grid(row=0, column=1, padx=(6,0), sticky="ew")
-        self._add_field("Keller", "keller", r.get("keller",""), row=l)
-        self._add_field("Stellplatz", "stellplatz", r.get("stellplatz",""), row=ri)
+        self._add_field("Zimmer", "zimmer", r.get("zimmer",""), row=ri)
 
-        self._add_field("Heizungsart", "heizungsart", r.get("heizungsart","Zentralheizung"))
-        self._add_field("MEA Tausendstel (Miteigentumsanteil)", "mea_tausendstel", r.get("mea_tausendstel",""))
-        self._add_field("Baujahr", "baujahr", r.get("baujahr",""))
+        # #48 Wohnfläche / Nutzfläche laut Aufteilungsplan
+        l, ri = _two()
+        self._add_field("Wohnfläche m² (laut Aufteilungsplan)", "wohnflaeche_qm",
+                        r.get("wohnflaeche_qm",""), row=l)
+        self._add_field("Nutzfläche m² (z. B. Keller, ohne MEA-Einfluss)", "nutzflaeche_qm",
+                        r.get("nutzflaeche_qm",""), row=ri)
+
+        # #51 Balkon / Terrasse / Garten / Stellplatz / Carport — einheitlich als
+        # Dropdown 0-5 (Anzahl).  Das ersetzt die bisherigen Ja/Nein + separate
+        # Anzahl-Felder.  Die DB-Spalten "balkon", "terrasse" etc. speichern jetzt
+        # direkt die Anzahl (0 = keiner, 1-5 = Stück).
+        anzahl_opt = ["0", "1", "2", "3", "4", "5"]
+        l, ri = _two()
+        self._add_field("Balkone", "balkon", str(r.get("balkon") or 0),
+                        widget_type="combo", options=anzahl_opt, row=l)
+        self._add_field("Terrassen", "terrasse", str(r.get("terrasse") or 0),
+                        widget_type="combo", options=anzahl_opt, row=ri)
+        l, ri = _two()
+        self._add_field("Gärten", "garten", str(r.get("garten") or 0),
+                        widget_type="combo", options=anzahl_opt, row=l)
+        self._add_field("Stellplätze", "stellplatz_anzahl", str(r.get("stellplatz_anzahl") or 0),
+                        widget_type="combo", options=anzahl_opt, row=ri)
+        l, ri = _two()
+        self._add_field("Carports", "carport", str(r.get("carport") or 0),
+                        widget_type="combo", options=anzahl_opt, row=l)
+        self._add_field("Stellplatz-Typ", "stellplatz", r.get("stellplatz","") or "",
+                        widget_type="combo", options=["", "Außen", "Tiefgarage", "Doppelparker"], row=ri)
+
+        l, ri = _two()
+        self._add_field("Keller", "keller", r.get("keller",""), row=l)
+        self._add_field("Heizungsart", "heizungsart", r.get("heizungsart","Zentralheizung"), row=ri)
+
+        l, ri = _two()
+        self._add_field("MEA Tausendstel (Miteigentumsanteil)", "mea_tausendstel",
+                        r.get("mea_tausendstel",""), row=l)
+        self._add_field("Baujahr", "baujahr", r.get("baujahr",""), row=ri)
+
+        # #48 MEA-Kontrollwert (live berechnet aus Wohnfläche / Σ Wohnflächen)
+        self._mea_ctrl_var = tk.StringVar(value="")
+        ctl = tk.Frame(self._body, bg=BG_CARD); ctl.pack(fill="x", padx=20, pady=(8,0))
+        tk.Label(ctl, text="MEA-Kontrollwert (1000 × Wohnfläche / Σ aktive Wohnflächen):",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+        tk.Label(ctl, textvariable=self._mea_ctrl_var, bg=BG_CARD, fg=ACCENT2,
+                 font=FONT_BODY).pack(anchor="w")
+        # Bei jeder Änderung des Wohnflächen-Feldes neu berechnen
+        try:
+            self._fields["wohnflaeche_qm"].trace_add("write", lambda *a: self._update_mea_kontrolle())
+        except Exception:
+            pass
+        self._update_mea_kontrolle()
 
         # Eigentümer-Dropdown
         conn = get_db()
@@ -2063,13 +2561,53 @@ class WohnungDialog(BaseDialog):
         self._add_field("Mieter", "mieter_str", mt_options[cur_mt], widget_type="combo", options=mt_options)
         self._add_field("Notizen", "notizen", r.get("notizen",""), widget_type="text")
 
+    def _update_mea_kontrolle(self):
+        """#48 – Live-Anzeige des MEA-Kontrollwerts beim Bearbeiten."""
+        try:
+            wfl = parse_float(self._fields["wohnflaeche_qm"].get())
+        except Exception:
+            wfl = 0.0
+        try:
+            conn = get_db()
+            row_id = self._row.get("id")
+            if row_id:
+                total = conn.execute(
+                    "SELECT COALESCE(SUM(wohnflaeche_qm),0) FROM wohnungen "
+                    "WHERE COALESCE(aktiv,1)=1 AND id<>?", (row_id,)).fetchone()[0] or 0.0
+            else:
+                total = conn.execute(
+                    "SELECT COALESCE(SUM(wohnflaeche_qm),0) FROM wohnungen "
+                    "WHERE COALESCE(aktiv,1)=1").fetchone()[0] or 0.0
+            conn.close()
+        except Exception:
+            total = 0.0
+        gesamt = total + (wfl or 0.0)
+        if wfl and gesamt:
+            self._mea_ctrl_var.set(f"{(1000.0 * wfl / gesamt):.2f} ‰  (von gesamt {gesamt:.1f} m²)")
+        else:
+            self._mea_ctrl_var.set("– (Wohnfläche eintragen)")
+
     def _on_save(self):
         v = self._get_values()
         if not v.get("bezeichnung"):
             messagebox.showwarning("Pflichtfeld", "Bezeichnung ist erforderlich.", parent=self); return
 
-        # Convert balkon to 0/1
-        v["balkon"] = 1 if v.get("balkon") == "Ja" else 0
+        # #51 Dropdown-Werte → int (Balkone, Terrassen etc. jetzt direkt als Anzahl 0-5)
+        for key in ("balkon", "terrasse", "garten", "carport",
+                    "stellplatz_anzahl", "zimmer", "baujahr"):
+            try:
+                v[key] = int(parse_float(v.get(key))) if v.get(key) not in ("", None) else 0
+            except Exception:
+                v[key] = 0
+        # Nicht mehr genutzte separate Anzahl-Felder synchronisieren (Abwärtskompatibilität)
+        v["balkon_anzahl"] = v.get("balkon", 0)
+        v["terrasse_anzahl"] = v.get("terrasse", 0)
+        v["garten_anzahl"] = v.get("garten", 0)
+        v["carport_anzahl"] = v.get("carport", 0)
+
+        # Float-Felder
+        for key in ("wohnflaeche_qm", "nutzflaeche_qm", "mea_tausendstel"):
+            v[key] = parse_float(v.get(key)) if v.get(key) not in ("", None) else None
 
         # Resolve Eigentümer-ID
         et_str = v.get("eigentuemer_str","")
@@ -2084,6 +2622,13 @@ class WohnungDialog(BaseDialog):
         for m in self._mieter_list:
             if f"{m['vorname'] or ''} {m['name']}".strip() == mt_str:
                 v["mieter_id"] = m["id"]; break
+
+        # Felder die im Dialog nicht editierbar sind beim Bearbeiten erhalten
+        v.setdefault("bewohner_anzahl", self._row.get("bewohner_anzahl") or 1)
+        # Beim Bearbeiten Aktiv-Status erhalten, beim Neu-Anlegen aktiv=1 (#50)
+        v["aktiv"] = self._row.get("aktiv", 1)
+        if v["aktiv"] is None:
+            v["aktiv"] = 1
 
         self.result = v; self.destroy()
 
@@ -2176,10 +2721,10 @@ class BuchhaltungPage(tk.Frame):
 
         # Buchungen-View
         self._view_buchungen = tk.Frame(self._content, bg=BG_CARD)
-        cols_b = ("Datum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Belegnr.", "📎")
+        cols_b = ("Buchungsdatum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Belegnr.", "📎")  # #56
         fb, self.tree_b = make_table(self._view_buchungen, cols_b, height=13)
         fb.pack(fill="both", expand=True, padx=20, pady=6)
-        for c, w in zip(cols_b, [90, 210, 110, 100, 80, 80, 80, 28]):
+        for c, w in zip(cols_b, [100, 200, 110, 100, 80, 80, 80, 28]):
             self.tree_b.heading(c, text=c); self.tree_b.column(c, width=w, anchor="w")
         self.tree_b.tag_configure("einnahme", foreground=SUCCESS)
         self.tree_b.tag_configure("ausgabe",  foreground=DANGER)
@@ -2227,7 +2772,7 @@ class BuchhaltungPage(tk.Frame):
             text="Automatisch gelernte Zuordnungsregeln — können hier korrigiert oder gelöscht werden",
             bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL)
         info_r.pack(anchor="w", padx=20, pady=(6, 2))
-        cols_r = ("Muster", "Kategorie", "Typ", "Konto", "Treffer", "Korrektur")
+        cols_r = ("Auftraggeber / Empfänger", "Kategorie", "Typ", "Konto", "Treffer", "Korrektur")  # #54
         fr, self.tree_r = make_table(self._view_regeln, cols_r, height=12)
         fr.pack(fill="both", expand=True, padx=20, pady=4)
         for c, w in zip(cols_r, [220, 130, 90, 110, 70, 80]):
@@ -2364,12 +2909,16 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO zahlungen (datum,betrag,typ,kategorie,beschreibung,belegnr,status,beleg_dateipfad,rechnungssteller,abrechnungsrelevant,abrechnungsjahr,rechnungsdatum,rechnungsnummer,gesamtrechnungsbetrag,lohnanteil,handwerker_steuerlich,rechnung_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (v["datum"], betrag, v["typ"], v["kategorie"], v["beschreibung"], v["belegnr"],
                  v.get("status", "Geprüft"), v.get("beleg_dateipfad"),
                  v.get("rechnungssteller") or None, v.get("abrechnungsrelevant", 1),
-                 v.get("abrechnungsjahr") or None))
+                 v.get("abrechnungsjahr") or None,
+                 v.get("rechnungsdatum") or None,  # #56
+                 v.get("rechnungsnummer") or None, v.get("gesamtrechnungsbetrag") or None,
+                 v.get("lohnanteil") or None, v.get("handwerker_steuerlich", 0),
+                 v.get("rechnung_id") or None))  # #65
             conn.commit(); conn.close()
             if self._active_tab == "buchungen": self._load_buchungen()
 
@@ -2389,12 +2938,17 @@ class BuchhaltungPage(tk.Frame):
             if v["typ"] == "Ausgabe": betrag = -abs(betrag)
             conn = get_db()
             conn.execute(
-                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=? "
+                "UPDATE zahlungen SET datum=?,betrag=?,typ=?,kategorie=?,beschreibung=?,belegnr=?,status=?,beleg_dateipfad=?,rechnungssteller=?,abrechnungsrelevant=?,abrechnungsjahr=?,rechnungsdatum=?,rechnungsnummer=?,gesamtrechnungsbetrag=?,lohnanteil=?,handwerker_steuerlich=?,rechnung_id=? "
                 "WHERE id=?",
                 (v["datum"], betrag, v["typ"], v["kategorie"],
                  v["beschreibung"], v["belegnr"], v.get("status", "Geprüft"),
                  v.get("beleg_dateipfad"), v.get("rechnungssteller") or None,
-                 v.get("abrechnungsrelevant", 1), v.get("abrechnungsjahr") or None, int(sel[0])))
+                 v.get("abrechnungsrelevant", 1), v.get("abrechnungsjahr") or None,
+                 v.get("rechnungsdatum") or None,  # #56
+                 v.get("rechnungsnummer") or None, v.get("gesamtrechnungsbetrag") or None,
+                 v.get("lohnanteil") or None, v.get("handwerker_steuerlich", 0),
+                 v.get("rechnung_id") or None,  # #65
+                 int(sel[0])))  # #58
             conn.commit(); conn.close()
             self._load_buchungen()
 
@@ -3113,6 +3667,27 @@ class BuchhaltungPage(tk.Frame):
         self._tree_wg.tag_configure("plus",  foreground=SUCCESS)
         self._tree_wg.tag_configure("minus", foreground=DANGER)
 
+    @staticmethod
+    def _umlageschluessel_aus_aufteilungen() -> list:
+        """#57 – Lädt verfügbare Umlageschlüssel aus der aufteilungen-Tabelle
+        (aktive Einträge, nach Typ geordnet). Fällt auf Basis-Liste zurück."""
+        basis = ["MEA", "Wohnfläche", "Verbrauch", "Verbrauch/Wohnfläche",
+                 "HeizKV", "Kopfanzahl", "Wasserkosten nach Punkten", "–"]
+        try:
+            conn = get_db()
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT typ FROM aufteilungen WHERE aktiv=1 ORDER BY typ"
+                ).fetchall()
+            finally:
+                conn.close()
+            db_typen = [r["typ"] for r in rows if r["typ"]]
+            # Basis-Schlüssel + DB-Einträge (ohne Duplikate, Reihenfolge: Basis zuerst)
+            gesamt = list(dict.fromkeys(basis + db_typen))
+            return gesamt
+        except Exception:
+            return basis
+
     def _new_kostenart(self):
         """Neue benutzerdefinierte Kategorie hinzufügen."""
         win = tk.Toplevel(self)
@@ -3137,7 +3712,7 @@ class BuchhaltungPage(tk.Frame):
         tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
         schluessel_var = tk.StringVar(value="MEA")
         ttk.Combobox(body, textvariable=schluessel_var,
-                     values=["MEA", "Wohnfläche", "Verbrauch/Wohnfläche", "MEA/Fläche", "MEA/Wohneinheiten", "Wohneinheiten/MEA", "–"],
+                     values=self._umlageschluessel_aus_aufteilungen(),  # #57 dynamisch aus aufteilungen
                      font=FONT_BODY).pack(fill="x", ipady=4)
         uml_var = tk.BooleanVar(value=False)
         tk.Checkbutton(body, text="Umlagefähig", variable=uml_var, bg=BG_CARD,
@@ -3198,7 +3773,7 @@ class BuchhaltungPage(tk.Frame):
         tk.Label(body, text="Umlageschlüssel", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
         schluessel_var = tk.StringVar(value=meta.get("schluessel", "MEA"))
         ttk.Combobox(body, textvariable=schluessel_var,
-                     values=["MEA", "Wohnfläche", "Verbrauch/Wohnfläche", "MEA/Fläche", "MEA/Wohneinheiten", "Wohneinheiten/MEA", "–"],
+                     values=self._umlageschluessel_aus_aufteilungen(),  # #57 dynamisch aus aufteilungen
                      font=FONT_BODY).pack(fill="x", ipady=4)
         uml = meta.get("umlagefaehig", False)
         uml_var = tk.BooleanVar(value=uml if isinstance(uml, bool) else False)
@@ -3275,9 +3850,11 @@ class BuchhaltungPage(tk.Frame):
 
 class ZahlungDialog(BaseDialog):
     def __init__(self, parent, row=None):
-        super().__init__(parent, "Buchung", 540, 620)
+        super().__init__(parent, "Buchung", 560, 680)
         r = dict(row) if row else {}
-        self._add_field("Datum (JJJJ-MM-TT) *", "datum",
+
+        # ── Buchungsdaten (#56: Buchungsdatum klar als solches kennzeichnen) ──
+        self._add_field("Buchungsdatum (JJJJ-MM-TT) *", "datum",
                         r.get("datum", date.today().isoformat()))
         self._add_field("Typ *", "typ", r.get("typ", "Einnahme"),
                         widget_type="combo", options=["Einnahme", "Ausgabe"])
@@ -3285,14 +3862,77 @@ class ZahlungDialog(BaseDialog):
         self._add_field("Kategorie", "kategorie", r.get("kategorie", ""),
                         widget_type="combo",
                         options=BuchhaltungPage.aktive_kategorien())
-        self._add_field("Rechnungssteller", "rechnungssteller",
-                        r.get("rechnungssteller", "") or "")   # #35
         self._add_field("Beschreibung", "beschreibung", r.get("beschreibung", ""))
         self._add_field("Belegnummer",  "belegnr",      r.get("belegnr", ""))
         self._add_field("Status", "status", r.get("status", "Neu"),
                         widget_type="combo", options=["Neu", "Geprüft", "Freigegeben"])
         self._add_field("Abrechnungsjahr", "abrechnungsjahr",
                         r.get("abrechnungsjahr", "") or "")
+
+        # ── Rechnungsinformationen (#56) ──────────────────────────────────────
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(self._body, text="Rechnungsinformationen",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(
+                     padx=20, anchor="w")
+        self._add_field("Rechnungsdatum (JJJJ-MM-TT)", "rechnungsdatum",
+                        r.get("rechnungsdatum", "") or "")   # #56
+        self._add_field("Rechnungsnummer", "rechnungsnummer",
+                        r.get("rechnungsnummer", "") or "")  # #58
+        self._add_field("Rechnungssteller", "rechnungssteller",
+                        r.get("rechnungssteller", "") or "")  # #35
+        self._add_field("Gesamtrechnungsbetrag €", "gesamtrechnungsbetrag",
+                        r.get("gesamtrechnungsbetrag", "") or "")  # #58
+        self._add_field("Lohnanteil €", "lohnanteil",
+                        r.get("lohnanteil", "") or "")  # #58
+        # §35a EStG Checkbox
+        steuerlich_frame = tk.Frame(self._body, bg=BG_CARD)
+        steuerlich_frame.pack(fill="x", padx=20, pady=(2, 4))
+        self._steuerlich_var = tk.BooleanVar(value=bool(r.get("handwerker_steuerlich", 0)))
+        tk.Checkbutton(steuerlich_frame,
+                       text="§35a EStG – Handwerkerleistung steuerlich absetzbar",
+                       variable=self._steuerlich_var,
+                       bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                       activebackground=BG_CARD, selectcolor=BG_CARD).pack(anchor="w")  # #58
+
+        # #65 – Rechnung zuordnen
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        rechnung_lbl = tk.Label(self._body, text="Rechnung zuordnen (optional)",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9))
+        rechnung_lbl.pack(padx=20, anchor="w")
+        rechnung_row = tk.Frame(self._body, bg=BG_CARD)
+        rechnung_row.pack(fill="x", padx=20, pady=(2, 4))
+        # Lade Rechnungen für Dropdown
+        try:
+            _conn_r = get_db()
+            _rech_rows = _conn_r.execute(
+                "SELECT id, rechnungsnummer, rechnungssteller, betrag_brutto "
+                "FROM rechnungen WHERE status IN ('Offen','Teilbezahlt') "
+                "ORDER BY rechnungsdatum DESC LIMIT 50"
+            ).fetchall()
+            _conn_r.close()
+        except Exception:
+            _rech_rows = []
+        self._rechnung_map = {0: "– keine –"}
+        rech_options = ["– keine –"]
+        for _rr in _rech_rows:
+            label = f"{_rr['rechnungsnummer'] or _rr['id']} – {_rr['rechnungssteller']} ({fmt_euro(_rr['betrag_brutto'])})"
+            self._rechnung_map[_rr["id"]] = label
+            rech_options.append(label)
+        # Aktuell zugeordnet?
+        _cur_rid = r.get("rechnung_id")
+        _cur_label = self._rechnung_map.get(_cur_rid, "– keine –") if _cur_rid else "– keine –"
+        self._rechnung_var = tk.StringVar(value=_cur_label)
+        self._rechnung_id_val = _cur_rid
+        rech_combo = ttk.Combobox(rechnung_row, textvariable=self._rechnung_var,
+                                  values=rech_options, state="readonly", width=40, font=FONT_BODY)
+        rech_combo.pack(side="left", fill="x", expand=True)
+        def _on_rech_selected(e=None):
+            sel_lbl = self._rechnung_var.get()
+            for rid, lbl in self._rechnung_map.items():
+                if lbl == sel_lbl:
+                    self._rechnung_id_val = rid if rid != 0 else None
+                    break
+        rech_combo.bind("<<ComboboxSelected>>", _on_rech_selected)
 
         # Abrechnungsrelevanz-Checkbox
         abr_frame = tk.Frame(self._body, bg=BG_CARD)
@@ -3347,9 +3987,13 @@ class ZahlungDialog(BaseDialog):
 
     def _browse_beleg(self):
         from tkinter import filedialog
+        import shutil, os
+        # Startordner = konfigurierter Rechnungsbeleg-Ordner (#47)
+        init_dir = get_pfad("pfad_belege", "Belege")
         path = filedialog.askopenfilename(
             parent=self,
             title="Beleg-Datei auswählen",
+            initialdir=str(init_dir),
             filetypes=[
                 ("PDF-Dateien", "*.pdf"),
                 ("Bilder", "*.png *.jpg *.jpeg *.tif *.tiff"),
@@ -3357,6 +4001,16 @@ class ZahlungDialog(BaseDialog):
             ]
         )
         if path:
+            # Datei in den Beleg-Ordner kopieren, falls sie nicht schon dort liegt (#47)
+            beleg_ordner = str(get_pfad("pfad_belege", "Belege"))
+            if os.path.normpath(os.path.dirname(path)) != os.path.normpath(beleg_ordner):
+                ziel = os.path.join(beleg_ordner, os.path.basename(path))
+                try:
+                    if not os.path.exists(ziel):
+                        shutil.copy2(path, ziel)
+                    path = ziel
+                except Exception:
+                    pass  # Original-Pfad beibehalten wenn Kopieren fehlschlägt
             self._beleg_var.set(path)
 
     # ── KI-Analyse (#35) ──────────────────────────────────────────────────────
@@ -3404,7 +4058,10 @@ class ZahlungDialog(BaseDialog):
 
     def _ki_analyse_thread(self, pfad: str, anbieter: str, modell: str, cfg: dict):
         """Hintergrund-Thread: liest Datei, sendet an KI, parst Ergebnis (#35)."""
-        import os, base64
+        import os, base64, time as _time
+        _t0 = _time.time()
+        # KI-Training laden (#46)
+        _feld_hinweise, _system_zusatz = _lade_ki_training("Beleg-Analyse")
         kategorien = BuchhaltungPage.aktive_kategorien()
         ext = os.path.splitext(pfad)[1].lower()
         try:
@@ -3448,6 +4105,11 @@ class ZahlungDialog(BaseDialog):
             )
             if inhalt_typ == "text":
                 prompt += f"Belegtext:\n{inhalt}"
+            # KI-Training-Hinweise anhängen (#46)
+            if _feld_hinweise:
+                prompt += f"\n\nZusätzliche Hinweise:\n{_feld_hinweise}"
+            if _system_zusatz:
+                prompt = _system_zusatz + "\n\n" + prompt
 
             # ── API-Aufruf ────────────────────────────────────────────────
             antwort_text = ""
@@ -3511,11 +4173,18 @@ class ZahlungDialog(BaseDialog):
                 ki_daten = json.loads(json_match.group())
             # Keys normalisieren (Groß-/Kleinschreibung, #20 fix)
             ki_daten = {k.lower(): v for k, v in ki_daten.items()}
+            # KI-Protokoll (#45)
+            ki_log("Beleg-Analyse", "Analyse",
+                   os.path.basename(pfad), str(ki_daten)[:500],
+                   modell, anbieter, int((_time.time() - _t0) * 1000))
             # Widget-Check vor after()-Aufruf (#3 fix)
             if self.winfo_exists():
                 self.after(0, lambda d=ki_daten: self._ki_felder_befuellen(d))
 
         except Exception as ex:
+            ki_log("Beleg-Analyse", "Fehler",
+                   os.path.basename(pfad), "",
+                   modell, anbieter, int((_time.time() - _t0) * 1000), str(ex))
             msg = str(ex)
             if self.winfo_exists():
                 self.after(0, lambda m=msg: self._ki_fehler(m))
@@ -3535,14 +4204,21 @@ class ZahlungDialog(BaseDialog):
                 w.insert(0, str(val))
 
         if daten.get("datum"):
-            # ISO-Format (YYYY-MM-DD) direkt übernehmen, kein parse_datum nötig (#16 fix)
-            raw_datum = str(daten["datum"]).strip()
-            import re as _re
-            if _re.match(r'^\d{4}-\d{2}-\d{2}$', raw_datum):
-                _set("datum", raw_datum)
-            else:
-                # Fallback: parse_datum für andere Formate
-                _set("datum", parse_datum(raw_datum) or raw_datum)
+            # #58: Datum nur befüllen wenn noch leer
+            _datum_w = self._fields.get("datum")
+            _datum_aktuell = ""
+            if _datum_w and hasattr(_datum_w, "get"):
+                _datum_aktuell = _datum_w.get().strip() if not hasattr(_datum_w, "index") \
+                                 else _datum_w.get("1.0", "end-1c").strip()
+            if not _datum_aktuell:
+                # ISO-Format (YYYY-MM-DD) direkt übernehmen, kein parse_datum nötig (#16 fix)
+                raw_datum = str(daten["datum"]).strip()
+                import re as _re
+                if _re.match(r'^\d{4}-\d{2}-\d{2}$', raw_datum):
+                    _set("datum", raw_datum)
+                else:
+                    # Fallback: parse_datum für andere Formate
+                    _set("datum", parse_datum(raw_datum) or raw_datum)
         if daten.get("belegnr"):
             _set("belegnr", daten["belegnr"])
         # Beschreibung NUR befüllen wenn Feld leer (#37: nicht überschreiben)
@@ -3571,10 +4247,17 @@ class ZahlungDialog(BaseDialog):
             # Dateiname generieren: YYYY-MM-TT_Rechnungssteller_Zähler
             self._beleg_dateiname_generieren(daten)
         if daten.get("betrag"):
-            try:
-                _set("betrag", abs(float(str(daten["betrag"]).replace(",", "."))))
-            except Exception:
-                pass
+            # #58: Betrag nur befüllen wenn noch leer (0 zählt als leer)
+            _betrag_w = self._fields.get("betrag")
+            _betrag_aktuell = ""
+            if _betrag_w and hasattr(_betrag_w, "get"):
+                _betrag_aktuell = _betrag_w.get().strip() if not hasattr(_betrag_w, "index") \
+                                  else _betrag_w.get("1.0", "end-1c").strip()
+            if not _betrag_aktuell or _betrag_aktuell in ("0", "0.0", "0,0", "0.00", "0,00"):
+                try:
+                    _set("betrag", abs(float(str(daten["betrag"]).replace(",", "."))))
+                except Exception:
+                    pass
 
         if hasattr(self, "_ki_status_lbl"):
             self._ki_status_lbl.config(text="✅ KI-Analyse abgeschlossen", fg=SUCCESS)
@@ -3582,7 +4265,8 @@ class ZahlungDialog(BaseDialog):
             self._ki_btn.config(state="normal")
 
     def _beleg_dateiname_generieren(self, daten: dict):
-        """Generiert Dateiname: YYYY-MM-TT_Rechnungssteller_N (#35)."""
+        """Generiert Dateiname: YYYY-MM-TT_Rechnungssteller_N (#35).
+        Zielordner ist der konfigurierte Beleg-Ordner (#47)."""
         import os, re
         pfad = self._beleg_var.get().strip()
         if not pfad:
@@ -3590,7 +4274,9 @@ class ZahlungDialog(BaseDialog):
         datum = daten.get("datum", date.today().isoformat()) or date.today().isoformat()
         steller = re.sub(r'[^\w\- ]', '', daten.get("rechnungssteller", "Unbekannt"))
         steller = steller.strip().replace(" ", "_")[:30]
-        verz = os.path.dirname(pfad)
+        # Zielordner: konfigurierter Beleg-Ordner (#47), Fallback: Ordner der Quelldatei
+        beleg_ordner = str(get_pfad("pfad_belege", "Belege"))
+        verz = beleg_ordner if os.path.isdir(beleg_ordner) else os.path.dirname(pfad)
         ext = os.path.splitext(pfad)[1]
         zaehler = 1
         while True:
@@ -3623,7 +4309,710 @@ class ZahlungDialog(BaseDialog):
         v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
         # Abrechnungsrelevanz speichern
         v["abrechnungsrelevant"] = 1 if self._abr_var.get() else 0
+        # §35a EStG (#58)
+        v["handwerker_steuerlich"] = 1 if self._steuerlich_var.get() else 0
+        # #65 – Rechnung-Zuordnung
+        v["rechnung_id"] = self._rechnung_id_val if hasattr(self, "_rechnung_id_val") else None
+        # Auto-Status: Betrag == Gesamtrechnungsbetrag UND Belegnr == Rechnungsnummer → "Geprüft" (#58)
+        try:
+            betrag_val = abs(float(str(v.get("betrag", "") or 0).replace(",", ".")))
+            gesamtbetrag_str = str(v.get("gesamtrechnungsbetrag", "") or "").replace(",", ".").strip()
+            rgnr = str(v.get("rechnungsnummer", "") or "").strip()
+            belegnr = str(v.get("belegnr", "") or "").strip()
+            if gesamtbetrag_str and rgnr and belegnr:
+                gesamtbetrag_val = abs(float(gesamtbetrag_str))
+                if abs(betrag_val - gesamtbetrag_val) < 0.01 and rgnr == belegnr:
+                    v["status"] = "Geprüft"
+        except (ValueError, TypeError):
+            pass
         self.result = v; self.destroy()
+
+# ── Rechnungen-Seite (#65 / #66 – Doppelte Buchführung) ──────────────────────
+
+class RechnungenPage(tk.Frame):
+    """#65/#66 – Rechnungsverwaltung mit Doppelter-Buchführungs-Prinzip.
+
+    Jede Rechnung ist eine Verbindlichkeit. Buchungen (zahlungen) werden
+    per rechnung_id zugeordnet. Anzeige: Rechnungsbetrag, gebucht, Differenz.
+    ZUGFeRD/xRechnung XML-Import, KI-OCR Fallback, manuelle Eingabe.
+    """
+
+    STATI = ["Offen", "Teilbezahlt", "Bezahlt", "Storniert"]
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG_CARD)
+        self._build()
+
+    # ── Aufbau ────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        section_header(self, "Rechnungen", "＋ Rechnung", self._new_rechnung)
+
+        # Filter-Leiste
+        fr = tk.Frame(self, bg=BG_CARD)
+        fr.pack(fill="x", padx=20, pady=4)
+        tk.Label(fr, text="Status:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._status_var = tk.StringVar(value="Alle")
+        for s in ("Alle", "Offen", "Teilbezahlt", "Bezahlt", "Storniert"):
+            tk.Radiobutton(fr, text=s, variable=self._status_var, value=s,
+                           bg=BG_CARD, fg=TEXT, font=FONT_SMALL,
+                           activebackground=BG_CARD, selectcolor=BG_CARD,
+                           command=self._load).pack(side="left", padx=6)
+
+        # Rechnungstabelle
+        cols = ("Nr.", "Steller", "Datum", "Brutto €", "Gebucht €", "Differenz €", "Status", "Kategorie")
+        f, self.tree = make_table(self, cols, height=14)
+        f.pack(fill="both", expand=True, padx=20, pady=4)
+        for c, w in zip(cols, [90, 160, 90, 90, 90, 100, 90, 120]):
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.column("Brutto €",    anchor="e")
+        self.tree.column("Gebucht €",   anchor="e")
+        self.tree.column("Differenz €", anchor="e")
+        self.tree.bind("<Double-1>", self._edit_rechnung)
+        self.tree.tag_configure("bezahlt",     foreground=SUCCESS)
+        self.tree.tag_configure("offen",       foreground=TEXT)
+        self.tree.tag_configure("ueberzahlt",  foreground=DANGER)
+        self.tree.tag_configure("teilbezahlt", foreground=ACCENT2)
+
+        # Button-Leiste
+        btn_row = tk.Frame(self, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0, 8))
+        if hat_recht("Buchhaltung", "schreiben"):
+            make_btn(btn_row, "✏ Bearbeiten",    self._edit_rechnung,  color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+            make_btn(btn_row, "📎 Buchung zuordnen", self._buchung_zuordnen, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+            make_btn(btn_row, "📄 Buchungen anzeigen", self._show_buchungen, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+        if hat_recht("Buchhaltung", "loeschen"):
+            make_btn(btn_row, "🗑 Löschen", self._delete_rechnung, color=DANGER).pack(side="left")
+
+        # KPI-Leiste
+        self._kpi_frame = tk.Frame(self, bg=BG_CARD)
+        self._kpi_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+        self._load()
+
+    # ── Daten laden ───────────────────────────────────────────────────────────
+
+    def _load(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        conn = get_db()
+        try:
+            s = self._status_var.get()
+            where = "WHERE r.status=?" if s != "Alle" else ""
+            params = (s,) if s != "Alle" else ()
+            rechnungen = conn.execute(
+                f"SELECT r.*, "
+                f"  COALESCE((SELECT SUM(ABS(z.betrag)) FROM zahlungen z "
+                f"            WHERE z.rechnung_id=r.id), 0) AS gebucht "
+                f"FROM rechnungen r {where} ORDER BY r.rechnungsdatum DESC, r.id DESC",
+                params
+            ).fetchall()
+        finally:
+            conn.close()
+
+        total_brutto = total_gebucht = 0.0
+        offen_count = 0
+        for r in rechnungen:
+            rd = dict(r)
+            brutto   = rd["betrag_brutto"] or 0
+            gebucht  = rd["gebucht"] or 0
+            differenz = brutto - gebucht
+            total_brutto  += brutto
+            total_gebucht += gebucht
+            if rd["status"] in ("Offen", "Teilbezahlt"):
+                offen_count += 1
+            # Farbtag
+            if abs(differenz) < 0.01:
+                tag = "bezahlt"
+            elif differenz < -0.01:
+                tag = "ueberzahlt"
+            elif gebucht > 0:
+                tag = "teilbezahlt"
+            else:
+                tag = "offen"
+            # Differenz-Farbe: zu wenig = grün (noch offen), zu viel = rot, genau = schwarz
+            diff_str = fmt_euro(differenz)
+            self.tree.insert("", "end", iid=rd["id"], values=(
+                rd["rechnungsnummer"] or "–",
+                rd["rechnungssteller"] or "–",
+                fmt_date(rd["rechnungsdatum"]) if rd["rechnungsdatum"] else "–",
+                fmt_euro(brutto),
+                fmt_euro(gebucht),
+                diff_str,
+                rd["status"] or "–",
+                rd["kategorie"] or "–"
+            ), tags=(tag,))
+        tree_empty_hint(self.tree)
+        self._update_kpi(total_brutto, total_gebucht, offen_count)
+
+    def _update_kpi(self, total_brutto, total_gebucht, offen_count):
+        for w in self._kpi_frame.winfo_children():
+            w.destroy()
+        differenz = total_brutto - total_gebucht
+        items = [
+            ("Rechnungen gesamt", fmt_euro(total_brutto), DANGER),
+            ("Bezahlt", fmt_euro(total_gebucht), SUCCESS),
+            ("Noch offen", fmt_euro(differenz), WARNING if differenz > 0.01 else TEXT),
+            ("Offene Rechnungen", str(offen_count), ACCENT2),
+        ]
+        for lbl, wert, color in items:
+            karte = tk.Frame(self._kpi_frame, bg=BG_INPUT, padx=12, pady=6)
+            karte.pack(side="left", padx=(0, 10))
+            tk.Label(karte, text=lbl, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
+            tk.Label(karte, text=wert, bg=BG_INPUT, fg=color, font=FONT_H3).pack(anchor="w")
+
+    # ── CRUD ──────────────────────────────────────────────────────────────────
+
+    def _new_rechnung(self):
+        if not hat_recht("Buchhaltung", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
+        d = RechnungDialog(self)
+        self.wait_window(d)
+        if d.result:
+            v = d.result
+            conn = get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO rechnungen (rechnungsnummer, rechnungssteller, rechnungsdatum, "
+                    "faelligkeitsdatum, betrag_brutto, betrag_netto, mwst_satz, mwst_betrag, "
+                    "lohnanteil, kategorie, beschreibung, beleg_dateipfad, status, zugferd_format) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (v.get("rechnungsnummer"), v.get("rechnungssteller"),
+                     v.get("rechnungsdatum"), v.get("faelligkeitsdatum"),
+                     float(v.get("betrag_brutto") or 0),
+                     float(v.get("betrag_netto") or 0) or None,
+                     float(v.get("mwst_satz") or 19),
+                     float(v.get("mwst_betrag") or 0) or None,
+                     float(v.get("lohnanteil") or 0) or None,
+                     v.get("kategorie"), v.get("beschreibung"),
+                     v.get("beleg_dateipfad"), v.get("status", "Offen"),
+                     v.get("zugferd_format")))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load()
+
+    def _edit_rechnung(self, event=None):
+        if not hat_recht("Buchhaltung", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self); return
+        sel = self.tree.selection()
+        if not sel: return
+        conn = get_db()
+        try:
+            row = conn.execute("SELECT * FROM rechnungen WHERE id=?", (int(sel[0]),)).fetchone()
+        finally:
+            conn.close()
+        if not row: return
+        d = RechnungDialog(self, dict(row))
+        self.wait_window(d)
+        if d.result:
+            v = d.result
+            conn = get_db()
+            try:
+                conn.execute(
+                    "UPDATE rechnungen SET rechnungsnummer=?, rechnungssteller=?, "
+                    "rechnungsdatum=?, faelligkeitsdatum=?, betrag_brutto=?, betrag_netto=?, "
+                    "mwst_satz=?, mwst_betrag=?, lohnanteil=?, kategorie=?, beschreibung=?, "
+                    "beleg_dateipfad=?, status=? WHERE id=?",
+                    (v.get("rechnungsnummer"), v.get("rechnungssteller"),
+                     v.get("rechnungsdatum"), v.get("faelligkeitsdatum"),
+                     float(v.get("betrag_brutto") or 0),
+                     float(v.get("betrag_netto") or 0) or None,
+                     float(v.get("mwst_satz") or 19),
+                     float(v.get("mwst_betrag") or 0) or None,
+                     float(v.get("lohnanteil") or 0) or None,
+                     v.get("kategorie"), v.get("beschreibung"),
+                     v.get("beleg_dateipfad"), v.get("status", "Offen"),
+                     int(sel[0])))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load()
+
+    def _delete_rechnung(self):
+        if not hat_recht("Buchhaltung", "loeschen"):
+            messagebox.showwarning("Berechtigung", "Keine Löschberechtigung.", parent=self); return
+        sel = self.tree.selection()
+        if not sel: return
+        conn = get_db()
+        try:
+            cnt = conn.execute(
+                "SELECT COUNT(*) FROM zahlungen WHERE rechnung_id=?", (int(sel[0]),)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        hinweis = f"\n\n⚠ {cnt} Buchung(en) sind dieser Rechnung zugeordnet." if cnt else ""
+        if not messagebox.askyesno("Löschen",
+            f"Rechnung wirklich löschen?{hinweis}", parent=self):
+            return
+        conn = get_db()
+        try:
+            # Zuordnungen aufheben
+            conn.execute("UPDATE zahlungen SET rechnung_id=NULL WHERE rechnung_id=?", (int(sel[0]),))
+            conn.execute("DELETE FROM rechnungen WHERE id=?", (int(sel[0]),))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load()
+
+    def _buchung_zuordnen(self):
+        """Öffnet Dialog um bestehende Buchung einer Rechnung zuzuordnen."""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Auswahl", "Bitte eine Rechnung auswählen.", parent=self); return
+        rechnung_id = int(sel[0])
+        conn = get_db()
+        try:
+            r = conn.execute("SELECT * FROM rechnungen WHERE id=?", (rechnung_id,)).fetchone()
+        finally:
+            conn.close()
+        if not r: return
+        BuchungZuordnenDialog(self, rechnung_id, r["rechnungssteller"],
+                              r["betrag_brutto"] or 0, self._load)
+
+    def _show_buchungen(self):
+        """Zeigt alle Buchungen zu einer Rechnung."""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Auswahl", "Bitte eine Rechnung auswählen.", parent=self); return
+        rechnung_id = int(sel[0])
+        conn = get_db()
+        try:
+            r = conn.execute("SELECT * FROM rechnungen WHERE id=?", (rechnung_id,)).fetchone()
+            buchungen = conn.execute(
+                "SELECT datum, beschreibung, betrag, belegnr, status "
+                "FROM zahlungen WHERE rechnung_id=? ORDER BY datum",
+                (rechnung_id,)).fetchall()
+        finally:
+            conn.close()
+        if not r: return
+        win = tk.Toplevel(self)
+        win.title(f"Buchungen zu Rechnung {r['rechnungsnummer'] or r['id']}")
+        win.geometry("700x400")
+        win.configure(bg=BG_CARD)
+        win.grab_set()
+        tk.Label(win, text=f"Rechnung: {r['rechnungssteller']} – {fmt_euro(r['betrag_brutto'])}",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(14, 4), anchor="w")
+        cols = ("Datum", "Beschreibung", "Betrag €", "Beleg", "Status")
+        f, tree = make_table(win, cols, height=10)
+        f.pack(fill="both", expand=True, padx=20, pady=8)
+        for c, w in zip(cols, [90, 220, 100, 90, 90]):
+            tree.heading(c, text=c); tree.column(c, width=w, anchor="w")
+        tree.column("Betrag €", anchor="e")
+        total = 0.0
+        for b in buchungen:
+            betrag = b["betrag"] or 0
+            total += abs(betrag)
+            tree.insert("", "end", values=(
+                fmt_date(b["datum"]) if b["datum"] else "–",
+                b["beschreibung"] or "–",
+                fmt_euro(abs(betrag)),
+                b["belegnr"] or "–",
+                b["status"] or "–"
+            ))
+        tree_empty_hint(tree)
+        differenz = (r["betrag_brutto"] or 0) - total
+        diff_color = SUCCESS if abs(differenz) < 0.01 else (DANGER if differenz < -0.01 else ACCENT2)
+        sum_fr = tk.Frame(win, bg=BG_CARD)
+        sum_fr.pack(fill="x", padx=20, pady=(0, 12))
+        tk.Label(sum_fr, text=f"Gebucht: {fmt_euro(total)}   Differenz: {fmt_euro(differenz)}",
+                 bg=BG_CARD, fg=diff_color, font=FONT_H3).pack(side="left")
+        make_btn(win, "Schließen", win.destroy, color=BG_INPUT, fg=TEXT).pack(
+            side="bottom", anchor="e", padx=20, pady=8)
+
+    # ── ZUGFeRD / xRechnung Parser ────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_zugferd_cii(xml_bytes: bytes) -> dict:
+        """Parst ZUGFeRD / Factur-X / xRechnung CII XML."""
+        import xml.etree.ElementTree as ET
+        NS = {
+            "rsm": "urn:un:unece:uncefact:data:standard:CrossIndustryInvoice:100",
+            "ram": "urn:un:unece:uncefact:data:standard:ReusableAggregateBusinessInformationEntity:100",
+            "udt": "urn:un:unece:uncefact:data:standard:UnqualifiedDataType:100",
+        }
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            return {}
+        def _txt(path, ns=NS):
+            el = root.find(path, ns)
+            return el.text.strip() if el is not None and el.text else ""
+        # Rechnungsnummer
+        rnr = _txt(".//rsm:ExchangedDocument/ram:ID")
+        # Datum (YYYYMMDD → YYYY-MM-DD)
+        datum_raw = _txt(".//rsm:ExchangedDocument/ram:IssueDateTime/udt:DateTimeString")
+        rechnungsdatum = f"{datum_raw[:4]}-{datum_raw[4:6]}-{datum_raw[6:8]}" \
+            if len(datum_raw) >= 8 else datum_raw
+        # Steller
+        steller = _txt(".//ram:SellerTradeParty/ram:Name")
+        # Beträge
+        try:
+            brutto = float(_txt(".//ram:GrandTotalAmount") or 0)
+        except ValueError:
+            brutto = 0.0
+        try:
+            netto = float(_txt(".//ram:TaxBasisTotalAmount") or 0)
+        except ValueError:
+            netto = 0.0
+        try:
+            mwst = float(_txt(".//ram:TaxTotalAmount") or 0)
+        except ValueError:
+            mwst = 0.0
+        # Fälligkeit
+        faellig_raw = _txt(".//ram:DueDateDateTime/udt:DateTimeString")
+        faelligkeitsdatum = f"{faellig_raw[:4]}-{faellig_raw[4:6]}-{faellig_raw[6:8]}" \
+            if len(faellig_raw) >= 8 else ""
+        return {
+            "rechnungsnummer": rnr,
+            "rechnungssteller": steller,
+            "rechnungsdatum": rechnungsdatum,
+            "faelligkeitsdatum": faelligkeitsdatum,
+            "betrag_brutto": brutto,
+            "betrag_netto": netto,
+            "mwst_betrag": mwst,
+            "mwst_satz": round(mwst / netto * 100, 1) if netto else 19.0,
+            "zugferd_format": "ZUGFeRD/CII",
+        }
+
+    @staticmethod
+    def _parse_xrechnung_ubl(xml_bytes: bytes) -> dict:
+        """Parst xRechnung UBL 2.1 XML."""
+        import xml.etree.ElementTree as ET
+        NS = {
+            "ubl": "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2",
+            "cac": "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2",
+            "cbc": "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2",
+        }
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            return {}
+        def _txt(path):
+            el = root.find(path, NS)
+            return el.text.strip() if el is not None and el.text else ""
+        try:
+            brutto = float(_txt(".//cac:LegalMonetaryTotal/cbc:PayableAmount") or 0)
+        except ValueError:
+            brutto = 0.0
+        try:
+            netto = float(_txt(".//cac:LegalMonetaryTotal/cbc:TaxExclusiveAmount") or 0)
+        except ValueError:
+            netto = 0.0
+        return {
+            "rechnungsnummer": _txt("cbc:ID"),
+            "rechnungssteller": _txt(".//cac:AccountingSupplierParty/cac:Party/cac:PartyName/cbc:Name"),
+            "rechnungsdatum": _txt("cbc:IssueDate"),
+            "faelligkeitsdatum": _txt(".//cac:PaymentMeans/cbc:PaymentDueDate"),
+            "betrag_brutto": brutto,
+            "betrag_netto": netto,
+            "zugferd_format": "xRechnung-UBL",
+        }
+
+    @staticmethod
+    def _extrahiere_zugferd_aus_pdf(pdf_pfad: str) -> bytes:
+        """Versucht ZUGFeRD-XML aus PDF-Anhang zu extrahieren (ohne externe Libs)."""
+        try:
+            with open(pdf_pfad, "rb") as f:
+                data = f.read()
+            # Suche nach eingebettetem XML (ZUGFeRD/Factur-X)
+            markers = [b"<?xml version", b"<?XML VERSION"]
+            for marker in markers:
+                idx = data.find(marker)
+                while idx != -1:
+                    # Suche Ende des XML-Dokuments
+                    for end_tag in [b"</rsm:CrossIndustryInvoice>",
+                                    b"</CrossIndustryInvoice>",
+                                    b"</Invoice>"]:
+                        end_idx = data.find(end_tag, idx)
+                        if end_idx != -1:
+                            xml_bytes = data[idx:end_idx + len(end_tag)]
+                            if b"CrossIndustryInvoice" in xml_bytes or b"Invoice" in xml_bytes:
+                                return xml_bytes
+                    idx = data.find(marker, idx + 1)
+        except Exception:
+            pass
+        return b""
+
+    def _import_rechnung_aus_datei(self, pfad: str) -> dict:
+        """Liest Rechnungsdaten aus Datei: ZUGFeRD XML, xRechnung, oder KI-OCR."""
+        import os
+        ext = os.path.splitext(pfad)[1].lower()
+        # 1. Direkte XML-Datei
+        if ext == ".xml":
+            try:
+                with open(pfad, "rb") as f:
+                    xml_bytes = f.read()
+                # Versuche CII zuerst, dann UBL
+                if b"CrossIndustryInvoice" in xml_bytes:
+                    return self._parse_zugferd_cii(xml_bytes)
+                elif b"Invoice-2" in xml_bytes or b"urn:oasis:names:specification:ubl" in xml_bytes:
+                    return self._parse_xrechnung_ubl(xml_bytes)
+            except Exception:
+                pass
+        # 2. PDF mit eingebettetem ZUGFeRD-XML
+        if ext == ".pdf":
+            xml_bytes = self._extrahiere_zugferd_aus_pdf(pfad)
+            if xml_bytes:
+                result = self._parse_zugferd_cii(xml_bytes)
+                if result.get("rechnungssteller") or result.get("betrag_brutto"):
+                    return result
+        # 3. KI-OCR Fallback
+        return {}
+
+
+class BuchungZuordnenDialog(tk.Toplevel):
+    """#65 – Dialog um Buchungen einer Rechnung zuzuordnen."""
+
+    def __init__(self, parent, rechnung_id: int, steller: str,
+                 betrag_gesamt: float, callback=None):
+        super().__init__(parent)
+        self.title(f"Buchung zuordnen – {steller}")
+        self.configure(bg=BG_CARD)
+        self.geometry("760x520")
+        self.grab_set()
+        self._rechnung_id = rechnung_id
+        self._betrag_gesamt = betrag_gesamt
+        self._callback = callback
+        self._build()
+        self._load()
+
+    def _build(self):
+        tk.Label(self, text="Buchungen der Rechnung zuordnen",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(14, 2), anchor="w")
+        tk.Label(self,
+                 text="Doppelklick auf eine Buchung um sie dieser Rechnung zuzuordnen "
+                      "(oder Zuordnung aufzuheben).",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, anchor="w")
+
+        # Bereits zugeordnet
+        tk.Label(self, text="✅ Bereits zugeordnete Buchungen:",
+                 bg=BG_CARD, fg=SUCCESS, font=("Segoe UI Semibold", 9)).pack(
+                     padx=20, pady=(10, 2), anchor="w")
+        f1, self._tree_zugeord = make_table(self,
+            ("Datum", "Beschreibung", "Betrag €", "Belegnr."), height=4)
+        f1.pack(fill="x", padx=20)
+        for c, w in zip(("Datum", "Beschreibung", "Betrag €", "Belegnr."), [90, 220, 100, 90]):
+            self._tree_zugeord.heading(c, text=c); self._tree_zugeord.column(c, width=w)
+        self._tree_zugeord.column("Betrag €", anchor="e")
+        self._tree_zugeord.bind("<Double-1>", lambda e: self._toggle(self._tree_zugeord, False))
+
+        # Noch nicht zugeordnet
+        tk.Label(self, text="⬜ Nicht zugeordnete Buchungen (Doppelklick zum Zuordnen):",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(
+                     padx=20, pady=(8, 2), anchor="w")
+        f2, self._tree_offen = make_table(self,
+            ("Datum", "Beschreibung", "Betrag €", "Belegnr."), height=6)
+        f2.pack(fill="both", expand=True, padx=20)
+        for c, w in zip(("Datum", "Beschreibung", "Betrag €", "Belegnr."), [90, 220, 100, 90]):
+            self._tree_offen.heading(c, text=c); self._tree_offen.column(c, width=w)
+        self._tree_offen.column("Betrag €", anchor="e")
+        self._tree_offen.bind("<Double-1>", lambda e: self._toggle(self._tree_offen, True))
+
+        # Summen
+        self._sum_lbl = tk.Label(self, text="", bg=BG_CARD, fg=TEXT, font=FONT_H3)
+        self._sum_lbl.pack(padx=20, pady=(6, 2), anchor="w")
+
+        btn_row = tk.Frame(self, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(btn_row, "Schließen", self._close, color=ACCENT2).pack(side="right")
+
+    def _load(self):
+        for t in (self._tree_zugeord, self._tree_offen):
+            for i in t.get_children(): t.delete(i)
+        conn = get_db()
+        try:
+            zugeordnet = conn.execute(
+                "SELECT id, datum, beschreibung, betrag, belegnr FROM zahlungen "
+                "WHERE rechnung_id=? ORDER BY datum", (self._rechnung_id,)).fetchall()
+            offen = conn.execute(
+                "SELECT id, datum, beschreibung, betrag, belegnr FROM zahlungen "
+                "WHERE rechnung_id IS NULL AND typ='Ausgabe' ORDER BY datum DESC LIMIT 100"
+            ).fetchall()
+        finally:
+            conn.close()
+        total = 0.0
+        for b in zugeordnet:
+            betrag = abs(b["betrag"] or 0)
+            total += betrag
+            self._tree_zugeord.insert("", "end", iid=b["id"], values=(
+                fmt_date(b["datum"]) if b["datum"] else "–",
+                b["beschreibung"] or "–", fmt_euro(betrag), b["belegnr"] or "–"))
+        for b in offen:
+            betrag = abs(b["betrag"] or 0)
+            self._tree_offen.insert("", "end", iid=b["id"], values=(
+                fmt_date(b["datum"]) if b["datum"] else "–",
+                b["beschreibung"] or "–", fmt_euro(betrag), b["belegnr"] or "–"))
+        tree_empty_hint(self._tree_zugeord)
+        tree_empty_hint(self._tree_offen)
+        diff = self._betrag_gesamt - total
+        diff_color = SUCCESS if abs(diff) < 0.01 else (DANGER if diff < -0.01 else ACCENT2)
+        self._sum_lbl.config(
+            text=f"Rechnungsbetrag: {fmt_euro(self._betrag_gesamt)}  "
+                 f"Gebucht: {fmt_euro(total)}  "
+                 f"Differenz: {fmt_euro(diff)}",
+            fg=diff_color)
+
+    def _toggle(self, tree, zuordnen: bool):
+        sel = tree.selection()
+        if not sel: return
+        zahlung_id = int(sel[0])
+        conn = get_db()
+        try:
+            if zuordnen:
+                conn.execute("UPDATE zahlungen SET rechnung_id=? WHERE id=?",
+                             (self._rechnung_id, zahlung_id))
+            else:
+                conn.execute("UPDATE zahlungen SET rechnung_id=NULL WHERE id=?",
+                             (zahlung_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load()
+        if self._callback:
+            self._callback()
+
+    def _close(self):
+        if self._callback:
+            self._callback()
+        self.destroy()
+
+
+class RechnungDialog(BaseDialog):
+    """Dialog zum Anlegen/Bearbeiten einer Rechnung (#66)."""
+
+    def __init__(self, parent, row=None):
+        super().__init__(parent, "Rechnung" + (" bearbeiten" if row else " erfassen"), 580, 720)
+        r = row or {}
+
+        # Grunddaten
+        self._add_field("Rechnungsnummer", "rechnungsnummer", r.get("rechnungsnummer", "") or "")
+        self._add_field("Rechnungssteller *", "rechnungssteller", r.get("rechnungssteller", "") or "")
+        self._add_field("Rechnungsdatum (JJJJ-MM-TT)", "rechnungsdatum",
+                        r.get("rechnungsdatum", date.today().isoformat()) or "")
+        self._add_field("Fälligkeitsdatum (JJJJ-MM-TT)", "faelligkeitsdatum",
+                        r.get("faelligkeitsdatum", "") or "")
+
+        # Beträge
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(self._body, text="Beträge",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=("Segoe UI Semibold", 9)).pack(padx=20, anchor="w")
+        self._add_field("Betrag Brutto € *", "betrag_brutto",
+                        r.get("betrag_brutto", "") or "")
+        self._add_field("Betrag Netto €", "betrag_netto",
+                        r.get("betrag_netto", "") or "")
+        self._add_field("MwSt. %", "mwst_satz", r.get("mwst_satz", "19") or "19")
+        self._add_field("MwSt. Betrag €", "mwst_betrag", r.get("mwst_betrag", "") or "")
+        self._add_field("Lohnanteil € (§35a EStG)", "lohnanteil", r.get("lohnanteil", "") or "")
+
+        # Kategorie & Status
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        self._add_field("Kategorie", "kategorie", r.get("kategorie", "") or "",
+                        widget_type="combo", options=BuchhaltungPage.aktive_kategorien())
+        self._add_field("Status", "status", r.get("status", "Offen") or "Offen",
+                        widget_type="combo", options=RechnungenPage.STATI)
+        self._add_field("Beschreibung", "beschreibung", r.get("beschreibung", "") or "",
+                        widget_type="text")
+
+        # Beleg-Datei
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 4))
+        tk.Label(self._body, text="Beleg / Rechnung (PDF, XML)",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, anchor="w")
+        beleg_row = tk.Frame(self._body, bg=BG_CARD)
+        beleg_row.pack(fill="x", padx=20)
+        self._beleg_var = tk.StringVar(value=r.get("beleg_dateipfad", "") or "")
+        beleg_entry = tk.Entry(beleg_row, textvariable=self._beleg_var,
+                               bg=BG_INPUT, fg=TEXT, font=FONT_BODY,
+                               relief="flat", bd=0, highlightthickness=1,
+                               highlightbackground=BORDER)
+        beleg_entry.pack(side="left", fill="x", expand=True, ipady=5)
+        make_btn(beleg_row, "📂 Durchsuchen", self._browse_und_import,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(6, 0))
+        self._import_lbl = tk.Label(self._body,
+            text=f"Format: {r.get('zugferd_format','–')}" if r.get("zugferd_format") else "",
+            bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL)
+        self._import_lbl.pack(padx=20, anchor="w")
+
+    def _browse_und_import(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Rechnung auswählen (PDF, XML)",
+            filetypes=[("Rechnungen", "*.pdf *.xml"), ("Alle", "*.*")]
+        )
+        if not path:
+            return
+        self._beleg_var.set(path)
+        # Versuche automatischen Import
+        try:
+            daten = RechnungenPage._extrahiere_und_parse(path)
+            if daten:
+                self._felder_befuellen(daten)
+                fmt = daten.get("zugferd_format", "Unbekannt")
+                self._import_lbl.config(text=f"✅ Importiert ({fmt})", fg=SUCCESS)
+            else:
+                self._import_lbl.config(
+                    text="ℹ Kein ZUGFeRD/xRechnung erkannt – bitte manuell ausfüllen",
+                    fg=TEXT_LIGHT)
+        except Exception as ex:
+            self._import_lbl.config(text=f"⚠ Fehler: {ex}", fg=DANGER)
+
+    def _felder_befuellen(self, daten: dict):
+        """Befüllt Formularfelder aus importierten Rechnungsdaten."""
+        def _set(key, val):
+            if not val:
+                return
+            w = self._fields.get(key)
+            if not w: return
+            if hasattr(w, "set"): w.set(str(val))
+            elif hasattr(w, "delete"): w.delete(0, "end"); w.insert(0, str(val))
+        for key in ("rechnungsnummer", "rechnungssteller", "rechnungsdatum",
+                    "faelligkeitsdatum", "betrag_brutto", "betrag_netto",
+                    "mwst_satz", "mwst_betrag", "lohnanteil"):
+            _set(key, daten.get(key))
+
+    def _on_save(self):
+        v = self._get_values()
+        if not v.get("rechnungssteller"):
+            messagebox.showwarning("Pflichtfeld", "Rechnungssteller ist erforderlich.", parent=self)
+            return
+        if not v.get("betrag_brutto"):
+            messagebox.showwarning("Pflichtfeld", "Betrag Brutto ist erforderlich.", parent=self)
+            return
+        v["beleg_dateipfad"] = self._beleg_var.get().strip() or None
+        self.result = v
+        self.destroy()
+
+
+# ── Hilfsmethode als Klassenmethode von RechnungenPage ───────────────────────
+
+@staticmethod
+def _extrahiere_und_parse_static(pfad: str) -> dict:
+    """Extrahiert und parst Rechnungsdaten aus Datei (ZUGFeRD/xRechnung/PDF)."""
+    import os
+    ext = os.path.splitext(pfad)[1].lower()
+    if ext == ".xml":
+        try:
+            with open(pfad, "rb") as f:
+                xml_bytes = f.read()
+            if b"CrossIndustryInvoice" in xml_bytes:
+                return RechnungenPage._parse_zugferd_cii(xml_bytes)
+            elif b"Invoice-2" in xml_bytes or b"urn:oasis:names:specification:ubl" in xml_bytes:
+                return RechnungenPage._parse_xrechnung_ubl(xml_bytes)
+        except Exception:
+            pass
+    elif ext == ".pdf":
+        xml_bytes = RechnungenPage._extrahiere_zugferd_aus_pdf(pfad)
+        if xml_bytes:
+            result = RechnungenPage._parse_zugferd_cii(xml_bytes)
+            if result.get("rechnungssteller") or result.get("betrag_brutto"):
+                return result
+    return {}
+
+
+RechnungenPage._extrahiere_und_parse = staticmethod(_extrahiere_und_parse_static)
+
 
 # ── Wartung-Seite ─────────────────────────────────────────────────────────────
 
@@ -3977,9 +5366,19 @@ class DokumentDialog(BaseDialog):
         make_btn(row, "…", self._browse, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(4, 0))
 
     def _browse(self):
-        initial_dir = get_pfad("pfad_dokumente", "Dokumente")  # #38
-        path = filedialog.askopenfilename(title="Datei auswählen", initialdir=initial_dir)
+        import shutil, os
+        dok_ordner = get_pfad("pfad_dokumente", "Dokumente")  # #38
+        path = filedialog.askopenfilename(title="Datei auswählen", initialdir=str(dok_ordner))
         if path:
+            # Datei in den Dokumente-Ordner kopieren, falls sie nicht schon dort liegt (#47)
+            if os.path.normpath(os.path.dirname(path)) != os.path.normpath(str(dok_ordner)):
+                ziel = os.path.join(str(dok_ordner), os.path.basename(path))
+                try:
+                    if not os.path.exists(ziel):
+                        shutil.copy2(path, ziel)
+                    path = ziel
+                except Exception:
+                    pass  # Original-Pfad beibehalten wenn Kopieren fehlschlägt
             self._path_var.set(path)
 
     def _on_save(self):
@@ -4502,7 +5901,10 @@ class NebenkostenPage(tk.Frame):
                 color_tag     = "leerstand"
             else:
                 mieter_name   = f"{w['vorname'] or ''} {w['name']}".strip()
-                vorauszahlung = (parse_float(w["nebenkosten_vorauszahlung"]) or 0) * 12 * zeitfaktor
+                # #59: Zeitraum-basierte NK-Vorauszahlung (Fallback: statischer Wert × 12)
+                fallback_monatlich = parse_float(w["nebenkosten_vorauszahlung"]) or 0
+                vorauszahlung = nk_vorauszahlung_fuer_jahr(
+                    w["mieter_id"], int(jahr), fallback_monatlich) * zeitfaktor
                 saldo         = vorauszahlung - kosten
                 color_tag     = "plus" if saldo >= 0 else "minus"
             self._tree_bgb_mi.insert("", "end", values=(
@@ -6483,6 +7885,7 @@ class WasserkostenPage(tk.Frame):
                           state="readonly", width=6, font=FONT_BODY)
         cb.pack(side="left")
         cb.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+        self._jahr_var.trace_add("write", lambda *_: self._refresh())  # #63
         make_btn(top, "Aktualisieren", self._refresh,
                  color=BG_INPUT, fg=TEXT).pack(side="left", padx=8)
 
@@ -6683,8 +8086,13 @@ class WasserkostenPage(tk.Frame):
             basis = (rd["personen"] + rd["spuelmaschinen"] +
                      rd["waschmaschinen"] + rd["trockner_wasserkuehlung"])
             gew = round(basis * (rd["monate"] or 12) / 12, 2)
+            # #64: Wohnungsbezeichnung + Mietername (aus bemerkung) + Zeitraum anzeigen
+            von_str = (rd.get("von_datum") or "")[:10] if rd.get("von_datum") else ""
+            bis_str = (rd.get("bis_datum") or "")[:10] if rd.get("bis_datum") else ""
+            zeitraum = f" [{von_str}→{bis_str}]" if (von_str or bis_str) else ""
+            bez = rd["wohnung_bezeichnung"] + zeitraum
             self.tree_p.insert("", "end", iid=rd["id"], values=(
-                rd["wohnung_bezeichnung"], rd["eigentuemer"] or "",
+                bez, rd["eigentuemer"] or "",
                 rd["personen"], rd["spuelmaschinen"], rd["waschmaschinen"],
                 rd["trockner_wasserkuehlung"], rd["monate"], basis, gew))
 
@@ -6750,34 +8158,52 @@ class WasserkostenPage(tk.Frame):
         r = row or {}
         wohn_v  = lf("Wohnung / Mieter *",             r.get("wohnung_bezeichnung", ""))
         eig_v   = lf("Eigentuemer",                     r.get("eigentuemer", ""))
+        # #64 – Von/Bis-Datum für Mietzeitraum
+        von_v   = lf("Von (JJJJ-MM-TT im Jahr)",       r.get("von_datum", f"{jahr}-01-01") or f"{jahr}-01-01")
+        bis_v   = lf("Bis (JJJJ-MM-TT im Jahr)",       r.get("bis_datum", f"{jahr}-12-31") or f"{jahr}-12-31")
         pers_v  = lf("Personen",                        r.get("personen", 1))
         spuel_v = lf("Spuelmaschinen (je 1 Pkt)",       r.get("spuelmaschinen", 0))
         wasch_v = lf("Waschmaschinen (je 1 Pkt)",       r.get("waschmaschinen", 1))
         trock_v = lf("Trockner Wasserkuehlung (1 Pkt)", r.get("trockner_wasserkuehlung", 0))
-        mon_v   = lf("Monate im Abrechnungsjahr",       r.get("monate", 12))
+        mon_v   = lf("Monate (auto aus Von/Bis)",       r.get("monate", 12))
+        # Auto-Berechnung Monate aus Von/Bis
+        def _auto_monate(*_):
+            mon = WasserkostenPage._calc_monate_im_jahr(
+                von_v.get().strip(), bis_v.get().strip(), jahr)
+            if mon > 0:
+                mon_v.set(str(mon))
+        von_v.trace_add("write", _auto_monate)
+        bis_v.trace_add("write", _auto_monate)
 
         def _save():
             wohn = wohn_v.get().strip()
             if not wohn:
                 messagebox.showwarning("Pflichtfeld", "Wohnung ist erforderlich.", parent=win)
                 return
+            von_str = von_v.get().strip() or None
+            bis_str = bis_v.get().strip() or None
+            monate = max(0.0, min(12.0, self._flt(mon_v.get()) or 12.0))
             conn = get_db()
-            vals = (jahr, wohn, eig_v.get().strip(),
-                    self._int(pers_v.get()), self._int(spuel_v.get()),
-                    self._int(wasch_v.get()), self._int(trock_v.get()),
-                    max(0.0, min(12.0, self._flt(mon_v.get()) or 12.0)))
             if row:
                 conn.execute(
                     "UPDATE wasserkosten_wohnungsdaten SET "
-                    "wohnung_bezeichnung=?, eigentuemer=?, personen=?, spuelmaschinen=?, "
-                    "waschmaschinen=?, trockner_wasserkuehlung=?, monate=? WHERE id=?",
-                    (wohn, vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], row["id"]))
+                    "wohnung_bezeichnung=?, eigentuemer=?, von_datum=?, bis_datum=?, "
+                    "personen=?, spuelmaschinen=?, waschmaschinen=?, "
+                    "trockner_wasserkuehlung=?, monate=? WHERE id=?",
+                    (wohn, eig_v.get().strip(), von_str, bis_str,
+                     self._int(pers_v.get()), self._int(spuel_v.get()),
+                     self._int(wasch_v.get()), self._int(trock_v.get()),
+                     monate, row["id"]))
             else:
                 conn.execute(
                     "INSERT INTO wasserkosten_wohnungsdaten "
-                    "(jahr, wohnung_bezeichnung, eigentuemer, personen, spuelmaschinen, "
-                    "waschmaschinen, trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,?,?,?)",
-                    vals)
+                    "(jahr, wohnung_bezeichnung, eigentuemer, von_datum, bis_datum, "
+                    "personen, spuelmaschinen, waschmaschinen, "
+                    "trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (jahr, wohn, eig_v.get().strip(), von_str, bis_str,
+                     self._int(pers_v.get()), self._int(spuel_v.get()),
+                     self._int(wasch_v.get()), self._int(trock_v.get()),
+                     monate))
             conn.commit()
             conn.close()
             win.destroy()
@@ -6785,44 +8211,145 @@ class WasserkostenPage(tk.Frame):
 
         make_btn(br, "Speichern", _save, color=SUCCESS).pack(side="right")
 
+    @staticmethod
+    def _calc_monate_im_jahr(einzug: str, auszug: str, jahr: int) -> float:
+        """#64 – Berechnet anteilige Monate eines Mieters im Abrechnungsjahr (Pro-Rata)."""
+        from datetime import date as _date
+        j_von = _date(jahr, 1, 1)
+        j_bis = _date(jahr, 12, 31)
+        tage_jahr = 366 if (jahr % 4 == 0 and (jahr % 100 != 0 or jahr % 400 == 0)) else 365
+        try:
+            von_d = max(_date.fromisoformat(einzug), j_von) if einzug else j_von
+        except (ValueError, TypeError):
+            von_d = j_von
+        try:
+            bis_d = min(_date.fromisoformat(auszug), j_bis) if auszug else j_bis
+        except (ValueError, TypeError):
+            bis_d = j_bis
+        if bis_d < von_d:
+            return 0.0
+        tage = (bis_d - von_d).days + 1
+        return round(tage / tage_jahr * 12, 2)
+
     def _import_wohnungen(self):
-        """Uebernimmt Wohnungen aus Stammdaten."""
+        """#64 – Übernimmt Wohnungen aus Stammdaten mit Mietzeitraum-Berücksichtigung."""
+        from datetime import date as _date
         jahr = self._jahr_int()
         if not jahr:
             return
+        j_von = _date(jahr, 1, 1)
+        j_bis = _date(jahr, 12, 31)
         conn = get_db()
-        wohnungen = conn.execute(
-            "SELECT w.bezeichnung, COALESCE(e.name,'') AS eig, "
-            "COALESCE(m.personen,1) AS personen, COALESCE(m.spuelmaschinen,0) AS spuel, "
-            "COALESCE(m.waschmaschinen,1) AS wasch, COALESCE(m.trockner_wasserkuehlung,0) AS trockner "
-            "FROM wohnungen w "
-            "LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id "
-            "LEFT JOIN mieter m ON w.id=m.wohnung_id AND (m.auszug IS NULL OR m.auszug='') "
-            "ORDER BY w.bezeichnung").fetchall()
-        if not wohnungen:
-            messagebox.showinfo("Keine Wohnungen",
-                "Keine Wohnungen in den Stammdaten.\nBitte zuerst Wohnungen anlegen.",
-                parent=self)
+        try:
+            wohnungen_db = conn.execute(
+                "SELECT w.id, w.bezeichnung, COALESCE(e.name,'') AS eig "
+                "FROM wohnungen w "
+                "LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id "
+                "WHERE w.aktiv=1 ORDER BY w.bezeichnung"
+            ).fetchall()
+            if not wohnungen_db:
+                messagebox.showinfo("Keine Wohnungen",
+                    "Keine aktiven Wohnungen in den Stammdaten.", parent=self)
+                return
+            added = updated = 0
+            for w in wohnungen_db:
+                # Alle Mieter laden, die im Abrechnungsjahr in dieser Wohnung waren
+                mieter_rows = conn.execute(
+                    "SELECT m.vorname, m.name, m.einzug, m.auszug, "
+                    "  COALESCE(m.personen,1) AS personen, "
+                    "  COALESCE(m.spuelmaschinen,0) AS spuel, "
+                    "  COALESCE(m.waschmaschinen,1) AS wasch, "
+                    "  COALESCE(m.trockner_wasserkuehlung,0) AS trockner "
+                    "FROM mieter m "
+                    "WHERE m.wohnung_id=? "
+                    "  AND m.einzug <= ? "
+                    "  AND (m.auszug IS NULL OR m.auszug='' OR m.auszug >= ?) "
+                    "ORDER BY m.einzug",
+                    (w["id"], j_bis.isoformat(), j_von.isoformat())
+                ).fetchall()
+
+                if mieter_rows:
+                    for m in mieter_rows:
+                        monate = self._calc_monate_im_jahr(
+                            m["einzug"], m["auszug"] or None, jahr)
+                        if monate <= 0:
+                            continue
+                        mname = f"{m['vorname'] or ''} {m['name']}".strip()
+                        # Von/Bis im Jahr berechnen
+                        try:
+                            von_d = max(_date.fromisoformat(m["einzug"]), j_von)
+                        except (ValueError, TypeError):
+                            von_d = j_von
+                        try:
+                            bis_d = min(_date.fromisoformat(m["auszug"]), j_bis) \
+                                if m["auszug"] else j_bis
+                        except (ValueError, TypeError):
+                            bis_d = j_bis
+                        # Eindeutigkeitsschlüssel: (jahr, bez, von_datum)
+                        existing = conn.execute(
+                            "SELECT id FROM wasserkosten_wohnungsdaten "
+                            "WHERE jahr=? AND wohnung_bezeichnung=? AND von_datum=?",
+                            (jahr, w["bezeichnung"], von_d.isoformat())
+                        ).fetchone()
+                        if existing:
+                            conn.execute(
+                                "UPDATE wasserkosten_wohnungsdaten SET "
+                                "eigentuemer=?, personen=?, spuelmaschinen=?, "
+                                "waschmaschinen=?, trockner_wasserkuehlung=?, "
+                                "bis_datum=?, monate=?, bemerkung=? WHERE id=?",
+                                (w["eig"], m["personen"], m["spuel"], m["wasch"], m["trockner"],
+                                 bis_d.isoformat(), monate, mname, existing["id"]))
+                            updated += 1
+                        else:
+                            conn.execute(
+                                "INSERT INTO wasserkosten_wohnungsdaten "
+                                "(jahr, wohnung_bezeichnung, eigentuemer, von_datum, bis_datum, "
+                                "personen, spuelmaschinen, waschmaschinen, "
+                                "trockner_wasserkuehlung, monate, bemerkung) "
+                                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                                (jahr, w["bezeichnung"], w["eig"],
+                                 von_d.isoformat(), bis_d.isoformat(),
+                                 m["personen"], m["spuel"], m["wasch"], m["trockner"],
+                                 monate, mname))
+                            added += 1
+                else:
+                    # Keine Mieter → Eigentümer als Leerstand, 12 Monate
+                    existing = conn.execute(
+                        "SELECT id FROM wasserkosten_wohnungsdaten "
+                        "WHERE jahr=? AND wohnung_bezeichnung=? AND "
+                        "(von_datum IS NULL OR von_datum=?)",
+                        (jahr, w["bezeichnung"], j_von.isoformat())
+                    ).fetchone()
+                    if existing:
+                        conn.execute(
+                            "UPDATE wasserkosten_wohnungsdaten SET "
+                            "eigentuemer=?, monate=12 WHERE id=?",
+                            (w["eig"], existing["id"]))
+                        updated += 1
+                    else:
+                        conn.execute(
+                            "INSERT INTO wasserkosten_wohnungsdaten "
+                            "(jahr, wohnung_bezeichnung, eigentuemer, von_datum, bis_datum, "
+                            "personen, spuelmaschinen, waschmaschinen, "
+                            "trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,1,0,1,0,12)",
+                            (jahr, w["bezeichnung"], w["eig"],
+                             j_von.isoformat(), j_bis.isoformat()))
+                        added += 1
+            conn.commit()
+        finally:
             conn.close()
-            return
-        added = 0
-        for w in wohnungen:
-            if not conn.execute(
-                "SELECT id FROM wasserkosten_wohnungsdaten WHERE jahr=? AND wohnung_bezeichnung=?",
-                    (jahr, w["bezeichnung"])).fetchone():
-                conn.execute(
-                    "INSERT INTO wasserkosten_wohnungsdaten "
-                    "(jahr, wohnung_bezeichnung, eigentuemer, personen, spuelmaschinen, "
-                    "waschmaschinen, trockner_wasserkuehlung, monate) VALUES (?,?,?,?,?,?,?,12)",
-                    (jahr, w["bezeichnung"], w["eig"], w["personen"], w["spuel"], w["wasch"], w["trockner"]))
-                added += 1
-        conn.commit()
-        conn.close()
+        teile = []
         if added:
-            messagebox.showinfo("Uebernommen",
-                f"{added} Wohnung(en) uebernommen.\nBitte Werte anpassen.", parent=self)
+            teile.append(f"{added} neu hinzugefügt")
+        if updated:
+            teile.append(f"{updated} aktualisiert")
+        if teile:
+            messagebox.showinfo("Aus Stamm übernommen",
+                ", ".join(teile) + ".\nBei Mieterwechsel wurden separate Zeilen angelegt.",
+                parent=self)
         else:
-            messagebox.showinfo("Vorhanden", "Alle Wohnungen bereits eingetragen.", parent=self)
+            messagebox.showinfo("Keine Änderungen",
+                "Alle Einträge bereits aktuell.", parent=self)
         self._load_punkte()
 
     # ── Tab 3: Auswertung ─────────────────────────────────────────────────────
@@ -7389,17 +8916,24 @@ Antworte immer auf Deutsch.
 
     def _anthropic_call_thread(self, messages, cfg, modell_override=None):
         """API-Call an Anthropic Claude."""
+        import time as _time
+        _t0 = _time.time()
         key = cfg.get("anthropic_api_key", "").strip()
         if not key:
             self.after(0, lambda: self._append_chat("error_msg",
                 "❌ Kein Anthropic API-Key. Bitte in Einstellungen → KI-Administration eintragen."))
             return
+        # KI-Training laden (#46)
+        _feld_hinweise, _system_zusatz = _lade_ki_training("KI-Assistent")
+        system_text = self._SCHEMA_KONTEXT
+        if _system_zusatz:
+            system_text = system_text + "\n\n" + _system_zusatz
         try:
             modell = modell_override or cfg.get("ki_modell", "claude-opus-4-6")
             payload = json.dumps({
                 "model": modell,
                 "max_tokens": 1024,
-                "system": self._SCHEMA_KONTEXT,
+                "system": system_text,
                 "messages": messages
             }).encode("utf-8")
             req = urllib.request.Request(
@@ -7415,22 +8949,37 @@ Antworte immer auf Deutsch.
                 data = json.loads(resp.read().decode("utf-8"))
             antwort = data["content"][0]["text"]
             self._messages.append({"role": "assistant", "content": antwort})
+            # KI-Protokoll (#45)
+            eingabe_kurz = messages[-1]["content"][:200] if messages else ""
+            ki_log("KI-Assistent", "Chat", eingabe_kurz, antwort[:300],
+                   modell, "anthropic", int((_time.time() - _t0) * 1000))
             if "SQL:" in antwort:
                 self.after(0, lambda a=antwort: self._handle_sql_response(a))
             else:
                 self.after(0, lambda a=antwort: self._append_chat("ki_bubble", f"🤖 Claude: {a}"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
+            ki_log("KI-Assistent", "Fehler", "", "", modell_override or "", "anthropic",
+                   int((_time.time() - _t0) * 1000), body[:200])
             self.after(0, lambda b=body: self._append_chat("error_msg", f"❌ API-Fehler: {b[:200]}"))
         except Exception as ex:
+            ki_log("KI-Assistent", "Fehler", "", "", modell_override or "", "anthropic",
+                   int((_time.time() - _t0) * 1000), str(ex))
             self.after(0, lambda x=str(ex): self._append_chat("error_msg", f"❌ Fehler: {x}"))
 
     def _ollama_call_thread(self, messages, cfg, modell_override=None):
         """API-Call an lokales Ollama (POST /api/chat)."""
+        import time as _time
+        _t0 = _time.time()
         base_url = cfg.get("ollama_url", "http://localhost:11434").strip().rstrip("/")
         modell   = modell_override or cfg.get("ollama_modell", "llama3.2").strip() or "llama3.2"
+        # KI-Training laden (#46)
+        _feld_hinweise, _system_zusatz = _lade_ki_training("KI-Assistent")
+        system_text = self._SCHEMA_KONTEXT
+        if _system_zusatz:
+            system_text = system_text + "\n\n" + _system_zusatz
         # System-Nachricht als erstes Element in messages-Liste (Ollama-Format)
-        ollama_msgs = [{"role": "system", "content": self._SCHEMA_KONTEXT}] + messages
+        ollama_msgs = [{"role": "system", "content": system_text}] + messages
         try:
             payload = json.dumps({
                 "model":    modell,
@@ -7447,6 +8996,10 @@ Antworte immer auf Deutsch.
                 data = json.loads(resp.read().decode("utf-8"))
             antwort = data["message"]["content"]
             self._messages.append({"role": "assistant", "content": antwort})
+            # KI-Protokoll (#45)
+            eingabe_kurz = messages[-1]["content"][:200] if messages else ""
+            ki_log("KI-Assistent", "Chat", eingabe_kurz, antwort[:300],
+                   modell, "ollama", int((_time.time() - _t0) * 1000))
             label = f"🤖 {modell}"
             if "SQL:" in antwort:
                 self.after(0, lambda a=antwort: self._handle_sql_response(a))
@@ -7454,10 +9007,14 @@ Antworte immer auf Deutsch.
                 self.after(0, lambda a=antwort, l=label:
                            self._append_chat("ki_bubble", f"{l}: {a}"))
         except urllib.error.URLError as e:
+            ki_log("KI-Assistent", "Fehler", "", "", modell, "ollama",
+                   int((_time.time() - _t0) * 1000), str(e))
             self.after(0, lambda x=str(e): self._append_chat("error_msg",
                 f"❌ Ollama nicht erreichbar ({base_url}):\n{x}\n"
                 "Bitte sicherstellen dass Ollama läuft: ollama serve"))
         except Exception as ex:
+            ki_log("KI-Assistent", "Fehler", "", "", modell, "ollama",
+                   int((_time.time() - _t0) * 1000), str(ex))
             self.after(0, lambda x=str(ex): self._append_chat("error_msg",
                 f"❌ Ollama-Fehler: {x}"))
 
@@ -7666,19 +9223,32 @@ class KiProtokollPage(tk.Frame):
         flt.pack(fill="x", padx=16, pady=(10, 4))
         tk.Label(flt, text="Bereich:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
         self._bereich_var = tk.StringVar(value="Alle")
-        bereiche = ["Alle", "Buchhaltung", "Ista-Wärme", "Nebenkosten", "Dokumente"]
+        bereiche = ["Alle", "Beleg-Analyse", "Ista-Extraktion", "KI-Assistent"]
         ttk.Combobox(flt, textvariable=self._bereich_var, values=bereiche,
                      state="readonly", width=18, font=FONT_SMALL).pack(side="left", padx=(4, 16))
         make_btn(flt, "🔄 Laden", self._load_protokoll, color=ACCENT2).pack(side="left")
         make_btn(flt, "🗑 Protokoll leeren", self._protokoll_leeren,
                  color=DANGER).pack(side="right")
 
-        cols = ("Zeitpunkt", "Bereich", "Aktion", "Modell", "Eingabe (Auszug)", "Ergebnis (Auszug)", "Fehler")
+        cols = ("ID", "Zeitpunkt", "Bereich", "Aktion", "Modell", "Eingabe (Auszug)", "Ergebnis (Auszug)", "Fehler")
         f, self._tree_log = make_table(parent, cols, height=14)
         f.pack(fill="both", expand=True, padx=16, pady=4)
-        for c, w in zip(cols, [140, 100, 100, 140, 200, 200, 120]):
+        for c, w in zip(cols, [0, 140, 100, 100, 140, 200, 200, 120]):
             self._tree_log.heading(c, text=c)
             self._tree_log.column(c, width=w, anchor="w")
+        # ID-Spalte unsichtbar (#53)
+        self._tree_log.column("ID", width=0, minwidth=0, stretch=False)
+
+        # #53 Doppelklick für Detail-Ansicht
+        self._tree_log.bind("<Double-1>", self._show_detail)
+
+        # Buttons unter dem Tree
+        btn_proto = tk.Frame(parent, bg=BG_CARD)
+        btn_proto.pack(fill="x", padx=16, pady=(0, 4))
+        make_btn(btn_proto, "🔍 Details anzeigen", self._show_detail,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
+        make_btn(btn_proto, "📋 Kopieren", self._copy_detail,
+                 color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0, 6))
 
         self._load_protokoll()
 
@@ -7696,6 +9266,7 @@ class KiProtokollPage(tk.Frame):
         conn.close()
         for r in rows:
             self._tree_log.insert("", "end", values=(
+                r["id"],
                 (r["zeitpunkt"] or "")[:16],
                 r["bereich"] or "",
                 r["aktion"] or "",
@@ -7717,6 +9288,97 @@ class KiProtokollPage(tk.Frame):
             conn.close()
             self._load_protokoll()
 
+    def _get_selected_protokoll(self):
+        """Gibt den vollständigen DB-Row des ausgewählten Protokolleintrags zurück (#53)."""
+        sel = self._tree_log.selection()
+        if not sel:
+            messagebox.showinfo("Hinweis", "Bitte einen Eintrag auswählen.", parent=self)
+            return None
+        vals = self._tree_log.item(sel[0], "values")
+        if not vals:
+            return None
+        row_id = vals[0]
+        try:
+            conn = get_db()
+            r = conn.execute("SELECT * FROM ki_protokoll WHERE id=?", (int(row_id),)).fetchone()
+            conn.close()
+            return dict(r) if r else None
+        except Exception:
+            return None
+
+    def _show_detail(self, event=None):
+        """#53 – Detail-Ansicht eines KI-Protokolleintrags per Doppelklick oder Button."""
+        r = self._get_selected_protokoll()
+        if not r:
+            return
+        # Detail-Dialog
+        dlg = tk.Toplevel(self)
+        dlg.title(f"KI-Protokoll – {r.get('bereich','')} – {r.get('aktion','')}")
+        dlg.geometry("700x550")
+        dlg.configure(bg=BG_CARD)
+        dlg.grab_set()
+
+        header = tk.Frame(dlg, bg=BG_SIDEBAR, height=40)
+        header.pack(fill="x"); header.pack_propagate(False)
+        tk.Label(header, text=f"Protokoll #{r['id']}", bg=BG_SIDEBAR, fg=TEXT_WHITE,
+                 font=FONT_H3).pack(side="left", padx=14, pady=8)
+
+        body = tk.Frame(dlg, bg=BG_CARD)
+        body.pack(fill="both", expand=True, padx=16, pady=8)
+
+        def _row(lbl, val):
+            f = tk.Frame(body, bg=BG_CARD); f.pack(fill="x", pady=2)
+            tk.Label(f, text=lbl, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     width=14, anchor="e").pack(side="left")
+            tk.Label(f, text=str(val or "–"), bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                     anchor="w", wraplength=520).pack(side="left", padx=(6,0), fill="x", expand=True)
+
+        _row("Zeitpunkt:", r.get("zeitpunkt",""))
+        _row("Bereich:", r.get("bereich",""))
+        _row("Aktion:", r.get("aktion",""))
+        _row("Modell:", r.get("modell",""))
+        _row("Anbieter:", r.get("anbieter",""))
+        _row("Dauer (ms):", r.get("dauer_ms",""))
+        _row("Fehler:", r.get("fehler",""))
+
+        # Eingabe (vollständig)
+        tk.Label(body, text="Eingabe:", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w", pady=(8,2))
+        t_in = tk.Text(body, height=5, font=FONT_BODY, bg=BG_INPUT, fg=TEXT,
+                       relief="flat", wrap="word", padx=6, pady=4)
+        t_in.pack(fill="x")
+        t_in.insert("1.0", r.get("eingabe_kurz","") or "")
+        t_in.configure(state="disabled")
+
+        # Ergebnis (vollständig)
+        tk.Label(body, text="Ergebnis:", bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w", pady=(8,2))
+        t_out = tk.Text(body, height=8, font=FONT_BODY, bg=BG_INPUT, fg=TEXT,
+                        relief="flat", wrap="word", padx=6, pady=4)
+        t_out.pack(fill="both", expand=True)
+        t_out.insert("1.0", r.get("ergebnis_kurz","") or "")
+        t_out.configure(state="disabled")
+
+        # Buttons
+        btn_f = tk.Frame(dlg, bg=BG_CARD)
+        btn_f.pack(fill="x", padx=16, pady=(4,12))
+        make_btn(btn_f, "📋 Alles kopieren",
+                 lambda: self._copy_row_to_clipboard(r), color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,8))
+        make_btn(btn_f, "Schließen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(side="right")
+
+    def _copy_row_to_clipboard(self, r: dict):
+        """Kopiert alle Felder eines Protokolleintrags in die Zwischenablage (#53)."""
+        text = "\n".join(f"{k}: {v}" for k, v in r.items() if v)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        messagebox.showinfo("Kopiert", "Protokolleintrag wurde in die Zwischenablage kopiert.", parent=self)
+
+    def _copy_detail(self):
+        """#53 – Kopiert den ausgewählten Eintrag in die Zwischenablage."""
+        r = self._get_selected_protokoll()
+        if r:
+            self._copy_row_to_clipboard(r)
+
     def _build_training_tab(self, parent):
         if not hat_recht("KI-Administration", "schreiben"):
             tk.Label(parent, text="🔒  Schreibzugriff auf KI-Training benötigt.",
@@ -7724,8 +9386,11 @@ class KiProtokollPage(tk.Frame):
             return
 
         tk.Label(parent,
-                 text="Hier können Sie der KI für jeden Bereich zusätzliche Hinweise geben.\n"
-                      "Diese werden als System-Zusatz in KI-Anfragen eingebettet.",
+                 text="Hier können Sie der KI für jeden Bereich zusätzliche Hinweise und Beispiele geben.\n"
+                      "Diese werden automatisch in alle KI-Anfragen des jeweiligen Bereichs eingebettet.\n"
+                      "  • KI-Assistent → Chat-Assistent auf der KI-Seite\n"
+                      "  • Beleg-Analyse → KI-Analyse von Rechnungen unter Buchungen\n"
+                      "  • Ista-Extraktion → KI-Auslesen von Ista-Heizkostenabrechnungen",
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
                  justify="left").pack(anchor="w", padx=16, pady=(10, 4))
 
@@ -7733,8 +9398,8 @@ class KiProtokollPage(tk.Frame):
         sel_f = tk.Frame(parent, bg=BG_CARD)
         sel_f.pack(fill="x", padx=16, pady=4)
         tk.Label(sel_f, text="Bereich:", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
-        self._train_bereich_var = tk.StringVar(value="Buchhaltung")
-        train_bereiche = ["Buchhaltung", "Ista-Wärme", "Nebenkosten", "Kontoauszug", "Allgemein"]
+        self._train_bereich_var = tk.StringVar(value="KI-Assistent")
+        train_bereiche = ["KI-Assistent", "Beleg-Analyse", "Ista-Extraktion"]
         cb = ttk.Combobox(sel_f, textvariable=self._train_bereich_var,
                           values=train_bereiche, state="readonly", width=20, font=FONT_SMALL)
         cb.pack(side="left", padx=(4, 16))
@@ -8022,7 +9687,7 @@ class EinstellungenPage(tk.Frame):
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             ziel = os.path.join(backup_ordner, f"hausverwaltung_backup_{ts}.db")
-            shutil.copy2(str(DB_PATH), ziel)
+            shutil.copy2(str(get_db_path()), ziel)
             messagebox.showinfo("Backup erstellt",
                 f"Datenbank-Backup gespeichert:\n{ziel}", parent=self)
         except Exception as exc:
@@ -8046,12 +9711,12 @@ class EinstellungenPage(tk.Frame):
         # Erst eigenes Backup anlegen
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            auto_backup = str(DB_PATH) + f".vor_restore_{ts}.bak"
-            shutil.copy2(str(DB_PATH), auto_backup)
+            auto_backup = str(get_db_path()) + f".vor_restore_{ts}.bak"
+            shutil.copy2(str(get_db_path()), auto_backup)
         except Exception:
             auto_backup = None
         try:
-            shutil.copy2(quelle, str(DB_PATH))
+            shutil.copy2(quelle, str(get_db_path()))
             info = f"Datenbank erfolgreich wiederhergestellt aus:\n{quelle}"
             if auto_backup:
                 info += f"\n\nAutomatisches Sicherheits-Backup der alten Datenbank:\n{auto_backup}"
@@ -8638,16 +10303,21 @@ class IstaPage(tk.Frame):
         self._build()
 
     def _build(self):
-        # Header
-        section_header(self, "🔥 Ista-Wärmeabrechnung",
-                        "📥 Ista-PDF importieren", self._import_pdf)
+        # Header – zwei Buttons: PDF-Import und manuelle Erfassung (#55)
+        hdr = tk.Frame(self, bg=BG_CARD)
+        hdr.pack(fill="x", padx=20, pady=(18, 6))
+        tk.Label(hdr, text="🔥 Ista-Wärmeabrechnung",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(side="left")
+        make_btn(hdr, "✏️ Manuell erfassen", self._manuell_erfassen_komplett).pack(side="right", padx=(6, 0))
+        make_btn(hdr, "📥 Ista-PDF importieren", self._import_pdf).pack(side="right")
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20)
 
         # Info-Banner
         info = tk.Frame(self, bg="#EBF5FB", bd=0)
         info.pack(fill="x", padx=20, pady=(8, 4))
         tk.Label(info,
                  text="ℹ  Ista liefert Heizkostenabrechnungen als PDF. "
-                      "Importieren Sie das PDF und ordnen Sie die Wohnungseinheiten zu. "
+                      "Importieren Sie das PDF oder erfassen Sie die Werte manuell. "
                       "Die Kosten werden automatisch in die Nebenkosten-Abrechnung übernommen.",
                  bg="#EBF5FB", fg="#1A5276", font=FONT_SMALL,
                  wraplength=900, justify="left").pack(padx=12, pady=8, anchor="w")
@@ -9207,18 +10877,25 @@ class IstaPage(tk.Frame):
 
                 _log(f"\n📝 Gesamt: {len(pdf_text)} Zeichen")
 
-                if not pdf_text.strip():
-                    _log("⚠ Kein Text extrahiert – PDF evtl. gescannt (Bild-PDF)")
-                    _log("  Manuelle Eingabe erforderlich")
+                # #52 Wenn kein/wenig Text → OCR via KI-Vision (Bild senden)
+                ist_bild_pdf = len(pdf_text.strip()) < 100
+
+                if ist_bild_pdf:
+                    _log("⚠ Kein/wenig Text extrahiert – PDF evtl. gescannt (Bild-PDF)")
+                    _log("  → Versuche KI-Vision-Analyse (OCR per KI) …")
+                else:
+                    _log(f"  ✓ Textextraktion OK ({len(pdf_text.strip())} Zeichen)")
 
                 _update_status("🤖 KI analysiert Ista-Daten …")
                 _log("\n🤖 Starte KI-Analyse …")
 
-                # KI-Extraktion versuchen
                 cfg = load_config()
                 ki_daten = None
 
-                if pdf_text.strip():
+                if ist_bild_pdf:
+                    # OCR via KI-Vision: PDF-Seiten als Bilder senden (#52)
+                    ki_daten = self._ki_extrahieren_bild(pdf_pfad, cfg, _log)
+                elif pdf_text.strip():
                     ki_daten = self._ki_extrahieren(pdf_text[:8000], cfg, _log)
 
                 if ki_daten:
@@ -9259,8 +10936,124 @@ class IstaPage(tk.Frame):
         import threading
         threading.Thread(target=_do_import, daemon=True).start()
 
+    def _ki_extrahieren_bild(self, pdf_pfad: str, cfg: dict, _log) -> dict:
+        """#52 – OCR via KI-Vision: Sendet PDF-Seiten als Bilder an die KI-API."""
+        import base64, time as _time, json as _json
+        _t0 = _time.time()
+        _feld_hinweise, _system_zusatz = _lade_ki_training("Ista-Extraktion")
+
+        # PDF-Seiten zu Bildern konvertieren (benötigt pypdf ≥ 4.x)
+        bilder_b64 = []
+        try:
+            import pypdf
+            with open(pdf_pfad, "rb") as fh:
+                pdf_bytes = fh.read()
+            # Sende das gesamte PDF als Base64 (Anthropic unterstützt PDF-Analyse)
+            bilder_b64 = [base64.standard_b64encode(pdf_bytes).decode("ascii")]
+            _log(f"   PDF: {len(pdf_bytes)} Bytes als Bild-Eingabe vorbereitet")
+        except Exception as ex:
+            _log(f"   ⚠ PDF konnte nicht für Bildanalyse vorbereitet werden: {ex}")
+            return None
+
+        if not bilder_b64:
+            _log("   ⚠ Keine Bilddaten – KI-Vision-Analyse abgebrochen")
+            return None
+
+        prompt = (
+            "Analysiere diese Ista-Heizkostenabrechnung (als PDF/Bild). "
+            "Führe zunächst OCR durch und extrahiere dann alle Daten als JSON.\n"
+            "Antworte NUR mit einem JSON-Objekt.\n\n"
+            "Felder:\n"
+            '  "abrechnungsjahr": Abrechnungsjahr (Integer)\n'
+            '  "abrechnungszeitraum_von": Startdatum YYYY-MM-DD\n'
+            '  "abrechnungszeitraum_bis": Enddatum YYYY-MM-DD\n'
+            '  "objekt_adresse": Objektadresse\n'
+            '  "ista_auftragsnummer": Liegenschaftsnummer\n'
+            '  "gesamtkosten_heizung": Gesamte Heizkosten als Zahl\n'
+            '  "gesamtkosten_warmwasser": Gesamte Warmwasserkosten als Zahl\n'
+            '  "gesamtkosten_gesamt": Gesamtkosten als Zahl\n'
+            '  "positionen": Array pro Wohneinheit/Mieter:\n'
+            '    [{"ista_einheit_nr":"...", "ista_einheit_bezeichnung":"...",\n'
+            '      "mieter_name":"...", "hke":0, "hke_anteil_pct":0,\n'
+            '      "warmwasser_m3":0, "warmwasser_anteil_pct":0,\n'
+            '      "heizkosten_grundkosten":0, "heizkosten_verbrauchskosten":0,\n'
+            '      "heizkosten_gesamt":0, "warmwasserkosten_gesamt":0,\n'
+            '      "gesamtkosten":0, "vorauszahlung":0, "nachzahlung_guthaben":0}]'
+        )
+        if _feld_hinweise:
+            prompt += f"\n\nZusätzliche Hinweise:\n{_feld_hinweise}"
+
+        try:
+            aktiv = cfg.get("ki_aktives_modell", "")
+            if aktiv:
+                anbieter, modell = KIAssistentPage._parse_modell_auswahl(aktiv)
+            else:
+                anbieter = cfg.get("ki_anbieter", "anthropic")
+                modell = cfg.get("ki_modell", "claude-opus-4-6")
+            _log(f"   Anbieter: {anbieter}, Modell: {modell} (Vision/PDF-Modus)")
+
+            import urllib.request
+            if anbieter == "anthropic":
+                api_key = cfg.get("ki_api_key", "")
+                if not api_key:
+                    _log("   ⚠ Kein Anthropic API-Key konfiguriert")
+                    return None
+                system_text = "Du bist ein Experte für Heizkostenabrechnungen der Firma Ista."
+                if _system_zusatz:
+                    system_text += "\n" + _system_zusatz
+                # Anthropic Vision: PDF als document block
+                content_blocks = [
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": bilder_b64[0]}},
+                    {"type": "text", "text": prompt}
+                ]
+                body = _json.dumps({
+                    "model": modell,
+                    "max_tokens": 4096,
+                    "system": system_text,
+                    "messages": [{"role": "user", "content": content_blocks}]
+                }).encode()
+                req = urllib.request.Request(
+                    "https://api.anthropic.com/v1/messages",
+                    data=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01"
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    result = _json.loads(resp.read().decode())
+                antwort = result.get("content", [{}])[0].get("text", "")
+            else:
+                _log("   ⚠ KI-Vision nur mit Anthropic-API unterstützt")
+                return None
+
+            # JSON parsen
+            antwort = antwort.strip()
+            if antwort.startswith("```"):
+                antwort = antwort.split("\n", 1)[-1].rsplit("```", 1)[0]
+            ki_daten = _json.loads(antwort)
+
+            dauer = int((_time.time() - _t0) * 1000)
+            _log(f"   ✅ KI-Vision-Analyse erfolgreich ({dauer} ms)")
+            ki_log("Ista-Extraktion", "Vision-OCR", os.path.basename(pdf_pfad),
+                   str(ki_daten)[:500], modell, anbieter, dauer)
+            return ki_daten
+
+        except Exception as ex:
+            dauer = int((_time.time() - _t0) * 1000)
+            _log(f"   ❌ KI-Vision-Fehler: {ex}")
+            ki_log("Ista-Extraktion", "Vision-Fehler", os.path.basename(pdf_pfad),
+                   "", modell if 'modell' in dir() else "?", anbieter if 'anbieter' in dir() else "?",
+                   dauer, str(ex))
+            return None
+
     def _ki_extrahieren(self, pdf_text: str, cfg: dict, _log) -> dict:
         """Versucht KI-basierte Extraktion der Ista-Daten."""
+        import time as _time
+        _t0 = _time.time()
+        # KI-Training laden (#46)
+        _feld_hinweise, _system_zusatz = _lade_ki_training("Ista-Extraktion")
         prompt = (
             "Analysiere diese Ista-Heizkostenabrechnung und extrahiere die Daten als JSON.\n"
             "Antworte NUR mit einem JSON-Objekt.\n\n"
@@ -9269,7 +11062,7 @@ class IstaPage(tk.Frame):
             '  "abrechnungszeitraum_von": Startdatum YYYY-MM-DD\n'
             '  "abrechnungszeitraum_bis": Enddatum YYYY-MM-DD\n'
             '  "objekt_adresse": Objektadresse\n'
-            '  "ista_auftragsnummer": Auftragsnummer falls vorhanden\n'
+            '  "ista_auftragsnummer": Liegenschaftsnummer falls vorhanden\n'
             '  "gesamtkosten_heizung": Gesamte Heizkosten als Zahl\n'
             '  "gesamtkosten_warmwasser": Gesamte Warmwasserkosten als Zahl\n'
             '  "gesamtkosten_gesamt": Gesamtkosten als Zahl\n'
@@ -9294,6 +11087,11 @@ class IstaPage(tk.Frame):
             '    ]\n\n'
             f"Ista-Abrechnungstext:\n{pdf_text}"
         )
+        # KI-Training-Hinweise anhängen (#46)
+        if _feld_hinweise:
+            prompt += f"\n\nZusätzliche Hinweise:\n{_feld_hinweise}"
+        if _system_zusatz:
+            prompt = _system_zusatz + "\n\n" + prompt
 
         try:
             aktiv = cfg.get("ki_aktives_modell", "")
@@ -9347,9 +11145,16 @@ class IstaPage(tk.Frame):
                 ki_daten = _json.loads(m.group())
 
             ki_daten = {k.lower(): v for k, v in ki_daten.items()}
+            # KI-Protokoll (#45)
+            ki_log("Ista-Extraktion", "Extraktion",
+                   pdf_text[:200], str(ki_daten)[:400],
+                   modell, anbieter, int((_time.time() - _t0) * 1000))
             return ki_daten
 
         except Exception as ex:
+            ki_log("Ista-Extraktion", "Fehler",
+                   pdf_text[:200], "",
+                   modell, anbieter, int((_time.time() - _t0) * 1000), str(ex))
             _log(f"   ⚠ KI-Fehler: {ex}")
             return None
 
@@ -9418,30 +11223,68 @@ class IstaPage(tk.Frame):
             parent=self)
 
     def _manuell_eingeben(self, dlg, pdf_pfad):
-        """Manuelle Eingabe der Ista-Daten wenn automatische Extraktion fehlschlägt."""
+        """Manuelle Eingabe nach fehlgeschlagenem PDF-Import → delegiert an Komplett-Dialog."""
         dlg.destroy()
-        dlg2 = tk.Toplevel(self)
-        dlg2.title("Ista-Daten manuell eingeben")
-        dlg2.geometry("560x500")
-        dlg2.configure(bg=BG_CARD)
-        dlg2.transient(self.winfo_toplevel())
+        self._manuell_erfassen_komplett(pdf_pfad=pdf_pfad)
 
-        tk.Label(dlg2, text="Ista-Abrechnung manuell erfassen",
-                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 4), anchor="w")
+    # ── #55 Manuelle Ista-Erfassung (Gesamtwerte + Positionen pro Wohnung) ───
+
+    def _manuell_erfassen_komplett(self, pdf_pfad: str = None):
+        """#55 – Vollständige manuelle Erfassung: Gesamtwerte UND Einzelpositionen
+        pro Wohnung/Mieter mit Plausibilitätsprüfung."""
+        if not hat_recht("Ista-Wärme", "schreiben"):
+            messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Ista-Abrechnung manuell erfassen")
+        dlg.geometry("920x700")
+        dlg.minsize(800, 600)
+        dlg.configure(bg=BG_CARD)
+        dlg.transient(self.winfo_toplevel())
+        dlg.grab_set()
+
+        # ── Scrollbarer Container ────────────────────────────────────────────
+        canvas = tk.Canvas(dlg, bg=BG_CARD, highlightthickness=0)
+        vsb = ttk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg=BG_CARD)
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        # Mausrad-Scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        dlg.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget == dlg else None)
+
+        # ── Sektion 1: Gesamtwerte ───────────────────────────────────────────
+        tk.Label(scroll_frame, text="📊 Ista-Abrechnung – Gesamtwerte",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 8), anchor="w")
+
+        gesamt_frame = tk.Frame(scroll_frame, bg=BG_CARD)
+        gesamt_frame.pack(fill="x", padx=20, pady=(0, 8))
 
         felder = {}
+        cfg = load_config()
+        weg_name = cfg.get("weg_strasse", "")
+        weg_plz = cfg.get("weg_plz", "")
+        weg_ort = cfg.get("weg_ort", "")
+        default_adresse = f"{weg_name}, {weg_plz} {weg_ort}".strip(", ")
+
         for label, key, default in [
             ("Abrechnungsjahr *", "abrechnungsjahr", str(date.today().year - 1)),
             ("Zeitraum von (JJJJ-MM-TT)", "abrechnungszeitraum_von", f"{date.today().year-1}-01-01"),
             ("Zeitraum bis (JJJJ-MM-TT)", "abrechnungszeitraum_bis", f"{date.today().year-1}-12-31"),
-            ("Objekt-Adresse", "objekt_adresse", ""),
-            ("Ista-Auftragsnummer", "ista_auftragsnummer", ""),
-            ("Gesamtkosten Heizung (€)", "gesamtkosten_heizung", "0"),
-            ("Gesamtkosten Warmwasser (€)", "gesamtkosten_warmwasser", "0"),
-            ("Gesamtkosten Gesamt (€)", "gesamtkosten_gesamt", "0"),
+            ("Objekt-Adresse", "objekt_adresse", default_adresse),
+            ("Liegenschaftsnummer", "ista_auftragsnummer", ""),  # #61
+            ("Gesamtkosten Heizung (€)", "gesamtkosten_heizung", "0,00"),
+            ("Gesamtkosten Warmwasser (€)", "gesamtkosten_warmwasser", "0,00"),
+            ("Gesamtkosten Gesamt (€)", "gesamtkosten_gesamt", "0,00"),
         ]:
-            row = tk.Frame(dlg2, bg=BG_CARD)
-            row.pack(fill="x", padx=20, pady=3)
+            row = tk.Frame(gesamt_frame, bg=BG_CARD)
+            row.pack(fill="x", pady=2)
             tk.Label(row, text=label, bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
                      width=28, anchor="w").pack(side="left")
             var = tk.StringVar(value=default)
@@ -9449,31 +11292,293 @@ class IstaPage(tk.Frame):
                      relief="flat", bd=0).pack(side="left", fill="x", expand=True, ipady=4)
             felder[key] = var
 
-        tk.Label(dlg2, text="💡 Tipp: Nach dem Speichern können Sie Einzel-Positionen\n"
-                             "im Tab 'Positionen & Zuordnung' manuell ergänzen.",
-                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, pady=(8, 4), anchor="w")
+        # #60 – Abrechnungsjahr-Änderung aktualisiert Zeitraum automatisch
+        def _on_jahr_changed(*_):
+            jahr_str = felder["abrechnungsjahr"].get().strip()
+            if len(jahr_str) == 4 and jahr_str.isdigit():
+                felder["abrechnungszeitraum_von"].set(f"{jahr_str}-01-01")
+                felder["abrechnungszeitraum_bis"].set(f"{jahr_str}-12-31")
+        felder["abrechnungsjahr"].trace_add("write", _on_jahr_changed)
 
-        def _save():
+        tk.Frame(scroll_frame, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(12, 8))
+
+        # ── Sektion 2: Positionen pro Wohnung/Mieter ────────────────────────
+        tk.Label(scroll_frame, text="🏠 Positionen pro Wohnung / Mieter",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, anchor="w")
+        tk.Label(scroll_frame,
+                 text="Erfassen Sie hier die Einzelwerte für jede Wohnung. "
+                      "Sie können Wohnungen aus der Datenbank übernehmen oder frei eingeben.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL,
+                 wraplength=860).pack(padx=20, pady=(2, 6), anchor="w")
+
+        # Wohnungen laden
+        conn = get_db()
+        try:
+            wohnungen_db = conn.execute(
+                "SELECT w.id, w.bezeichnung, w.wohnflaeche_qm, "
+                "  COALESCE(m.vorname || ' ' || m.name, e.vorname || ' ' || e.name, '–') as bewohner "
+                "FROM wohnungen w "
+                "LEFT JOIN mieter m ON m.id = w.mieter_id "
+                "LEFT JOIN eigentuemer e ON e.id = w.eigentuemer_id "
+                "WHERE w.aktiv = 1 ORDER BY w.bezeichnung"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        # Button-Leiste für Positionen
+        pos_ctrl = tk.Frame(scroll_frame, bg=BG_CARD)
+        pos_ctrl.pack(fill="x", padx=20, pady=(0, 4))
+        make_btn(pos_ctrl, "➕ Position hinzufügen", lambda: _add_position()).pack(side="left", padx=(0, 6))
+        make_btn(pos_ctrl, "📋 Alle Wohnungen laden", lambda: _load_all_wohnungen()).pack(side="left", padx=(0, 6))
+        make_btn(pos_ctrl, "🗑 Letzte entfernen", lambda: _remove_last_position(),
+                 color=DANGER).pack(side="left")
+
+        # Container für die Positions-Zeilen
+        pos_container = tk.Frame(scroll_frame, bg=BG_CARD)
+        pos_container.pack(fill="x", padx=20, pady=(4, 8))
+
+        # Spaltenüberschriften
+        header_fr = tk.Frame(pos_container, bg=BG_INPUT)
+        header_fr.pack(fill="x", pady=(0, 4))
+        for txt, w in [("Nr.", 4), ("Wohnung/Einheit", 14), ("Mieter", 14),
+                        ("Heizkosten €", 10), ("Warmwasser €", 10), ("Gesamt €", 10),
+                        ("Vorauszahlung €", 12), ("Nachz./Guthaben €", 13)]:
+            tk.Label(header_fr, text=txt, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     width=w, anchor="w").pack(side="left", padx=1)
+
+        positionen_rows = []  # Liste von dicts {frame, felder}
+
+        def _add_position(wohnung_bez="", mieter="", heiz="0,00", ww="0,00",
+                          gesamt="0,00", voraus="0,00", nachz="0,00"):
+            idx = len(positionen_rows) + 1
+            row_fr = tk.Frame(pos_container, bg=BG_CARD if idx % 2 else BG_INPUT)
+            row_fr.pack(fill="x", pady=1)
+            bg = BG_CARD if idx % 2 else BG_INPUT
+
+            tk.Label(row_fr, text=str(idx), bg=bg, fg=TEXT_LIGHT, font=FONT_SMALL,
+                     width=4, anchor="center").pack(side="left", padx=1)
+
+            pf = {}
+            for key, default, w in [
+                ("wohnung", wohnung_bez, 14), ("mieter", mieter, 14),
+                ("heizkosten", heiz, 10), ("warmwasser", ww, 10),
+                ("gesamt", gesamt, 10), ("vorauszahlung", voraus, 12),
+                ("nachzahlung", nachz, 13),
+            ]:
+                var = tk.StringVar(value=default)
+                e = tk.Entry(row_fr, textvariable=var, bg=BG_INPUT, fg=TEXT,
+                             font=FONT_SMALL, relief="flat", bd=0, width=w)
+                e.pack(side="left", padx=1, ipady=2)
+                pf[key] = var
+
+            # Auto-Berechnung: Heiz + WW = Gesamt, wenn Gesamt leer
+            def _auto_gesamt(*_args):
+                try:
+                    h = float(pf["heizkosten"].get().replace(",", ".") or 0)
+                    w = float(pf["warmwasser"].get().replace(",", ".") or 0)
+                    g = float(pf["gesamt"].get().replace(",", ".") or 0)
+                    if abs(g - (h + w)) > 0.01 and g == 0:
+                        pf["gesamt"].set(f"{h + w:.2f}".replace(".", ","))
+                except ValueError:
+                    pass
+            pf["heizkosten"].trace_add("write", _auto_gesamt)
+            pf["warmwasser"].trace_add("write", _auto_gesamt)
+
+            positionen_rows.append({"frame": row_fr, "felder": pf})
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _remove_last_position():
+            if positionen_rows:
+                last = positionen_rows.pop()
+                last["frame"].destroy()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _load_all_wohnungen():
+            """#62 – Lädt aktive Wohnungen gefiltert nach Abrechnungsjahr."""
+            if positionen_rows:
+                if not messagebox.askyesno("Wohnungen laden",
+                    "Vorhandene Positionen werden beibehalten.\n"
+                    "Fehlende Wohnungen werden hinzugefügt.", parent=dlg):
+                    return
+            # Jahr aus Formular lesen
+            jahr_str = felder["abrechnungsjahr"].get().strip()
             try:
+                jahr_int = int(jahr_str)
+                von_str = f"{jahr_int}-01-01"
+                bis_str = f"{jahr_int}-12-31"
+            except ValueError:
+                messagebox.showwarning("Kein Jahr",
+                    "Bitte zuerst ein gültiges Abrechnungsjahr eingeben.", parent=dlg)
+                return
+            # Wohnungen + Mieter (die im Abrechnungsjahr aktiv waren) laden
+            conn2 = get_db()
+            try:
+                w_rows = conn2.execute(
+                    "SELECT w.id, w.bezeichnung, w.wohnflaeche_qm, "
+                    "  COALESCE(e.vorname || ' ' || e.name, '') AS eigentuemer "
+                    "FROM wohnungen w "
+                    "LEFT JOIN eigentuemer e ON e.id = w.eigentuemer_id "
+                    "WHERE w.aktiv = 1 ORDER BY w.bezeichnung"
+                ).fetchall()
+                m_rows = conn2.execute(
+                    "SELECT m.wohnung_id, m.vorname || ' ' || m.name AS mietername "
+                    "FROM mieter m "
+                    "WHERE m.einzug <= ? "
+                    "  AND (m.auszug IS NULL OR m.auszug = '' OR m.auszug >= ?) "
+                    "ORDER BY m.wohnung_id, m.einzug",
+                    (bis_str, von_str)
+                ).fetchall()
+            finally:
+                conn2.close()
+            # Mieter je Wohnung gruppieren
+            mieter_map: dict = {}
+            for m in m_rows:
+                mieter_map.setdefault(m["wohnung_id"], []).append(m["mietername"])
+            existing = {r["felder"]["wohnung"].get().strip().lower() for r in positionen_rows}
+            for w in w_rows:
+                bez = w["bezeichnung"] or ""
+                mieter_liste = mieter_map.get(w["id"], [])
+                if not mieter_liste:
+                    # Keine Mieter → Eigentümer als Bewohner oder Leerzeichen
+                    bewohner = w["eigentuemer"] or "–"
+                    if bez.strip().lower() not in existing:
+                        _add_position(wohnung_bez=bez, mieter=bewohner)
+                else:
+                    # Für jeden Mieter im Jahr eine eigene Zeile
+                    for mname in mieter_liste:
+                        key = f"{bez.strip().lower()}|{mname.strip().lower()}"
+                        if key not in existing:
+                            _add_position(wohnung_bez=bez, mieter=mname)
+                            existing.add(key)
+
+        # ── Sektion 3: Plausibilitäts-Anzeige ────────────────────────────────
+        tk.Frame(scroll_frame, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(8, 6))
+
+        plaus_frame = tk.Frame(scroll_frame, bg="#FEF9E7")
+        plaus_frame.pack(fill="x", padx=20, pady=(0, 8))
+        plaus_lbl = tk.Label(plaus_frame, text="⏳ Plausibilitätsprüfung: Erfassen Sie Positionen …",
+                              bg="#FEF9E7", fg="#7D6608", font=FONT_SMALL, wraplength=860, justify="left")
+        plaus_lbl.pack(padx=12, pady=8, anchor="w")
+
+        def _check_plausibilitaet():
+            """#55 – Prüft ob Summe der Positionen ≈ Gesamtkosten."""
+            try:
+                g_heiz = float(felder["gesamtkosten_heizung"].get().replace(",", ".") or 0)
+                g_ww = float(felder["gesamtkosten_warmwasser"].get().replace(",", ".") or 0)
+                g_ges = float(felder["gesamtkosten_gesamt"].get().replace(",", ".") or 0)
+            except ValueError:
+                plaus_lbl.config(text="⚠ Gesamtwerte ungültig – bitte Zahlen eingeben.",
+                                  bg="#FDEDEC", fg=DANGER)
+                plaus_frame.config(bg="#FDEDEC")
+                return False
+
+            sum_heiz = 0.0
+            sum_ww = 0.0
+            sum_ges = 0.0
+            for r in positionen_rows:
+                pf = r["felder"]
+                try:
+                    sum_heiz += float(pf["heizkosten"].get().replace(",", ".") or 0)
+                    sum_ww += float(pf["warmwasser"].get().replace(",", ".") or 0)
+                    sum_ges += float(pf["gesamt"].get().replace(",", ".") or 0)
+                except ValueError:
+                    pass
+
+            abweichungen = []
+            ok = True
+            if g_heiz > 0 and abs(sum_heiz - g_heiz) > 0.99:
+                abweichungen.append(
+                    f"Heizung: Summe Positionen {sum_heiz:,.2f} € ≠ Gesamt {g_heiz:,.2f} € "
+                    f"(Δ {abs(sum_heiz - g_heiz):,.2f} €)")
+                ok = False
+            if g_ww > 0 and abs(sum_ww - g_ww) > 0.99:
+                abweichungen.append(
+                    f"Warmwasser: Summe Positionen {sum_ww:,.2f} € ≠ Gesamt {g_ww:,.2f} € "
+                    f"(Δ {abs(sum_ww - g_ww):,.2f} €)")
+                ok = False
+            if g_ges > 0 and abs(sum_ges - g_ges) > 0.99:
+                abweichungen.append(
+                    f"Gesamt: Summe Positionen {sum_ges:,.2f} € ≠ Gesamt {g_ges:,.2f} € "
+                    f"(Δ {abs(sum_ges - g_ges):,.2f} €)")
+                ok = False
+
+            if not positionen_rows:
+                plaus_lbl.config(
+                    text="ℹ Keine Positionen erfasst – nur Gesamtwerte werden gespeichert.",
+                    bg="#EBF5FB", fg="#1A5276")
+                plaus_frame.config(bg="#EBF5FB")
+                return True
+            elif ok:
+                plaus_lbl.config(
+                    text=f"✅ Plausibel: {len(positionen_rows)} Positionen, Summen stimmen überein.\n"
+                         f"   Heizung: {sum_heiz:,.2f} €  |  Warmwasser: {sum_ww:,.2f} €  |  "
+                         f"Gesamt: {sum_ges:,.2f} €",
+                    bg="#EAFAF1", fg=SUCCESS)
+                plaus_frame.config(bg="#EAFAF1")
+                return True
+            else:
+                plaus_lbl.config(
+                    text="⚠ Abweichungen:\n" + "\n".join(f"   • {a}" for a in abweichungen) +
+                         "\n   Prüfen Sie die Eingaben oder speichern Sie trotzdem.",
+                    bg="#FEF9E7", fg="#7D6608")
+                plaus_frame.config(bg="#FEF9E7")
+                return False
+
+        # ── Buttons am Ende ──────────────────────────────────────────────────
+        btn_frame = tk.Frame(scroll_frame, bg=BG_CARD)
+        btn_frame.pack(fill="x", padx=20, pady=(4, 16))
+
+        def _on_pruefen():
+            _check_plausibilitaet()
+
+        def _on_save():
+            plaus_ok = _check_plausibilitaet()
+            if not plaus_ok and positionen_rows:
+                if not messagebox.askyesno("Abweichung",
+                    "Die Summe der Positionen weicht von den Gesamtwerten ab.\n"
+                    "Trotzdem speichern?", parent=dlg):
+                    return
+            try:
+                _pf = lambda v: float(v.replace(",", ".")) if v else 0
                 daten = {
                     "abrechnungsjahr": int(felder["abrechnungsjahr"].get() or date.today().year - 1),
                     "abrechnungszeitraum_von": felder["abrechnungszeitraum_von"].get() or None,
                     "abrechnungszeitraum_bis": felder["abrechnungszeitraum_bis"].get() or None,
                     "objekt_adresse": felder["objekt_adresse"].get(),
                     "ista_auftragsnummer": felder["ista_auftragsnummer"].get(),
-                    "gesamtkosten_heizung": float(felder["gesamtkosten_heizung"].get().replace(",", ".") or 0),
-                    "gesamtkosten_warmwasser": float(felder["gesamtkosten_warmwasser"].get().replace(",", ".") or 0),
-                    "gesamtkosten_gesamt": float(felder["gesamtkosten_gesamt"].get().replace(",", ".") or 0),
+                    "gesamtkosten_heizung": _pf(felder["gesamtkosten_heizung"].get()),
+                    "gesamtkosten_warmwasser": _pf(felder["gesamtkosten_warmwasser"].get()),
+                    "gesamtkosten_gesamt": _pf(felder["gesamtkosten_gesamt"].get()),
                     "positionen": [],
                 }
-                self._save_import(dlg2, pdf_pfad, daten)
-            except ValueError as e:
-                messagebox.showerror("Eingabefehler", f"Ungültige Eingabe: {e}", parent=dlg2)
+                for r in positionen_rows:
+                    pf = r["felder"]
+                    pos = {
+                        "ista_einheit_nr": "",
+                        "ista_einheit_bezeichnung": pf["wohnung"].get().strip(),
+                        "mieter_name": pf["mieter"].get().strip(),
+                        "hke": 0,
+                        "hke_anteil_pct": 0,
+                        "warmwasser_m3": 0,
+                        "warmwasser_anteil_pct": 0,
+                        "heizkosten_grundkosten": 0,
+                        "heizkosten_verbrauchskosten": 0,
+                        "heizkosten_gesamt": _pf(pf["heizkosten"].get()),
+                        "warmwasserkosten_gesamt": _pf(pf["warmwasser"].get()),
+                        "gesamtkosten": _pf(pf["gesamt"].get()),
+                        "vorauszahlung": _pf(pf["vorauszahlung"].get()),
+                        "nachzahlung_guthaben": _pf(pf["nachzahlung"].get()),
+                    }
+                    daten["positionen"].append(pos)
 
-        btn_row = tk.Frame(dlg2, bg=BG_CARD)
-        btn_row.pack(pady=12)
-        make_btn(btn_row, "💾 Speichern", _save).pack(side="left", padx=6)
-        make_btn(btn_row, "Abbrechen", dlg2.destroy, color=BG_INPUT, fg=TEXT).pack(side="left", padx=6)
+                self._save_import(dlg, pdf_pfad, daten)
+            except ValueError as e:
+                messagebox.showerror("Eingabefehler", f"Ungültige Eingabe: {e}", parent=dlg)
+
+        make_btn(btn_frame, "🔍 Plausibilität prüfen", _on_pruefen,
+                 color=ACCENT).pack(side="left", padx=(0, 8))
+        make_btn(btn_frame, "💾 Speichern & Importieren", _on_save).pack(side="left", padx=(0, 8))
+        make_btn(btn_frame, "Abbrechen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(side="left")
 
     def _delete_abrechnung(self):
         if not hat_recht("Ista-Wärme", "loeschen"):
@@ -9510,6 +11615,7 @@ class HausverwaltungApp(tk.Tk):
         ("👥", "Mieter",         MieterPage),
         ("🏦", "Kontoauszug",    KontoauszugPage),
         ("💰", "Buchhaltung",    BuchhaltungPage),
+        ("🧾", "Rechnungen",    RechnungenPage),   # #65/#66
         ("🔧", "Wartung",        WartungPage),
         ("📋", "Nebenkosten",    NebenkostenPage),
         ("🔥", "Ista-Wärme",     IstaPage),
@@ -9686,7 +11792,7 @@ class HausverwaltungApp(tk.Tk):
         _row(body, "Sprache:", "Python 3 · Tkinter")
         _row(body, "Datenbank:", "SQLite 3")
         _row(body, "Architektur:", "Single-File Desktop-App")
-        _row(body, "DB-Pfad:", str(DB_PATH))
+        _row(body, "DB-Pfad:", str(get_db_path()))
 
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 8))
         tk.Label(body, text="Änderungshistorie", bg=BG_CARD, fg=TEXT,
