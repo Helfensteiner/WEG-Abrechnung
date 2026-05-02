@@ -1,4 +1,4 @@
-"""
+﻿"""
 Hausverwaltung – Eigentümergemeinschaft
 Desktop-App mit Tkinter · SQLite-Datenbank
 """
@@ -108,6 +108,54 @@ from pathlib import Path
 #                 gibt jetzt (namen, name_zu_typ, typ_zu_name, tooltips) zurück;
 #                 Combobox zeigt aufteilungen.name; intern wird Typ gespeichert;
 #                 make_tooltip() zeigt Typ + Beschreibung bei Hover.
+#   0.37.8 — Auto-Zuordnung via ista-Einheitennummer (#113):
+#             _auto_zuordnung(): 3-stufige Priorität:
+#             1. Exakter Nr-Treffer (ista_positionen.ista_einheit_nr == wohnungen.ista_einheit_nr)
+#             2. Normalisierter Treffer (_normalisiere: Nullen, /0-Suffix, WE-Präfix ignoriert)
+#             3. Namens-Fallback (Bezeichnung Substring-Matching wie bisher)
+#             Ergebnis-Dialog zeigt Aufschlüsselung via Nr / via Bezeichnung.
+#   0.37.7 — ista-Einheitennummer pro Wohnung (#112):
+#             ALTER TABLE wohnungen ADD COLUMN ista_einheit_nr TEXT;
+#             WohnungDialog: Feld "ista-Einheitennummer" im Abschnitt "ista Heizkostenabrechnung";
+#             WohnungenPage._COLS + Tabellenspalte "ista-Nr." ergänzt.
+#   0.37.6 — Ista-KI: robustes JSON-Parsing + Ollama-Kontextlimit (#111):
+#             _parse_ki_json(): entfernt Markdown-Codeblöcke, Trailing-Kommas,
+#             //-Kommentare; extrahiert JSON-Objekt aus umgebendem Text;
+#             Zeichenlimit: Anthropic 40k, Ollama 12k (kleines Kontextfenster).
+#   0.37.5 — Einstellungen: ki_aktives_modell beim Speichern synchronisieren (#110):
+#             EinstellungenPage._save(): beim Speichern von ki_anbieter wird
+#             ki_aktives_modell automatisch gesetzt:
+#               ollama → "<ollama_modell>  [Ollama]"
+#               anthropic → "<ki_modell>  [Anthropic]"
+#             Behebt 404-Fehler wenn ki_aktives_modell nie via KI-Assistent-Dropdown
+#             gesetzt wurde (fehlender Schlüssel → Legacy-Fallback mit inkonsistenten Werten).
+#   0.37.4 — Ista-KI: Zeichenlimit + Prompt-Optimierung (#109):
+#             pdf_text[:8000] → [:40000]: alle 36k Zeichen werden an KI gesendet
+#             (vorher wurden Seiten 3–18 abgeschnitten → 0 Einheiten erkannt).
+#             Prompt: ista-spezifische Feldbezeichnungen, Beispiel-JSON, Hinweise
+#             zur Seitenstruktur, "Extrahiere ALLE Einheiten".
+#             max_tokens: 2048 → 4096; system-Rolle gesetzt.
+#   0.37.3 — Ista-KI: immer ki_aktives_modell aus Einstellungen verwenden (#108):
+#             _ki_extraktion() liest ausschließlich ki_aktives_modell (via
+#             KIAssistentPage._parse_modell_auswahl); kein Auto-Fallback, kein
+#             Inkonsistenz-Korrigieren; Legacy-Fallback ki_anbieter/ki_modell
+#             nur wenn ki_aktives_modell leer ist.
+#   0.37.2 — Kostenart-Änderung: Selektion-Modus (#107):
+#             Buchungen markiert → nur markierte IDs, aber nur wenn alle
+#             dieselbe Kostenart haben (sonst Warnung mit Liste der Kategorien);
+#             keine Markierung → Dropdown-Auswahl wie bisher;
+#             Dialog zeigt Modus-Banner; "Von"-Feld ist bei Selektion read-only.
+#   0.37.1 — Filter & Sortierung in BuchhaltungPage (#106):
+#             Filter-Zeile 1: Typ (Radio) + Kategorie-Dropdown + Jahr-Dropdown;
+#             Filter-Zeile 2: Freitext-Suche (Beschreibung, Kategorie, Belegnr.);
+#             Sortierung: Klick auf Spaltenheader wechselt ASC/DESC (Pfeil im Header);
+#             _refresh_filter_combos(): Dropdowns nach jeder Datenänderung aktualisiert;
+#             Saldo-Zeile zeigt Anzahl gefilterter Einträge wenn Filter aktiv.
+#   0.37.0 — Bulk-Kostenart-Änderung (#105):
+#             Neuer Button „🔀 Kostenart ändern" in BuchhaltungPage.
+#             _bulk_kategorie(): Dialog mit Von/Nach-Dropdown + Buchungsanzahl;
+#             UPDATE zahlungen SET kategorie=? WHERE kategorie=?;
+#             Vorauswahl der aktuell markierten Buchung; Bestätigungsdialog.
 #   0.36.6 — FOREIGN KEY Fehler beim Kontoauszug-Löschen behoben (#104):
 #             _clear(): erst kontoauszug_match_log löschen (referenziert
 #             kontoauszug.id), dann kontoauszug; eigene Transaktion mit
@@ -276,7 +324,29 @@ from pathlib import Path
 #             #71 Dialog-Größen & Layout: BaseDialog minsize dynamisch (½ Defaultgröße,
 #                 mind. 380×300); RechnungDialog 720→660, 2-Spalten-Layout für
 #                 Grunddaten und Beträge; ZahlungDialog 680→520 (s. #69).
-APP_VERSION = "0.36.6"
+#   0.38.0 — Nebenkosten Einzelbuchungen: Sortierfunktion (▲/▼ auf alle Spalten) +
+#             Löschen-Button mit Kaskaden-Reset (kontoauszug.zugeordnet, zahlung_id)
+#             identisch zu BuchhaltungPage._delete_buchung; Elterntabelle wird
+#             nach dem Löschen automatisch neu geladen.
+#   0.38.1 — Sortierung für alle 27 Tabellen: generische Hilfsfunktion
+#             _treeview_sort_setup() (client-seitige In-Place-Sortierung, ▲/▼
+#             im Header); behandelt Datums-, Währungs- und Prozentwerte numerisch.
+#   0.39.0 — Eigentümerwechsel mit Zeiträumen (wie Mieterwechsel):
+#             Neue DB-Tabelle eigentuemer_zeitraeume (wohnung_id, eigentuemer_id,
+#             von, bis); EigentuemerZeitraumDialog zum Verwalten des Verlaufs;
+#             "📋 Eigentümerverlauf"-Button im WohnungDialog; Pro-Rata-Temporis-
+#             Berechnung _eigentuemer_anteile_fuer_jahr() ersetzt direktes
+#             anteil_prozent-Feld in §28 WEG-Abrechnung (PDF + HTML), Wohngeld-
+#             Auswertung und allen Jahresabgrenzungen; Migration befüllt
+#             eigentuemer_zeitraeume aus vorhandenen wohnungen.eigentuemer_id.
+#   0.39.1 — Hausgeld-Kontrolle korrekt umgebaut:
+#             Neues Feld wohnungen.hausgeld_monatlich (vereinbarter Monatsbetrag);
+#             Hilfsfunktion hausgeld_soll_fuer_jahr(): Soll = Monatsbetrag ×
+#             fällige Monate (Vorjahr: 12, laufendes Jahr: 1..heute.month);
+#             Eigentümerwechsel Pro-Rata-Temporis; _load_wohngeld() zeigt
+#             korrektes Soll/Ist/Saldo; Status-Ampel: ausgeglichen / Rückstand /
+#             X Monate offen; Hinweis wenn kein Hausgeld hinterlegt.
+APP_VERSION = "0.39.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -1136,12 +1206,37 @@ CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
         # v0.33.0 – GH#81 Leistungs-/Abrechnungsjahr in rechnungen
         "ALTER TABLE rechnungen ADD COLUMN leistungsjahr INTEGER",
         "ALTER TABLE rechnungen ADD COLUMN abrechnungsjahr INTEGER",
+        # v0.37.7 – #112 ista-Einheitennummer pro Wohnung
+        "ALTER TABLE wohnungen ADD COLUMN ista_einheit_nr TEXT",
+        # v0.39.1 – Monatliches Hausgeld pro Wohnung (für Soll/Ist-Kontrolle)
+        "ALTER TABLE wohnungen ADD COLUMN hausgeld_monatlich REAL DEFAULT 0",
+        # v0.39.0 – Eigentümer-Zeiträume (Eigentümerwechsel pro Wohnung)
+        """CREATE TABLE IF NOT EXISTS eigentuemer_zeitraeume (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            wohnung_id     INTEGER NOT NULL,
+            eigentuemer_id INTEGER NOT NULL,
+            von            DATE NOT NULL,
+            bis            DATE,
+            FOREIGN KEY (wohnung_id)     REFERENCES wohnungen(id)    ON DELETE CASCADE,
+            FOREIGN KEY (eigentuemer_id) REFERENCES eigentuemer(id)
+        )""",
     ]:
         try:
             c.execute(sql)
             conn.commit()
         except Exception:
             pass
+    # v0.39.0 – eigentuemer_zeitraeume: Initialbestückung aus wohnungen.eigentuemer_id
+    if not c.execute("SELECT COUNT(*) FROM eigentuemer_zeitraeume").fetchone()[0]:
+        for w in c.execute(
+            "SELECT id, eigentuemer_id FROM wohnungen WHERE eigentuemer_id IS NOT NULL"
+        ).fetchall():
+            c.execute(
+                "INSERT INTO eigentuemer_zeitraeume (wohnung_id, eigentuemer_id, von, bis) "
+                "VALUES (?, ?, '1900-01-01', NULL)",
+                (w["id"], w["eigentuemer_id"])
+            )
+        conn.commit()
     # Rechte "KI-Assistent" und "KI-Administration" zu allen vorhandenen Rollen hinzufügen (#34 fix)
     for rolle_row in c.execute("SELECT id, ist_superadmin FROM rollen").fetchall():
         for bereich in ("KI-Assistent", "KI-Administration"):
@@ -1372,6 +1467,119 @@ def sync_mea_eigentuemer(conn=None):
         if own_conn:
             conn.close()
 
+
+def _eigentuemer_anteile_fuer_jahr(conn, jahr: int) -> dict:
+    """Zeitgewichteter Eigentumsanteil (Prozent) je Eigentümer für ein Geschäftsjahr.
+
+    Nutzt eigentuemer_zeitraeume mit Pro-Rata-Temporis. Fällt auf
+    wohnungen.eigentuemer_id zurück wenn noch keine Zeiträume erfasst sind.
+    Rückgabe: {eigentuemer_id: anteil_prozent}
+    """
+    from datetime import date as _date
+    jahr_start = _date(jahr, 1, 1)
+    jahr_ende  = _date(jahr, 12, 31)
+    tage_jahr  = (jahr_ende - jahr_start).days + 1
+
+    wohnungen_rows = conn.execute(
+        "SELECT id, mea_tausendstel, eigentuemer_id FROM wohnungen WHERE COALESCE(aktiv,1)=1"
+    ).fetchall()
+    mea_map    = {w["id"]: (parse_float(w["mea_tausendstel"]) or 0.0) for w in wohnungen_rows}
+    gesamt_mea = sum(mea_map.values()) or 1000.0
+
+    zeitraeume = conn.execute(
+        "SELECT wohnung_id, eigentuemer_id, von, bis FROM eigentuemer_zeitraeume "
+        "WHERE von <= ? AND (bis IS NULL OR bis >= ?)",
+        (str(jahr_ende), str(jahr_start))
+    ).fetchall()
+
+    if not zeitraeume:
+        result = {}
+        for w in wohnungen_rows:
+            if w["eigentuemer_id"]:
+                eid = w["eigentuemer_id"]
+                result[eid] = result.get(eid, 0.0) + mea_map.get(w["id"], 0.0) / gesamt_mea * 100.0
+        return result
+
+    beitrag: dict = {}
+    for z in zeitraeume:
+        try:
+            z_von = _date.fromisoformat(str(z["von"]))
+            z_bis = _date.fromisoformat(str(z["bis"])) if z["bis"] else jahr_ende
+        except (ValueError, TypeError):
+            continue
+        ov_von = max(z_von, jahr_start)
+        ov_bis = min(z_bis, jahr_ende)
+        if ov_von > ov_bis:
+            continue
+        tage = (ov_bis - ov_von).days + 1
+        eid  = z["eigentuemer_id"]
+        beitrag[eid] = beitrag.get(eid, 0.0) + mea_map.get(z["wohnung_id"], 0.0) * tage / tage_jahr
+
+    return {eid: (b / gesamt_mea * 100.0) for eid, b in beitrag.items()}
+
+
+def hausgeld_soll_fuer_jahr(conn, jahr: int) -> dict:
+    """Berechnet {eigentuemer_id: soll_betrag} aus wohnungen.hausgeld_monatlich.
+
+    Laufendes Jahr: Monate 1..heute.month sind fällig.
+    Vergangene Jahre: alle 12 Monate.
+    Eigentümerwechsel innerhalb des Jahres: Pro-Rata-Temporis (tagegenau).
+    """
+    import calendar as _cal
+    from datetime import date as _date
+    heute = _date.today()
+    if jahr < heute.year:
+        check_bis = _date(jahr, 12, 31)
+        faellige_monate = 12
+    elif jahr == heute.year:
+        letzter = _cal.monthrange(heute.year, heute.month)[1]
+        check_bis = _date(heute.year, heute.month, letzter)
+        faellige_monate = heute.month
+    else:
+        return {}
+
+    jahr_start = _date(jahr, 1, 1)
+    tage_relevant = (check_bis - jahr_start).days + 1
+
+    wohnungen = conn.execute(
+        "SELECT id, hausgeld_monatlich, eigentuemer_id FROM wohnungen WHERE COALESCE(aktiv,1)=1"
+    ).fetchall()
+    wohnung_betrag = {r["id"]: (parse_float(r["hausgeld_monatlich"]) or 0.0) for r in wohnungen}
+
+    zeitraeume = conn.execute(
+        "SELECT wohnung_id, eigentuemer_id, von, bis FROM eigentuemer_zeitraeume "
+        "WHERE von <= ? AND (bis IS NULL OR bis >= ?)",
+        (str(check_bis), str(jahr_start))
+    ).fetchall()
+
+    soll: dict = {}
+    if not zeitraeume:
+        for r in wohnungen:
+            betrag = wohnung_betrag.get(r["id"], 0.0)
+            if betrag and r["eigentuemer_id"]:
+                eid = r["eigentuemer_id"]
+                soll[eid] = soll.get(eid, 0.0) + betrag * faellige_monate
+        return soll
+
+    for z in zeitraeume:
+        betrag = wohnung_betrag.get(z["wohnung_id"], 0.0)
+        if not betrag:
+            continue
+        try:
+            z_von = _date.fromisoformat(str(z["von"]))
+            z_bis = _date.fromisoformat(str(z["bis"])) if z["bis"] else check_bis
+        except (ValueError, TypeError):
+            continue
+        ov_von = max(z_von, jahr_start)
+        ov_bis = min(z_bis, check_bis)
+        if ov_von > ov_bis:
+            continue
+        tage = (ov_bis - ov_von).days + 1
+        eid = z["eigentuemer_id"]
+        soll[eid] = soll.get(eid, 0.0) + betrag * faellige_monate * tage / tage_relevant
+    return soll
+
+
 # ── Basis-Widget-Helfer ───────────────────────────────────────────────────────
 
 def make_btn(parent, text, command, color=ACCENT2, fg=TEXT_WHITE, **kw):
@@ -1431,6 +1639,48 @@ def tree_empty_hint(tree, text="(Keine Einträge vorhanden)"):
         vals = [text] + [""] * (len(cols) - 1)
         tree.insert("", "end", iid="__empty__", values=vals, tags=("empty",))
         tree.tag_configure("empty", foreground=TEXT_LIGHT)
+
+
+def _treeview_sort_setup(tree, col_names):
+    """Fügt klickbare Sortier-Header (▲/▼) zu einem Treeview hinzu.
+
+    Sortiert client-seitig in-place. Behandelt DD.MM.YYYY-Datumsformat,
+    Währungsbeträge (€), Promille (‰) und Prozent (%) korrekt numerisch.
+    """
+    _st = {"col": None, "asc": True}
+
+    def _sort_key(val):
+        v = str(val).strip()
+        if v in ("", "–", "-", "(Keine Einträge vorhanden)"):
+            return (2, "")
+        m = re.match(r'^(\d{2})\.(\d{2})\.(\d{4})$', v)
+        if m:
+            return (0, f"{m.group(3)}{m.group(2)}{m.group(1)}")
+        stripped = (v.replace(" €", "").replace(" %", "").replace(" ‰", "")
+                     .replace(".", "").replace(",", ".").strip())
+        try:
+            return (0, float(stripped))
+        except ValueError:
+            pass
+        return (1, v.lower())
+
+    def _sort(col):
+        if _st["col"] == col:
+            _st["asc"] = not _st["asc"]
+        else:
+            _st["col"] = col
+            _st["asc"] = True
+        asc = _st["asc"]
+        iids = [i for i in tree.get_children("") if i != "__empty__"]
+        iids.sort(key=lambda iid: _sort_key(tree.set(iid, col)), reverse=not asc)
+        for idx, iid in enumerate(iids):
+            tree.move(iid, "", idx)
+        for c in col_names:
+            arrow = (" ▲" if asc else " ▼") if c == col else ""
+            tree.heading(c, text=c + arrow, command=lambda cc=c: _sort(cc))
+
+    for col in col_names:
+        tree.heading(col, text=col, command=lambda c=col: _sort(c))
 
 
 def make_tooltip(widget, text_oder_func):
@@ -1871,6 +2121,7 @@ class DashboardPage(tk.Frame):
         for c, w in zip(cols, [90, 220, 100, 80]):
             tree.heading(c, text=c)
             tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(tree, cols)
 
         conn = get_db()
         for row in conn.execute("SELECT datum,beschreibung,betrag,typ FROM zahlungen ORDER BY erstellt_am DESC LIMIT 15"):
@@ -2008,6 +2259,7 @@ class MieterPage(tk.Frame):
         for c, w in zip(cols, [160, 130, 110, 110, 110, 110, 130, 180]):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree, cols)
         self.tree.bind("<Double-1>", self._edit)
         self._load()
         btn_row = tk.Frame(self, bg=BG_CARD)
@@ -2125,6 +2377,7 @@ class MieterPage(tk.Frame):
         tree.heading("Wohnung", text="Wohnung")
         tree.column("Name", width=200, anchor="w")
         tree.column("Wohnung", width=200, anchor="w")
+        _treeview_sort_setup(tree, cols_e)
 
         # Group eigentuemer by id to show wohnungen
         et_map = {}
@@ -2271,6 +2524,7 @@ class NKZeitraumDialog(tk.Toplevel):
                            [170, 170, 130]):
             self._tree.heading(col, text=col)
             self._tree.column(col, width=w, anchor="w")
+        _treeview_sort_setup(self._tree, ("Von (JJJJ-MM-TT)", "Bis (JJJJ-MM-TT)", "Betrag €/Monat"))
 
         # Formular für neue Zeile
         frm = tk.Frame(self, bg=BG_INPUT, padx=12, pady=10)
@@ -2410,6 +2664,176 @@ class NKZeitraumDialog(tk.Toplevel):
         return False
 
 
+class EigentuemerZeitraumDialog(tk.Toplevel):
+    """Verwaltung der Eigentümer-Zeiträume einer Wohnung (Eigentümerwechsel)."""
+
+    def __init__(self, parent, wohnung_id: int, wohnung_bez: str):
+        super().__init__(parent)
+        self.title(f"Eigentümerverlauf – {wohnung_bez}")
+        self.configure(bg=BG_CARD)
+        self.geometry("700x500")
+        self.resizable(False, False)
+        self.grab_set()
+        self._wohnung_id = wohnung_id
+        conn = get_db()
+        try:
+            self._eigentuemer_list = conn.execute(
+                "SELECT id, vorname, name FROM eigentuemer ORDER BY name"
+            ).fetchall()
+        finally:
+            conn.close()
+        self._build()
+        self._load()
+
+    def _build(self):
+        tk.Label(self, text="Eigentümerverlauf",
+                 bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 2), anchor="w")
+        tk.Label(self,
+                 text="Kein Bis-Datum = aktueller Eigentümer. "
+                      "Zeiträume dürfen sich nicht überschneiden.",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(padx=20, anchor="w")
+
+        cols = ("Eigentümer", "Von", "Bis")
+        f, self._tree = make_table(self, cols, height=8)
+        f.pack(fill="both", expand=True, padx=20, pady=8)
+        for col, w in zip(cols, [260, 130, 130]):
+            self._tree.heading(col, text=col)
+            self._tree.column(col, width=w, anchor="w")
+        _treeview_sort_setup(self._tree, cols)
+
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20)
+        tk.Label(self, text="Eigentümerwechsel eintragen:",
+                 bg=BG_CARD, fg=TEXT, font=FONT_BODY).pack(anchor="w", padx=20, pady=(8, 2))
+
+        frm = tk.Frame(self, bg=BG_INPUT, padx=12, pady=10)
+        frm.pack(fill="x", padx=20, pady=(0, 8))
+        et_options = [f"{e['vorname'] or ''} {e['name']}".strip() for e in self._eigentuemer_list]
+        tk.Label(frm, text="Neuer Eigentümer:", bg=BG_INPUT, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).grid(row=0, column=0, sticky="w")
+        self._et_var = tk.StringVar()
+        ttk.Combobox(frm, textvariable=self._et_var, values=et_options,
+                     state="readonly", width=26).grid(row=0, column=1, padx=(4, 20))
+        tk.Label(frm, text="Übergabedatum:", bg=BG_INPUT, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).grid(row=0, column=2, sticky="w")
+        self._von_var = tk.StringVar(value=str(date.today()))
+        tk.Entry(frm, textvariable=self._von_var, bg=BG_CARD, fg=TEXT, font=FONT_BODY,
+                 relief="flat", bd=0, width=13).grid(row=0, column=3, padx=(4, 16))
+        make_btn(frm, "🔄 Wechsel eintragen", self._add_wechsel).grid(row=0, column=4)
+
+        btn_row = tk.Frame(self, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(btn_row, "🗑 Ausgewählten löschen", self._delete, color=DANGER).pack(side="left")
+        make_btn(btn_row, "Schließen", self.destroy, color=ACCENT2).pack(side="right")
+
+    def _load(self):
+        for i in self._tree.get_children():
+            self._tree.delete(i)
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT ez.id, e.vorname, e.name, ez.von, ez.bis "
+                "FROM eigentuemer_zeitraeume ez "
+                "JOIN eigentuemer e ON ez.eigentuemer_id = e.id "
+                "WHERE ez.wohnung_id = ? ORDER BY ez.von DESC",
+                (self._wohnung_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            name = f"{r['vorname'] or ''} {r['name']}".strip()
+            self._tree.insert("", "end", iid=str(r["id"]), values=(
+                name,
+                fmt_date(r["von"]) if r["von"] else "–",
+                fmt_date(r["bis"]) if r["bis"] else "aktuell"
+            ))
+        tree_empty_hint(self._tree)
+
+    def _add_wechsel(self):
+        from datetime import timedelta
+        et_str  = self._et_var.get().strip()
+        von_str = self._von_var.get().strip()
+        if not et_str:
+            messagebox.showwarning("Pflichtfeld", "Bitte einen Eigentümer auswählen.", parent=self)
+            return
+        if not von_str:
+            messagebox.showwarning("Pflichtfeld", "Übergabedatum ist erforderlich.", parent=self)
+            return
+        try:
+            von_d = date.fromisoformat(von_str)
+        except ValueError:
+            messagebox.showwarning("Datum", "Datum im Format JJJJ-MM-TT eingeben.", parent=self)
+            return
+        neuer_eid = None
+        for e in self._eigentuemer_list:
+            if f"{e['vorname'] or ''} {e['name']}".strip() == et_str:
+                neuer_eid = e["id"]; break
+        if neuer_eid is None:
+            messagebox.showwarning("Fehler", "Eigentümer nicht gefunden.", parent=self)
+            return
+
+        conn = get_db()
+        try:
+            existing = conn.execute(
+                "SELECT id, von, bis FROM eigentuemer_zeitraeume "
+                "WHERE wohnung_id = ? ORDER BY von",
+                (self._wohnung_id,)
+            ).fetchall()
+            for ex in existing:
+                try:
+                    ex_von = date.fromisoformat(str(ex["von"]))
+                    ex_bis = date.fromisoformat(str(ex["bis"])) if ex["bis"] else date(9999, 12, 31)
+                except (ValueError, TypeError):
+                    continue
+                if ex_von <= von_d <= ex_bis:
+                    messagebox.showwarning(
+                        "Überschneidung",
+                        f"Das Datum {von_str} liegt innerhalb eines bestehenden Zeitraums "
+                        f"({fmt_date(ex['von'])} – "
+                        f"{fmt_date(ex['bis']) if ex['bis'] else 'aktuell'}).\n"
+                        "Bitte ein Datum nach dem letzten Eintrag wählen.",
+                        parent=self)
+                    return
+            # Offenen Zeitraum schließen
+            conn.execute(
+                "UPDATE eigentuemer_zeitraeume SET bis = ? "
+                "WHERE wohnung_id = ? AND bis IS NULL",
+                (str(von_d - timedelta(days=1)), self._wohnung_id)
+            )
+            conn.execute(
+                "INSERT INTO eigentuemer_zeitraeume (wohnung_id, eigentuemer_id, von, bis) "
+                "VALUES (?, ?, ?, NULL)",
+                (self._wohnung_id, neuer_eid, von_str)
+            )
+            conn.execute(
+                "UPDATE wohnungen SET eigentuemer_id = ? WHERE id = ?",
+                (neuer_eid, self._wohnung_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        sync_mea_eigentuemer()
+        self._load()
+
+    def _delete(self):
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showwarning("Auswahl", "Bitte einen Eintrag auswählen.", parent=self)
+            return
+        if not messagebox.askyesno("Löschen",
+                                   "Ausgewählten Eintrag löschen?\n"
+                                   "Hinweis: Beim Löschen des aktuellen Eigentümers "
+                                   "bleibt die Wohnung vorübergehend ohne aktuellen Eigentümer.",
+                                   parent=self):
+            return
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM eigentuemer_zeitraeume WHERE id=?", (int(sel[0]),))
+            conn.commit()
+        finally:
+            conn.close()
+        self._load()
+
+
 class MieterDialog(BaseDialog):
     def __init__(self, parent, row=None):
         super().__init__(parent, "Mieter" + (" bearbeiten" if row else " hinzufügen"), 520, 700)
@@ -2534,6 +2958,7 @@ class EigentuemerPage(tk.Frame):
         f.pack(fill="both", expand=True, padx=20, pady=10)
         for c, w in zip(cols, [180, 130, 120, 200, 180, 80]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree, cols)
         self.tree.bind("<Double-1>", self._edit)
         self._load()
         btn_row = tk.Frame(self, bg=BG_CARD)
@@ -2725,16 +3150,18 @@ class WohnungenPage(tk.Frame):
         "keller", "heizungsart",
         "mea_tausendstel", "eigentuemer_id", "mieter_id",
         "baujahr", "bewohner_anzahl", "notizen", "aktiv",
+        "ista_einheit_nr", "hausgeld_monatlich",
     )
 
     def _build(self):
         section_header(self, "Wohnungen", "＋ Wohnung", self._new)
         cols = ("Bezeichnung", "Typ", "Lage", "Wohnfl. m²", "Nutzfl. m²", "Zimmer",
-                "MEA ‰", "MEA-Kontr. ‰", "Eigentümer", "Mieter", "Status")
+                "MEA ‰", "MEA-Kontr. ‰", "Eigentümer", "Mieter", "ista-Nr.", "Status")
         f, self.tree = make_table(self, cols, height=16)
         f.pack(fill="both", expand=True, padx=20, pady=10)
-        for c, w in zip(cols, [110, 70, 90, 75, 75, 60, 70, 90, 130, 130, 70]):
+        for c, w in zip(cols, [110, 70, 90, 75, 75, 60, 70, 90, 130, 130, 65, 70]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree, cols)
         self.tree.bind("<Double-1>", self._edit)
         btn_row = tk.Frame(self, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0, 10))
@@ -2777,7 +3204,7 @@ class WohnungenPage(tk.Frame):
                 f"{wfl:.1f}" if wfl else "–",
                 f"{parse_float(d.get('nutzflaeche_qm')):.1f}" if d.get("nutzflaeche_qm") else "–",
                 d.get("zimmer") or "–", mea, mea_ctrl,
-                ename, mname, status))
+                ename, mname, d.get("ista_einheit_nr") or "–", status))
         conn.close()
         tree_empty_hint(self.tree)
 
@@ -2929,6 +3356,20 @@ class WohnungDialog(BaseDialog):
                         r.get("mea_tausendstel",""), row=l)
         self._add_field("Baujahr", "baujahr", r.get("baujahr",""), row=ri)
 
+        # Hausgeld
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 0))
+        tk.Label(self._body, text="Hausgeld",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(4, 0))
+        self._add_field("Monatliches Hausgeld (€)",
+                        "hausgeld_monatlich", r.get("hausgeld_monatlich") or "")
+
+        # ista-Einheitennummer (#112)
+        tk.Frame(self._body, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 0))
+        tk.Label(self._body, text="ista Heizkostenabrechnung",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(4, 0))
+        self._add_field("ista-Einheitennummer (laufende Nr. in der Liegenschaft)",
+                        "ista_einheit_nr", r.get("ista_einheit_nr") or "")
+
         # #48 MEA-Kontrollwert (live berechnet aus Wohnfläche / Σ Wohnflächen)
         self._mea_ctrl_var = tk.StringVar(value="")
         ctl = tk.Frame(self._body, bg=BG_CARD); ctl.pack(fill="x", padx=20, pady=(8,0))
@@ -2962,6 +3403,17 @@ class WohnungDialog(BaseDialog):
                 if m["id"] == r["mieter_id"]: cur_mt = i+1; break
 
         self._add_field("Eigentümer", "eigentuemer_str", et_options[cur_et], widget_type="combo", options=et_options)
+        # Eigentümerverlauf-Button (nur für vorhandene Wohnungen)
+        self._wohnung_id = r.get("id")
+        if self._wohnung_id:
+            ez_row = tk.Frame(self._body, bg=BG_CARD)
+            ez_row.pack(fill="x", padx=20, pady=(0, 4))
+            wohnung_bez = r.get("bezeichnung", f"Wohnung #{self._wohnung_id}")
+            make_btn(ez_row, "📋 Eigentümerverlauf",
+                     lambda: EigentuemerZeitraumDialog(self, self._wohnung_id, wohnung_bez),
+                     color=BG_INPUT, fg=TEXT).pack(side="left")
+            tk.Label(ez_row, text="(Eigentümerwechsel verwalten – Jahresabgrenzung)",
+                     bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left", padx=(8, 0))
         self._add_field("Mieter", "mieter_str", mt_options[cur_mt], widget_type="combo", options=mt_options)
         self._add_field("Notizen", "notizen", r.get("notizen",""), widget_type="text")
 
@@ -3010,7 +3462,7 @@ class WohnungDialog(BaseDialog):
         v["carport_anzahl"] = v.get("carport", 0)
 
         # Float-Felder
-        for key in ("wohnflaeche_qm", "nutzflaeche_qm", "mea_tausendstel"):
+        for key in ("wohnflaeche_qm", "nutzflaeche_qm", "mea_tausendstel", "hausgeld_monatlich"):
             v[key] = parse_float(v.get(key)) if v.get(key) not in ("", None) else None
 
         # Resolve Eigentümer-ID
@@ -3087,9 +3539,10 @@ class BuchhaltungPage(tk.Frame):
                  color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(6, 0))
 
-        # ── Filter-Zeile ──────────────────────────────────────────────────────
+        # ── Filter-Zeile 1: Typ + Kategorie + Jahr ────────────────────────────
         filter_frame = tk.Frame(self, bg=BG_CARD)
         filter_frame.pack(fill="x", padx=20, pady=(4, 0))
+
         tk.Label(filter_frame, text="Typ:", bg=BG_CARD,
                  fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
         self._typ_var = tk.StringVar(value="Alle")
@@ -3099,46 +3552,159 @@ class BuchhaltungPage(tk.Frame):
                            activebackground=BG_CARD, selectcolor=BG_CARD,
                            command=self._load_buchungen).pack(side="left", padx=6)
 
+        tk.Label(filter_frame, text="  Kategorie:", bg=BG_CARD,
+                 fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._kat_filter_var = tk.StringVar(value="Alle")
+        self._kat_filter_cb  = ttk.Combobox(filter_frame, textvariable=self._kat_filter_var,
+                                             state="readonly", width=22, font=FONT_SMALL)
+        self._kat_filter_cb.pack(side="left", padx=(2, 0))
+        self._kat_filter_cb.bind("<<ComboboxSelected>>", lambda _: self._load_buchungen())
+
+        tk.Label(filter_frame, text="  Jahr:", bg=BG_CARD,
+                 fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._jahr_filter_var = tk.StringVar(value="Alle")
+        self._jahr_filter_cb  = ttk.Combobox(filter_frame, textvariable=self._jahr_filter_var,
+                                              state="readonly", width=8, font=FONT_SMALL)
+        self._jahr_filter_cb.pack(side="left", padx=(2, 0))
+        self._jahr_filter_cb.bind("<<ComboboxSelected>>", lambda _: self._load_buchungen())
+
+        # ── Filter-Zeile 2: Freitext-Suche ────────────────────────────────────
+        filter_frame2 = tk.Frame(self, bg=BG_CARD)
+        filter_frame2.pack(fill="x", padx=20, pady=(2, 0))
+        tk.Label(filter_frame2, text="Suche:", bg=BG_CARD,
+                 fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+        self._such_var = tk.StringVar()
+        such_entry = tk.Entry(filter_frame2, textvariable=self._such_var,
+                              bg=BG_INPUT, fg=TEXT, font=FONT_SMALL,
+                              relief="flat", width=36)
+        such_entry.pack(side="left", padx=(4, 0), ipady=2)
+        self._such_var.trace_add("write", lambda *_: self._load_buchungen())
+        make_btn(filter_frame2, "✕", lambda: (self._such_var.set(""),
+                 self._kat_filter_var.set("Alle"),
+                 self._jahr_filter_var.set("Alle"),
+                 self._typ_var.set("Alle"),
+                 self._load_buchungen()),
+                 color=BG_INPUT, fg=TEXT_LIGHT).pack(side="left", padx=(4, 0))
+        tk.Label(filter_frame2, text="  (alle Filter zurücksetzen)",
+                 bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(side="left")
+
+        self._refresh_filter_combos()
+
         # ── Buchungen-Tabelle ──────────────────────────────────────────────────
+        self._sort_col   = "Buchungsdatum"   # aktive Sortierspalte
+        self._sort_asc   = False             # absteigende Startreihenfolge
         cols_b = ("Buchungsdatum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Rg.-Nr./Belegnr.", "📎")  # #56 #GH80
-        fb, self.tree_b = make_table(self, cols_b, height=16)
+        fb, self.tree_b = make_table(self, cols_b, height=14)
         fb.pack(fill="both", expand=True, padx=20, pady=6)
         for c, w in zip(cols_b, [100, 200, 110, 100, 80, 80, 100, 28]):
-            self.tree_b.heading(c, text=c); self.tree_b.column(c, width=w, anchor="w")
+            self.tree_b.column(c, width=w, anchor="w")
+            self.tree_b.heading(c, text=c,
+                                command=lambda col=c: self._sort_by(col))
         self.tree_b.tag_configure("einnahme", foreground=SUCCESS)
         self.tree_b.tag_configure("ausgabe",  foreground=DANGER)
         self.tree_b.tag_configure("neu", foreground=ACCENT2, font=("Segoe UI Semibold", 10))
         self.tree_b.bind("<Double-1>", self._edit_buchung)
+        self._update_sort_header()
 
         btn_b = tk.Frame(self, bg=BG_CARD)
         btn_b.pack(fill="x", padx=20, pady=(0, 8))
         make_btn(btn_b, "✏ Bearbeiten",       self._edit_buchung, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
         make_btn(btn_b, "🗑 Löschen",         self._delete_buchung, color=DANGER).pack(side="left", padx=(0,6))
-        make_btn(btn_b, "📎 Beleg öffnen",    self._beleg_oeffnen, color=BG_INPUT, fg=TEXT).pack(side="left")
+        make_btn(btn_b, "📎 Beleg öffnen",    self._beleg_oeffnen, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
+        make_btn(btn_b, "🔀 Kostenart ändern", self._bulk_kategorie, color=BG_INPUT, fg=TEXT).pack(side="left")
 
         self._load_buchungen()
 
     # ── Buchungen ──────────────────────────────────────────────────────────────
 
+    def _refresh_filter_combos(self):
+        """Kategorie- und Jahr-Dropdowns mit aktuellen DB-Werten befüllen."""
+        conn = get_db()
+        kat_rows  = conn.execute(
+            "SELECT DISTINCT kategorie FROM zahlungen "
+            "WHERE kategorie IS NOT NULL AND kategorie != '' ORDER BY kategorie"
+        ).fetchall()
+        jahr_rows = conn.execute(
+            "SELECT DISTINCT strftime('%Y', datum) as j FROM zahlungen "
+            "WHERE datum IS NOT NULL ORDER BY j DESC"
+        ).fetchall()
+        conn.close()
+        kats  = ["Alle"] + [r["kategorie"] for r in kat_rows]
+        jahre = ["Alle"] + [r["j"] for r in jahr_rows]
+        cur_kat  = self._kat_filter_var.get()
+        cur_jahr = self._jahr_filter_var.get()
+        self._kat_filter_cb["values"]  = kats
+        self._jahr_filter_cb["values"] = jahre
+        if cur_kat  not in kats:  self._kat_filter_var.set("Alle")
+        if cur_jahr not in jahre: self._jahr_filter_var.set("Alle")
+
+    def _sort_by(self, col):
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = col != "Buchungsdatum"
+        self._update_sort_header()
+        self._load_buchungen()
+
+    def _update_sort_header(self):
+        cols_b = ("Buchungsdatum", "Beschreibung", "Kategorie", "Betrag", "Typ", "Status", "Rg.-Nr./Belegnr.", "📎")
+        for c in cols_b:
+            if c == self._sort_col:
+                arrow = " ▲" if self._sort_asc else " ▼"
+                self.tree_b.heading(c, text=c + arrow)
+            else:
+                self.tree_b.heading(c, text=c)
+
     def _load_buchungen(self):
         for i in self.tree_b.get_children(): self.tree_b.delete(i)
         conn = get_db()
-        typ = self._typ_var.get()
+        typ      = self._typ_var.get()
+        kat      = self._kat_filter_var.get()
+        jahr     = self._jahr_filter_var.get()
+        suchtext = self._such_var.get().strip().lower()
+
+        where, params = [], []
+        if typ  != "Alle": where.append("z.typ=?");                       params.append(typ)
+        if kat  != "Alle": where.append("z.kategorie=?");                 params.append(kat)
+        if jahr != "Alle": where.append("strftime('%Y',z.datum)=?");      params.append(jahr)
+
+        # Sortierspalte → DB-Spalte
+        sort_map = {
+            "Buchungsdatum":     "z.datum",
+            "Beschreibung":      "z.beschreibung",
+            "Kategorie":         "z.kategorie",
+            "Betrag":            "CAST(z.betrag AS REAL)",
+            "Typ":               "z.typ",
+            "Status":            "z.status",
+            "Rg.-Nr./Belegnr.":  "z.belegnr",
+        }
+        order_col = sort_map.get(self._sort_col, "z.datum")
+        order_dir = "ASC" if self._sort_asc else "DESC"
+
         # #GH80: LEFT JOIN rechnungen, um rechnungsnummer der zugeordneten Rechnung anzuzeigen
         base_sql = (
             "SELECT z.*, r.rechnungsnummer AS rg_nummer "
             "FROM zahlungen z LEFT JOIN rechnungen r ON z.rechnung_id = r.id"
         )
-        if typ != "Alle":
-            rows = conn.execute(
-                f"{base_sql} WHERE z.typ=? ORDER BY z.datum DESC, z.erstellt_am DESC",
-                (typ,)).fetchall()
-        else:
-            rows = conn.execute(
-                f"{base_sql} ORDER BY z.datum DESC, z.erstellt_am DESC").fetchall()
-        einnahmen = ausgaben = 0.0
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        sql = f"{base_sql} {where_sql} ORDER BY {order_col} {order_dir}, z.erstellt_am DESC"
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+
+        einnahmen = ausgaben = 0
+        shown = 0
         for r in rows:
             rd = dict(r)
+            # Freitext-Filter (clientseitig nach DB-Abfrage)
+            if suchtext:
+                haystack = " ".join(str(v) for v in [
+                    rd.get("beschreibung",""), rd.get("kategorie",""),
+                    rd.get("belegnr",""), rd.get("rg_nummer",""),
+                    rd.get("status",""), fmt_date(rd.get("datum","")),
+                ]).lower()
+                if suchtext not in haystack:
+                    continue
             status = rd.get("status") or "Geprüft"
             tags_list = ["einnahme" if rd["typ"] == "Einnahme" else "ausgabe"]
             if status == "Neu":
@@ -3152,14 +3718,15 @@ class BuchhaltungPage(tk.Frame):
                 rd["typ"], status, belegnr_display, beleg_ind), tags=tuple(tags_list))
             if rd["typ"] == "Einnahme": einnahmen += rd["betrag"] or 0
             else:                       ausgaben  += abs(rd["betrag"] or 0)
-        conn.close()
+            shown += 1
         tree_empty_hint(self.tree_b)
         saldo = einnahmen - ausgaben
         color = SUCCESS if saldo >= 0 else DANGER
+        suffix = f"  ({shown} Einträge)" if suchtext or kat != "Alle" or jahr != "Alle" or typ != "Alle" else ""
         self._saldo_label.config(
             text=(f"Saldo: {fmt_euro(saldo)}   |   "
                   f"Einnahmen: {fmt_euro(einnahmen)}   "
-                  f"Ausgaben: {fmt_euro(ausgaben)}"),
+                  f"Ausgaben: {fmt_euro(ausgaben)}{suffix}"),
             fg=color)
 
     def _new_zahlung(self):
@@ -3184,6 +3751,7 @@ class BuchhaltungPage(tk.Frame):
             _sync_kategorie_von_rechnung(conn, zahlung_id, v.get("rechnung_id"))  # #78
             _auto_update_rechnung_status(conn, v.get("rechnung_id"))  # #67
             conn.commit(); conn.close()
+            self._refresh_filter_combos()
             self._load_buchungen()
 
     def _edit_buchung(self, event=None):
@@ -3217,6 +3785,7 @@ class BuchhaltungPage(tk.Frame):
             if _alte_rechnung_id and _alte_rechnung_id != _neue_rechnung_id:
                 _auto_update_rechnung_status(conn, _alte_rechnung_id)
             conn.commit(); conn.close()
+            self._refresh_filter_combos()
             self._load_buchungen()
 
     def _beleg_oeffnen(self):
@@ -3264,7 +3833,175 @@ class BuchhaltungPage(tk.Frame):
                 conn.execute("DELETE FROM zahlungen WHERE id=?", (zahlung_id,))
             conn.commit()
             conn.close()
+            self._refresh_filter_combos()
             self._load_buchungen()
+
+    def _bulk_kategorie(self):
+        """#105/#106 Kostenart-Änderung:
+        - Auswahl vorhanden: nur die markierten IDs, aber nur wenn alle dieselbe Kostenart haben.
+        - Keine Auswahl: alle Buchungen einer wählbaren Kategorie (wie bisher).
+        """
+        sel = self.tree_b.selection()
+        sel_ids = [int(iid) for iid in sel]
+
+        # ── Modus bestimmen ───────────────────────────────────────────────────
+        if sel_ids:
+            # Prüfen ob alle Selektierten dieselbe Kostenart haben
+            kategorien = set()
+            for iid in sel:
+                vals = self.tree_b.item(iid, "values")
+                kategorien.add(vals[2] if len(vals) > 2 else "")
+            if len(kategorien) > 1:
+                messagebox.showwarning(
+                    "Verschiedene Kostenarten",
+                    f"Die {len(sel_ids)} markierten Buchungen haben unterschiedliche Kostenarten:\n"
+                    + ", ".join(sorted(kategorien)) +
+                    "\n\nBitte nur Buchungen mit gleicher Kostenart markieren.",
+                    parent=self)
+                return
+            von_kat_fix = kategorien.pop()
+            modus_text  = f"{len(sel_ids)} markierte Buchung(en) mit Kostenart '{von_kat_fix}'"
+        else:
+            # Keine Selektion → sichtbare Tabellenzeilen verwenden
+            sichtbare_ids = [int(iid) for iid in self.tree_b.get_children()]
+            if not sichtbare_ids:
+                messagebox.showinfo("Kostenart ändern", "Keine Buchungen sichtbar.", parent=self)
+                return
+            sel_ids     = sichtbare_ids
+            von_kat_fix = None   # wird aus sichtbaren Zeilen ermittelt (für Vorauswahl)
+
+        # ── Kategorien der Ziel-IDs prüfen ────────────────────────────────────
+        # (gilt für beide Modi – bei Selektion bereits geprüft, hier für sichtbare Zeilen)
+        if von_kat_fix is None:
+            kategorien = set()
+            for iid in self.tree_b.get_children():
+                vals = self.tree_b.item(iid, "values")
+                kategorien.add(vals[2] if len(vals) > 2 else "")
+            if len(kategorien) > 1:
+                # Verschiedene Kategorien sichtbar → Dropdown anbieten, aber nur auf sichtbare IDs
+                von_kat_fix = None   # bleibt None → Dropdown wird angezeigt
+                modus_text  = f"{len(sel_ids)} sichtbare Buchung(en) – Kostenart wählen"
+            else:
+                von_kat_fix = next(iter(kategorien)) if kategorien else ""
+                modus_text  = f"{len(sel_ids)} sichtbare Buchung(en) mit Kostenart '{von_kat_fix}'"
+
+        # ── Alle Kategorien mit Buchungsanzahl (für Dropdown wenn nötig) ──────
+        conn = get_db()
+        kat_rows = conn.execute(
+            "SELECT kategorie, COUNT(*) as n FROM zahlungen "
+            "WHERE kategorie IS NOT NULL AND kategorie != '' "
+            "GROUP BY kategorie ORDER BY n DESC, kategorie"
+        ).fetchall()
+        conn.close()
+        if not kat_rows:
+            messagebox.showinfo("Kostenart ändern", "Keine Buchungen vorhanden.", parent=self)
+            return
+
+        von_liste = [f"{r['kategorie']} ({r['n']} Buchungen)" for r in kat_rows]
+        kat_namen  = [r["kategorie"] for r in kat_rows]
+
+        # ── Dialog ────────────────────────────────────────────────────────────
+        dlg = tk.Toplevel(self)
+        dlg.title("Kostenart ändern")
+        dlg.geometry("500x300")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.configure(bg=BG_CARD)
+
+        # Hinweis-Banner je nach Modus
+        if sel_ids:
+            banner = tk.Label(dlg, text=f"Modus: {modus_text}",
+                              bg="#EAF3FB", fg=ACCENT2, font=FONT_SMALL,
+                              anchor="w", padx=12, pady=5)
+            banner.pack(fill="x", padx=0, pady=(0, 0))
+
+        # "Von"-Bereich
+        tk.Label(dlg, text="Von Kostenart:", bg=BG_CARD, fg=TEXT, font=FONT_BODY).pack(
+            anchor="w", padx=20, pady=(14, 2))
+        if von_kat_fix is not None:
+            # Eindeutig – nur anzeigen, nicht änderbar
+            tk.Label(dlg, text=f"  {von_kat_fix}", bg=BG_INPUT, fg=TEXT,
+                     font=FONT_BODY, anchor="w", relief="flat", padx=8, pady=4).pack(
+                fill="x", padx=20)
+            von_var = None
+        else:
+            # Mehrere Kategorien sichtbar → Dropdown zur Auswahl
+            kat_filter = self._kat_filter_var.get()
+            vorauswahl_idx = 0
+            if kat_filter and kat_filter != "Alle" and kat_filter in kat_namen:
+                vorauswahl_idx = kat_namen.index(kat_filter)
+            von_var = tk.StringVar(value=von_liste[vorauswahl_idx] if von_liste else "")
+            cb_von = ttk.Combobox(dlg, textvariable=von_var, values=von_liste,
+                                  state="readonly", width=56)
+            cb_von.pack(padx=20, fill="x")
+
+        info_var = tk.StringVar()
+        tk.Label(dlg, textvariable=info_var, bg=BG_CARD, fg=TEXT_LIGHT,
+                 font=FONT_SMALL).pack(anchor="w", padx=20, pady=(2, 0))
+
+        def _update_info(*_):
+            info_var.set(f"  {len(sel_ids)} Buchung(en) werden umgestellt")
+
+        if von_var:
+            cb_von.bind("<<ComboboxSelected>>", _update_info)
+        _update_info()
+
+        # "Nach"-Bereich
+        tk.Label(dlg, text="Nach Kostenart:", bg=BG_CARD, fg=TEXT, font=FONT_BODY).pack(
+            anchor="w", padx=20, pady=(12, 2))
+        alle_kat = BuchhaltungPage.aktive_kategorien()
+        nach_var = tk.StringVar()
+        cb_nach = ttk.Combobox(dlg, textvariable=nach_var, values=alle_kat,
+                               state="readonly", width=56)
+        cb_nach.pack(padx=20, fill="x")
+
+        def _on_ok():
+            nach_txt = nach_var.get().strip()
+            if not nach_txt:
+                messagebox.showwarning("Eingabe fehlt", "Bitte Ziel-Kostenart auswählen.", parent=dlg)
+                return
+
+            if von_kat_fix is not None:
+                von_kat = von_kat_fix
+            else:
+                if not von_var or not von_var.get():
+                    messagebox.showwarning("Eingabe fehlt", "Bitte Quell-Kostenart auswählen.", parent=dlg)
+                    return
+                von_kat = ""
+                for i, label in enumerate(von_liste):
+                    if label == von_var.get():
+                        von_kat = kat_namen[i]; break
+
+            if von_kat == nach_txt:
+                messagebox.showwarning("Gleiche Kostenart", "Von und Nach sind identisch.", parent=dlg)
+                return
+
+            n = len(sel_ids)
+
+            if not messagebox.askyesno(
+                "Bestätigen",
+                f"{n} Buchung(en) von '{von_kat}' nach '{nach_txt}' umstellen?\n\n"
+                "Diese Aktion kann nicht rückgängig gemacht werden.",
+                parent=dlg
+            ):
+                return
+
+            conn2 = get_db()
+            platzhalter = ",".join("?" * len(sel_ids))
+            conn2.execute(
+                f"UPDATE zahlungen SET kategorie=? WHERE id IN ({platzhalter})",
+                [nach_txt] + sel_ids)
+            conn2.commit()
+            conn2.close()
+            dlg.destroy()
+            self._refresh_filter_combos()
+            self._load_buchungen()
+            messagebox.showinfo("Erledigt", f"{n} Buchung(en) umgestellt.", parent=self)
+
+        btn_frame = tk.Frame(dlg, bg=BG_CARD)
+        btn_frame.pack(fill="x", padx=20, pady=(16, 12))
+        make_btn(btn_frame, "Übernehmen", _on_ok).pack(side="right")
+        make_btn(btn_frame, "Abbrechen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(0, 8))
 
     def _jahresabschluss_html(self):
         """#87 Jahresabschluss-HTML: Vollständige Einnahmen/Ausgaben-Übersicht, öffnet im Browser."""
@@ -4241,6 +4978,7 @@ class RechnungenPage(tk.Frame):
         self.tree.column("Brutto €",    anchor="e")
         self.tree.column("Gebucht €",   anchor="e")
         self.tree.column("Differenz €", anchor="e")
+        _treeview_sort_setup(self.tree, cols)
         self.tree.bind("<Double-1>", self._edit_rechnung)
         self.tree.tag_configure("bezahlt",     foreground=SUCCESS)
         self.tree.tag_configure("offen",       foreground=TEXT)
@@ -4501,6 +5239,7 @@ class RechnungenPage(tk.Frame):
         for c, w in zip(cols, [90, 220, 100, 90, 90]):
             tree.heading(c, text=c); tree.column(c, width=w, anchor="w")
         tree.column("Betrag €", anchor="e")
+        _treeview_sort_setup(tree, cols)
         total = 0.0
         for b in buchungen:
             betrag = b["betrag"] or 0
@@ -5754,6 +6493,7 @@ class WartungPage(tk.Frame):
         f.pack(fill="both", expand=True, padx=20, pady=8)
         for c, w in zip(cols, [200, 120, 80, 90, 90, 90]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree, cols)
         self.tree.bind("<Double-1>", self._edit)
 
         btn_row = tk.Frame(self, bg=BG_CARD)
@@ -5882,6 +6622,7 @@ class NachrichtenPage(tk.Frame):
         f.pack(fill="x", padx=20, pady=8)
         for c, w in zip(cols, [20, 140, 140, 220, 80, 120]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree, cols)
         self.tree.bind("<Double-1>", self._mark_read)
 
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20)
@@ -5988,6 +6729,7 @@ class DokumentePage(tk.Frame):
         f.pack(fill="both", expand=True, padx=20, pady=8)
         for c, w in zip(cols, [200, 120, 220, 180, 90]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree, cols)
         self.tree.bind("<Double-1>", self._open_file)
 
         btn_row = tk.Frame(self, bg=BG_CARD)
@@ -6178,6 +6920,7 @@ class NebenkostenPage(tk.Frame):
         for c, w in zip(cols_kat, [200, 160, 100, 90, 110]):
             self._tree_weg_kat.heading(c, text=c)
             self._tree_weg_kat.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self._tree_weg_kat, cols_kat)
         # Drill-Down: Doppelklick zeigt Einzelbuchungen der Kategorie
         self._tree_weg_kat.bind("<Double-1>", self._show_kategorie_detail)
         tk.Label(self._view_weg, text="💡 Doppelklick auf Kategorie → Einzelbuchungen anzeigen",
@@ -6192,6 +6935,7 @@ class NebenkostenPage(tk.Frame):
         for c, w in zip(cols_eig, [180, 60, 110, 110, 100]):
             self._tree_weg_eig.heading(c, text=c)
             self._tree_weg_eig.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self._tree_weg_eig, cols_eig)
 
         # ── Tab §556 BGB ───────────────────────────────────────────────────
         self._view_bgb = tk.Frame(self._content, bg=BG_CARD)
@@ -6218,6 +6962,7 @@ class NebenkostenPage(tk.Frame):
         for c, w in zip(cols_uk, [220, 110, 160]):
             self._tree_bgb_kat.heading(c, text=c)
             self._tree_bgb_kat.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self._tree_bgb_kat, cols_uk)
 
         tk.Label(self._view_bgb, text="Anteil pro Mieter (nach Wohnfläche)", bg=BG_CARD,
                  fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
@@ -6227,6 +6972,7 @@ class NebenkostenPage(tk.Frame):
         for c, w in zip(cols_mi, [120, 150, 70, 65, 100, 110, 90]):
             self._tree_bgb_mi.heading(c, text=c)
             self._tree_bgb_mi.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self._tree_bgb_mi, cols_mi)
 
         # ── Tab Wirtschaftsplan ─────────────────────────────────────────────
         self._view_wp = tk.Frame(self._content, bg=BG_CARD)
@@ -6254,6 +7000,7 @@ class NebenkostenPage(tk.Frame):
         for c, w in zip(cols_wp, [220, 160, 110, 220]):
             self._tree_wp.heading(c, text=c)
             self._tree_wp.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self._tree_wp, cols_wp)
         self._tree_wp.bind("<Double-1>", self._wp_edit)
 
         wp_btn = tk.Frame(self._view_wp, bg=BG_CARD)
@@ -6286,6 +7033,7 @@ class NebenkostenPage(tk.Frame):
             tree.heading(col, text=col)
         frame.pack(fill="both", expand=True, padx=20)
         self._vd_tree = tree
+        _treeview_sort_setup(self._vd_tree, ("Wohnung", "Anfang", "Ende", "Verbrauch", "Einheit", "Ablesedatum"))
         btn_row = tk.Frame(self._view_verbrauch, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=8)
         make_btn(btn_row, "✏️ Bearbeiten", self._edit_verbrauch).pack(side="left", padx=(0, 6))
@@ -6304,15 +7052,16 @@ class NebenkostenPage(tk.Frame):
         self._wg_kpi = tk.Frame(self._view_wohngeld, bg=BG_CARD)
         self._wg_kpi.pack(fill="x", padx=20, pady=(6, 4))
 
-        tk.Label(self._view_wohngeld,
-                 text="Hausgeld-Einnahmen pro Eigentümer (Ist) vs. Kostenpflicht (Soll nach MEA)",
+        self._wg_info_var = tk.StringVar(value="")
+        tk.Label(self._view_wohngeld, textvariable=self._wg_info_var,
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20)
-        cols_wg = ("Eigentümer", "MEA %", "Soll (Kostenanteil)", "Ist (gezahlt)", "Saldo", "Status")
+        cols_wg = ("Eigentümer", "Soll/Monat", "Soll (fällig)", "Ist (gezahlt)", "Saldo", "Status")
         fwg, self._tree_wg = make_table(self._view_wohngeld, cols_wg, height=12)
         fwg.pack(fill="both", expand=True, padx=20, pady=(2, 8))
-        for c, w in zip(cols_wg, [180, 60, 140, 140, 110, 100]):
+        for c, w in zip(cols_wg, [180, 100, 140, 140, 110, 150]):
             self._tree_wg.heading(c, text=c)
             self._tree_wg.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self._tree_wg, cols_wg)
 
         self._switch_tab("weg")
 
@@ -6444,17 +7193,33 @@ class NebenkostenPage(tk.Frame):
     # ── Hausgeld-Kontrolle (#86) ──────────────────────────────────────────────
 
     def _load_wohngeld(self):
-        """Wohngeld Soll/Ist: Vergleich geleisteter vs. erwarteter Hausgeld-Zahlungen."""
+        """Hausgeld-Kontrolle: vereinbartes Soll vs. tatsächlich gebuchtes Ist."""
+        import calendar as _cal
+        from datetime import date as _date
         try:
             jahr = int(self._wg_jahr.get())
         except ValueError:
             return
+
+        heute = _date.today()
+        if jahr < heute.year:
+            faellige_monate = 12
+            monate_text = f"Januar–Dezember {jahr} (12 Monate)"
+        elif jahr == heute.year:
+            faellige_monate = heute.month
+            monatsnamen = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
+                           "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
+            monate_text = f"Januar–{monatsnamen[heute.month-1]} {jahr} ({faellige_monate} Monate fällig)"
+        else:
+            faellige_monate = 0
+            monate_text = f"{jahr} liegt in der Zukunft"
+
+        self._wg_info_var.set(
+            f"Vereinbartes Hausgeld (Soll) vs. eingegangene Zahlungen (Ist)  –  {monate_text}"
+        )
+
         conn = get_db()
-        total_ausgaben = conn.execute(
-            "SELECT COALESCE(SUM(betrag),0) FROM zahlungen "
-            "WHERE typ='Ausgabe' AND strftime('%Y',datum)=?", (str(jahr),)
-        ).fetchone()[0]
-        hg_ist = conn.execute(
+        hg_ist_rows = conn.execute(
             "SELECT eigentuemer_id, SUM(betrag) as s FROM zahlungen "
             "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y',datum)=? "
             "GROUP BY eigentuemer_id", (str(jahr),)
@@ -6465,43 +7230,78 @@ class NebenkostenPage(tk.Frame):
             (str(jahr),)
         ).fetchone()[0]
         eigentuemer = conn.execute(
-            "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name"
+            "SELECT id, vorname, name FROM eigentuemer ORDER BY name"
         ).fetchall()
+        # Soll je Eigentümer aus vereinbartem Hausgeld × fällige Monate
+        soll_map = hausgeld_soll_fuer_jahr(conn, jahr)
+        # Monatlicher Betrag pro Eigentümer (Summe über alle Wohnungen)
+        monatlich_map: dict = {}
+        for r in conn.execute(
+            "SELECT eigentuemer_id, hausgeld_monatlich FROM wohnungen "
+            "WHERE COALESCE(aktiv,1)=1 AND eigentuemer_id IS NOT NULL"
+        ).fetchall():
+            eid = r["eigentuemer_id"]
+            monatlich_map[eid] = monatlich_map.get(eid, 0.0) + (parse_float(r["hausgeld_monatlich"]) or 0.0)
         conn.close()
-        hg_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hg_ist}
+
+        hg_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hg_ist_rows}
+        hg_gesamt_soll = sum(soll_map.values())
+
         # KPI-Karten
         for w in self._wg_kpi.winfo_children():
             w.destroy()
-        saldo_gesamt = hg_gesamt_ist - total_ausgaben
+        saldo_gesamt = hg_gesamt_ist - hg_gesamt_soll
         for label, wert, color in [
-            ("Gesamtausgaben (Soll)", fmt_euro(total_ausgaben), DANGER),
-            ("Hausgeld-Einnahmen (Ist)", fmt_euro(hg_gesamt_ist), SUCCESS),
-            ("Jahressaldo", fmt_euro(saldo_gesamt), SUCCESS if saldo_gesamt >= 0 else DANGER),
+            ("Hausgeld-Soll (fällig)", fmt_euro(hg_gesamt_soll), DANGER if hg_gesamt_soll else TEXT_LIGHT),
+            ("Hausgeld-Ist (eingegangen)", fmt_euro(hg_gesamt_ist), SUCCESS),
+            ("Saldo", fmt_euro(saldo_gesamt), SUCCESS if saldo_gesamt >= 0 else DANGER),
         ]:
             karte = tk.Frame(self._wg_kpi, bg=BG_INPUT, padx=14, pady=8)
             karte.pack(side="left", padx=(0, 10))
             tk.Label(karte, text=label, bg=BG_INPUT, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
             tk.Label(karte, text=wert,  bg=BG_INPUT, fg=color,      font=FONT_H3).pack(anchor="w")
+
+        if not any(soll_map.values()):
+            # Kein Hausgeld hinterlegt — Hinweis in Tabelle
+            for i in self._tree_wg.get_children():
+                self._tree_wg.delete(i)
+            self._tree_wg.insert("", "end", iid="__empty__",
+                values=("⚠ Kein monatliches Hausgeld hinterlegt — bitte in Wohnungen eintragen",
+                        "", "", "", "", ""), tags=("hint",))
+            self._tree_wg.tag_configure("hint", foreground=DANGER)
+            return
+
         # Pro-Eigentümer-Tabelle
         for i in self._tree_wg.get_children():
             self._tree_wg.delete(i)
         for e in eigentuemer:
-            anteil_pct = parse_float(e["anteil_prozent"]) or 0
-            soll       = total_ausgaben * anteil_pct / 100
-            ist        = hg_map.get(e["id"], 0)
-            saldo      = ist - soll
-            name       = f"{e['vorname'] or ''} {e['name']}".strip()
-            if saldo >= 0:
+            soll      = soll_map.get(e["id"], 0.0)
+            ist       = hg_map.get(e["id"], 0.0)
+            monatlich = monatlich_map.get(e["id"], 0.0)
+            if soll == 0 and ist == 0:
+                continue  # Eigentümer ohne Wohnung/Hausgeld ausblenden
+            saldo     = ist - soll
+            name      = f"{e['vorname'] or ''} {e['name']}".strip()
+            if saldo >= -0.01:
                 status    = "✔ ausgeglichen"
                 color_tag = "wg_plus"
-            else:
+            elif saldo >= -(monatlich * 1.5) and monatlich:
                 status    = f"⚠ Rückstand {fmt_euro(abs(saldo))}"
+                color_tag = "wg_warn"
+            else:
+                monate_rueck = int(abs(saldo) / monatlich) if monatlich else 0
+                status    = f"✖ {monate_rueck} Monat(e) offen – {fmt_euro(abs(saldo))}"
                 color_tag = "wg_minus"
             self._tree_wg.insert("", "end", values=(
-                name, f"{anteil_pct:.2f}%",
-                fmt_euro(soll), fmt_euro(ist),
-                fmt_euro(saldo), status), tags=(color_tag,))
+                name,
+                fmt_euro(monatlich),
+                fmt_euro(soll),
+                fmt_euro(ist),
+                fmt_euro(saldo),
+                status), tags=(color_tag,))
+        tree_empty_hint(self._tree_wg)
         self._tree_wg.tag_configure("wg_plus",  foreground=SUCCESS)
+        self._tree_wg.tag_configure("wg_warn",  foreground="#E67E22")
         self._tree_wg.tag_configure("wg_minus", foreground=DANGER)
 
     # ── §28 WEG Eigentümer ─────────────────────────────────────────────────────
@@ -6530,7 +7330,8 @@ class NebenkostenPage(tk.Frame):
             "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y', datum)=?",
             (str(jahr),)).fetchone()[0] or 0
         eigentuemer = conn.execute(
-            "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name").fetchall()
+            "SELECT id, vorname, name FROM eigentuemer ORDER BY name").fetchall()
+        anteil_map = _eigentuemer_anteile_fuer_jahr(conn, jahr)
         conn.close()
 
         hausgeld_map = {r["eigentuemer_id"]: (r["s"] or 0) for r in hausgeld_rows}
@@ -6573,7 +7374,7 @@ class NebenkostenPage(tk.Frame):
         for i in self._tree_weg_eig.get_children():
             self._tree_weg_eig.delete(i)
         for e in eigentuemer:
-            anteil_pct = parse_float(e["anteil_prozent"]) or 0
+            anteil_pct = anteil_map.get(e["id"], 0.0)
             kostenanteil = total_ausgaben * anteil_pct / 100
             hg_ist = hausgeld_map.get(e["id"], 0)
             saldo = hg_ist - kostenanteil
@@ -6904,6 +7705,7 @@ class NebenkostenPage(tk.Frame):
         f.pack(fill="both", expand=True, padx=16, pady=10)
         for c, w in zip(cols, [200, 100, 100, 100, 80]):
             tree.heading(c, text=c); tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(tree, cols)
 
         total_soll = total_ist = 0
         for kat in alle_kat:
@@ -7066,6 +7868,7 @@ class NebenkostenPage(tk.Frame):
         for col, w in [("Jahr", 60), ("Typ", 60), ("Status", 100), ("Festgestellt am", 140), ("Positionen", 80)]:
             tree.column(col, width=w)
             tree.heading(col, text=col)
+        _treeview_sort_setup(tree, ("Jahr", "Typ", "Status", "Festgestellt am", "Positionen"))
         frame.pack(fill="both", expand=True, padx=16, pady=8)
 
         conn = get_db()
@@ -7105,51 +7908,113 @@ class NebenkostenPage(tk.Frame):
 
         dlg = tk.Toplevel(self)
         dlg.title(f"Buchungen: {kategorie} ({jahr})")
-        dlg.geometry("720x420")
+        dlg.geometry("760x460")
         dlg.configure(bg=BG_CARD)
         dlg.transient(self.winfo_toplevel())
 
         tk.Label(dlg, text=f"Einzelbuchungen – {kategorie} – {jahr}",
                  bg=BG_CARD, fg=TEXT, font=FONT_H2).pack(padx=20, pady=(16, 8), anchor="w")
 
-        frame, tree2 = make_table(dlg, ("Datum", "Beschreibung", "Rechnungssteller", "Betrag", "Relevant"))
+        COLS = ("Datum", "Beschreibung", "Rechnungssteller", "Betrag", "Relevant")
+        frame, tree2 = make_table(dlg, COLS)
         for col, w in [("Datum", 90), ("Beschreibung", 230), ("Rechnungssteller", 150), ("Betrag", 100), ("Relevant", 70)]:
             tree2.column(col, width=w, anchor="w" if col != "Betrag" else "e")
-            tree2.heading(col, text=col)
+
+        # Bottom-Widgets VOR dem expandierenden Frame packen (Tkinter pack-Reihenfolge)
+        lbl_summe = tk.Label(dlg, text="", bg=BG_CARD, fg=TEXT, font=FONT_H3)
+        lbl_summe.pack(side="bottom", padx=16, pady=(0, 4), anchor="e")
+
+        sort_map = {
+            "Datum": "z.datum",
+            "Beschreibung": "z.beschreibung",
+            "Rechnungssteller": "COALESCE(r.rechnungssteller, '')",
+            "Betrag": "CAST(z.betrag AS REAL)",
+            "Relevant": "z.abrechnungsrelevant",
+        }
+        st = {"col": "Datum", "asc": True}
+
+        def _laden():
+            order_col = sort_map.get(st["col"], "z.datum")
+            order_dir = "ASC" if st["asc"] else "DESC"
+            conn = get_db()
+            try:
+                rows = conn.execute(
+                    "SELECT z.id, z.datum, z.beschreibung, "
+                    "  COALESCE(r.rechnungssteller, '') AS rechnungssteller, "
+                    "  z.betrag, z.abrechnungsrelevant "
+                    "FROM zahlungen z LEFT JOIN rechnungen r ON z.rechnung_id = r.id "
+                    f"WHERE z.typ='Ausgabe' AND z.kategorie=? AND strftime('%Y',z.datum)=? "
+                    f"ORDER BY {order_col} {order_dir}",
+                    (kategorie, str(jahr))
+                ).fetchall()
+            finally:
+                conn.close()
+
+            for iid in tree2.get_children():
+                tree2.delete(iid)
+            summe = 0.0
+            for row in rows:
+                relevant = "✅" if (row["abrechnungsrelevant"] is None or row["abrechnungsrelevant"] != 0) else "❌"
+                betrag_abs = abs(row["betrag"] or 0)
+                tree2.insert("", "end", iid=str(row["id"]), values=(
+                    fmt_date(row["datum"]),
+                    row["beschreibung"] or "",
+                    row["rechnungssteller"] or "",
+                    fmt_euro(betrag_abs),
+                    relevant
+                ))
+                if row["abrechnungsrelevant"] is None or row["abrechnungsrelevant"] != 0:
+                    summe += betrag_abs
+            tree_empty_hint(tree2)
+            lbl_summe.config(text=f"Summe (abrechnungsrelevant): {fmt_euro(summe)}")
+
+        def _sort(col):
+            if st["col"] == col:
+                st["asc"] = not st["asc"]
+            else:
+                st["col"] = col
+                st["asc"] = True
+            for c in COLS:
+                arrow = (" ▲" if st["asc"] else " ▼") if c == st["col"] else ""
+                tree2.heading(c, text=c + arrow)
+            _laden()
+
+        for col in COLS:
+            tree2.heading(col, text=col + (" ▲" if col == "Datum" else ""),
+                          command=lambda c=col: _sort(c))
+
+        def _loeschen():
+            sel2 = tree2.selection()
+            if not sel2:
+                messagebox.showinfo("Hinweis", "Bitte eine Buchung auswählen.", parent=dlg)
+                return
+            zahlung_id = int(sel2[0])
+            if not messagebox.askyesno("Buchung löschen",
+                                       "Buchung unwiderruflich löschen?\n"
+                                       "Zugehörige Kontoauszug-Zuordnung wird ebenfalls aufgehoben.",
+                                       parent=dlg):
+                return
+            conn = get_db()
+            try:
+                conn.execute(
+                    "UPDATE kontoauszug SET zugeordnet=0, als_buchung_uebernommen=0, "
+                    "zahlung_id=NULL WHERE zahlung_id=?", (zahlung_id,)
+                )
+                conn.execute("DELETE FROM zahlungen WHERE id=?", (zahlung_id,))
+                conn.commit()
+            finally:
+                conn.close()
+            _laden()
+            if hasattr(self, "_load_weg"):
+                self._load_weg()
+
+        btn_row = tk.Frame(dlg, bg=BG_CARD)
+        btn_row.pack(side="bottom", pady=(0, 12))
+        make_btn(btn_row, "🗑 Löschen", _loeschen, color=DANGER, fg="white").pack(side="left", padx=6)
+        make_btn(btn_row, "Schließen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(side="left", padx=6)
+
         frame.pack(fill="both", expand=True, padx=16, pady=8)
-
-        conn = get_db()
-        try:
-            rows = conn.execute(
-                "SELECT z.datum, z.beschreibung, "
-                "  COALESCE(r.rechnungssteller, '') AS rechnungssteller, "
-                "  z.betrag, z.abrechnungsrelevant "
-                "FROM zahlungen z LEFT JOIN rechnungen r ON z.rechnung_id = r.id "
-                "WHERE z.typ='Ausgabe' AND z.kategorie=? AND strftime('%Y',z.datum)=? "
-                "ORDER BY z.datum",
-                (kategorie, str(jahr))
-            ).fetchall()
-        finally:
-            conn.close()
-
-        summe = 0.0
-        for row in rows:
-            relevant = "✅" if (row["abrechnungsrelevant"] is None or row["abrechnungsrelevant"] != 0) else "❌"
-            betrag_abs = abs(row["betrag"] or 0)
-            tree2.insert("", "end", values=(
-                fmt_date(row["datum"]),
-                row["beschreibung"] or "",
-                row["rechnungssteller"] or "",
-                fmt_euro(betrag_abs),
-                relevant
-            ))
-            if row["abrechnungsrelevant"] is None or row["abrechnungsrelevant"] != 0:
-                summe += betrag_abs
-
-        tree_empty_hint(tree2)
-        tk.Label(dlg, text=f"Summe (abrechnungsrelevant): {fmt_euro(summe)}",
-                 bg=BG_CARD, fg=TEXT, font=FONT_H3).pack(padx=16, pady=(0, 4), anchor="e")
-        make_btn(dlg, "Schließen", dlg.destroy, color=BG_INPUT, fg=TEXT).pack(pady=(0, 12))
+        _laden()
 
     # ── Echte Umlageschlüssel-Berechnung ─────────────────────────────────────
 
@@ -7246,7 +8111,8 @@ class NebenkostenPage(tk.Frame):
             "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y', datum)=?",
             (str(jahr),)).fetchone()[0] or 0
         eigentuemer = conn.execute(
-            "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name").fetchall()
+            "SELECT id, vorname, name FROM eigentuemer ORDER BY name").fetchall()
+        anteil_map = _eigentuemer_anteile_fuer_jahr(conn, jahr)
         conn.close()
 
         hausgeld_map  = {r["eigentuemer_id"]: (r["s"] or 0) for r in hausgeld_rows}
@@ -7332,7 +8198,7 @@ class NebenkostenPage(tk.Frame):
             story.append(Paragraph("Anteil pro Eigentümer (nach MEA)", H2))
             eig_data = [["Eigentümer", "MEA %", "Kostenanteil", "Hausgeld (Ist)", "Saldo"]]
             for e in eigentuemer:
-                anteil_pct = parse_float(e["anteil_prozent"]) or 0
+                anteil_pct = anteil_map.get(e["id"], 0.0)
                 kostenanteil = total_ausgaben * anteil_pct / 100
                 hg_ist = hausgeld_map.get(e["id"], 0)
                 saldo  = hg_ist - kostenanteil
@@ -7390,8 +8256,9 @@ class NebenkostenPage(tk.Frame):
                 "WHERE typ='Einnahme' AND kategorie='Hausgeld' AND strftime('%Y', datum)=?",
                 (str(jahr),)).fetchone()[0] or 0
             eigentuemer = conn.execute(
-                "SELECT id, vorname, name, anteil_prozent FROM eigentuemer ORDER BY name"
+                "SELECT id, vorname, name FROM eigentuemer ORDER BY name"
             ).fetchall()
+            anteil_map = _eigentuemer_anteile_fuer_jahr(conn, jahr)
         finally:
             conn.close()
 
@@ -7423,7 +8290,7 @@ class NebenkostenPage(tk.Frame):
         # ── Eigentümer-Tabelle ────────────────────────────────────────────────
         eig_html = ""
         for e in eigentuemer:
-            anteil_pct   = parse_float(e["anteil_prozent"]) or 0
+            anteil_pct   = anteil_map.get(e["id"], 0.0)
             kostenanteil = total_ausgaben * anteil_pct / 100
             hg_ist       = hg_map.get(e["id"], 0)
             saldo        = hg_ist - kostenanteil
@@ -8009,6 +8876,7 @@ class AufteilungenPage(tk.Frame):  # #39
         f.pack(fill="both", expand=True, padx=20, pady=8)
         for c, w in zip(cols, [180, 160, 200, 60, 200]):  # #39: Breiten angepasst
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree, cols)
         self.tree.bind("<Double-1>", self._edit)
         btn_row = tk.Frame(self, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0,10))
@@ -8350,6 +9218,7 @@ class KontoauszugPage(tk.Frame):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w,
                              anchor="e" if col == "Betrag" else "w")
+        _treeview_sort_setup(self.tree, cols)
         # Farb-Tags: Grün = Gutschrift, Rot = Lastschrift, Fett = Neu
         self.tree.tag_configure("crdt", foreground=SUCCESS)
         self.tree.tag_configure("dbit", foreground=DANGER)
@@ -8391,6 +9260,7 @@ class KontoauszugPage(tk.Frame):
         fv.pack(fill="both", expand=True, padx=20, pady=4)
         for c, w in zip(cols_v, [88, 180, 250, 100, 90, 120]):
             self.tree_v.heading(c, text=c); self.tree_v.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree_v, cols_v)
         self.tree_v.tag_configure("mit_vorschlag", foreground="#2E7D32")
         # Mehrfachauswahl aktivieren
         self.tree_v.configure(selectmode="extended")
@@ -9583,6 +10453,7 @@ class WasserkostenPage(tk.Frame):
             self.tree_p.column(c, width=w, anchor="center")
         self.tree_p.column("Wohnung / Mieter", anchor="w")
         self.tree_p.column("Eigentuemer", anchor="w")
+        _treeview_sort_setup(self.tree_p, cols)
         self.tree_p.bind("<Double-1>", self._edit_wohnung)
 
         btn_row = tk.Frame(self._view_punkte, bg=BG_CARD)
@@ -10764,6 +11635,7 @@ class KiProtokollPage(tk.Frame):
             self._tree_log.column(c, width=w, anchor="w")
         # ID-Spalte unsichtbar (#53)
         self._tree_log.column("ID", width=0, minwidth=0, stretch=False)
+        _treeview_sort_setup(self._tree_log, cols)
 
         # #53 Doppelklick für Detail-Ansicht
         self._tree_log.bind("<Double-1>", self._show_detail)
@@ -11118,6 +11990,7 @@ class EinstellungenPage(tk.Frame):
         fr.pack(fill="both", expand=True, padx=20, pady=4)
         for c, w in zip(cols_r, [220, 130, 90, 110, 70, 80]):
             self.tree_r.heading(c, text=c); self.tree_r.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree_r, cols_r)
         btn_r = tk.Frame(parent, bg=BG_CARD)
         btn_r.pack(fill="x", padx=20, pady=(0, 8))
         make_btn(btn_r, "✏ Korrigieren", self._edit_regel, color=BG_INPUT, fg=TEXT).pack(side="left", padx=(0,6))
@@ -11198,6 +12071,7 @@ class EinstellungenPage(tk.Frame):
         fk.pack(fill="both", expand=True, padx=20, pady=4)
         for c, w in zip(cols_k, [180, 180, 100, 140, 80, 100]):
             self.tree_k.heading(c, text=c); self.tree_k.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree_k, cols_k)
         self.tree_k.tag_configure("deaktiviert", foreground=TEXT_LIGHT)
         btn_k = tk.Frame(parent, bg=BG_CARD)
         btn_k.pack(fill="x", padx=20, pady=(0, 8))
@@ -11634,9 +12508,18 @@ class EinstellungenPage(tk.Frame):
             if key in iban_keys:
                 val = val.replace(" ", "")
             self._cfg[key] = val
-        # KI-Anbieter-Auswahl speichern
+        # KI-Anbieter-Auswahl speichern + ki_aktives_modell synchronisieren
         if hasattr(self, "_ki_anbieter_var"):
-            self._cfg["ki_anbieter"] = self._ki_anbieter_var.get()
+            anbieter = self._ki_anbieter_var.get()
+            self._cfg["ki_anbieter"] = anbieter
+            # ki_aktives_modell aus Anbieter-Wahl ableiten, damit alle Code-Pfade
+            # (Ista, Rechnungen, Kontoauszug) dasselbe Modell verwenden
+            if anbieter == "ollama":
+                ollama_m = self._cfg.get("ollama_modell", "").strip() or "llama3.2"
+                self._cfg["ki_aktives_modell"] = f"{ollama_m}  [Ollama]"
+            else:
+                claude_m = self._cfg.get("ki_modell", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
+                self._cfg["ki_aktives_modell"] = f"{claude_m}  [Anthropic]"
         save_config(self._cfg)
         # Verzeichnisse für Speicherpfade automatisch anlegen (#38)
         for pk, sd in [("pfad_kontoauszug_import", "Kontoauszüge"),
@@ -11816,6 +12699,7 @@ class EinstellungenPage(tk.Frame):
             tree.heading(c, text=c)
             tree.column(c, width=w, anchor="w")
         tree.column("Score", anchor="e")
+        _treeview_sort_setup(tree, cols)
         conn = get_db()
         try:
             for r in conn.execute(
@@ -11849,6 +12733,7 @@ class BenutzerverwaltungPage(tk.Frame):
         f.pack(fill="both", expand=True, padx=20, pady=10)
         for c, w in zip(cols, [180, 140, 60, 70, 140]):
             self.tree.heading(c, text=c); self.tree.column(c, width=w, anchor="w")
+        _treeview_sort_setup(self.tree, cols)
         btn_row = tk.Frame(self, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0,10))
         if hat_recht("Benutzer", "schreiben"):
@@ -12078,6 +12963,7 @@ class RollenverwaltungPage(tk.Frame):
         self.tree_rollen.heading("Status", text="Status")
         self.tree_rollen.column("Name", width=140, anchor="w")
         self.tree_rollen.column("Status", width=60, anchor="center")
+        _treeview_sort_setup(self.tree_rollen, cols_r)
         self.tree_rollen.bind("<<TreeviewSelect>>", self._on_rolle_select)
 
         btn_r = tk.Frame(left, bg=BG_CARD)
@@ -12451,12 +13337,13 @@ class IstaPage(tk.Frame):
         make_btn(ctrl, "🗑 Löschen", self._delete_abrechnung, color=DANGER).pack(side="left")
         make_btn(ctrl, "🔄 Aktualisieren", self._load_abrechnungen, color=BG_INPUT, fg=TEXT).pack(side="right", padx=8)
 
-        frame, self._tree_abr = make_table(parent,
-            ("Jahr", "Zeitraum", "Heizkosten", "Warmwasser", "Gesamt", "Einheiten", "Objekt"))
+        _abr_cols = ("Jahr", "Zeitraum", "Heizkosten", "Warmwasser", "Gesamt", "Einheiten", "Objekt")
+        frame, self._tree_abr = make_table(parent, _abr_cols)
         for col, w in [("Jahr", 55), ("Zeitraum", 140), ("Heizkosten", 100),
                         ("Warmwasser", 100), ("Gesamt", 100), ("Einheiten", 70), ("Objekt", 200)]:
             self._tree_abr.column(col, width=w, anchor="e" if col in ("Heizkosten","Warmwasser","Gesamt","Einheiten") else "w")
             self._tree_abr.heading(col, text=col)
+        _treeview_sort_setup(self._tree_abr, _abr_cols)
         frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self._tree_abr.bind("<<TreeviewSelect>>", lambda e: self._load_positionen())
 
@@ -12508,9 +13395,9 @@ class IstaPage(tk.Frame):
                       "Klicken Sie auf eine Einheit und ordnen Sie rechts die Wohnung zu.",
                  bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=8)
 
-        frame, self._tree_pos = make_table(parent,
-            ("Ista-Einheit", "Mieter (Ista)", "Zugeordnete Wohnung",
-             "Heizkosten", "Warmwasser", "Gesamt", "Vorauszahlung", "Saldo"))
+        _pos_cols = ("Ista-Einheit", "Mieter (Ista)", "Zugeordnete Wohnung",
+                     "Heizkosten", "Warmwasser", "Gesamt", "Vorauszahlung", "Saldo")
+        frame, self._tree_pos = make_table(parent, _pos_cols)
         for col, w in [
             ("Ista-Einheit", 120), ("Mieter (Ista)", 160), ("Zugeordnete Wohnung", 150),
             ("Heizkosten", 90), ("Warmwasser", 90), ("Gesamt", 90),
@@ -12519,6 +13406,7 @@ class IstaPage(tk.Frame):
             self._tree_pos.column(col, width=w,
                 anchor="e" if col in ("Heizkosten","Warmwasser","Gesamt","Vorauszahlung","Saldo") else "w")
             self._tree_pos.heading(col, text=col)
+        _treeview_sort_setup(self._tree_pos, _pos_cols)
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
         self._tree_pos.bind("<<TreeviewSelect>>", self._on_pos_select)
 
@@ -12608,7 +13496,14 @@ class IstaPage(tk.Frame):
         messagebox.showinfo("Gespeichert", f"Wohnung '{bez}' zugeordnet.", parent=self)
 
     def _auto_zuordnung(self):
-        """Versucht automatische Zuordnung nach ähnlichem Namen."""
+        """Automatische Zuordnung nach ista-Einheitennummer, dann Bezeichnung.
+
+        Priorität:
+          1. Exakter Treffer: ista_positionen.ista_einheit_nr == wohnungen.ista_einheit_nr
+          2. Normalisierter Treffer: führende Null / Suffix "/0" ignoriert
+             (z.B. "0003/0" → "3", "0001" → "1")
+          3. Namens-Matching: ista_einheit_bezeichnung ⊂ wohnungen.bezeichnung (Fallback)
+        """
         sel = self._tree_abr.selection()
         if not sel:
             messagebox.showinfo("Hinweis", "Bitte zuerst eine Abrechnung auswählen.", parent=self)
@@ -12617,39 +13512,98 @@ class IstaPage(tk.Frame):
         conn = get_db()
         try:
             positionen = conn.execute(
-                "SELECT id, ista_einheit_bezeichnung, mieter_name FROM ista_positionen "
-                "WHERE abrechnung_id=? AND wohnung_id IS NULL", (abr_id,)
+                "SELECT id, ista_einheit_nr, ista_einheit_bezeichnung, mieter_name "
+                "FROM ista_positionen WHERE abrechnung_id=? AND wohnung_id IS NULL",
+                (abr_id,)
             ).fetchall()
-            wohnungen = conn.execute("SELECT id, bezeichnung FROM wohnungen").fetchall()
+            wohnungen = conn.execute(
+                "SELECT id, bezeichnung, ista_einheit_nr FROM wohnungen "
+                "WHERE COALESCE(aktiv,1)=1"
+            ).fetchall()
         finally:
             conn.close()
 
+        def _normalisiere(s):
+            """'0003/0' → '3', '0003/1' → '3/1', '003' → '3', 'WE03' → '3'."""
+            import re
+            s = (s or "").strip()
+            # Führende Buchstaben (WE, NE, …) entfernen
+            s = re.sub(r'^[A-Za-z]+', '', s)
+            # Führende Nullen entfernen (aber /0-Suffix behalten)
+            parts = s.split("/")
+            parts[0] = parts[0].lstrip("0") or "0"
+            if len(parts) > 1 and parts[1] == "0":
+                return parts[0]          # /0 ist Standard → ignorieren
+            return "/".join(parts)
+
+        # Index: normalisierte ista-Nr. der Wohnungen
+        w_by_nr_exact  = {}   # ista_einheit_nr exakt → wohnung_id
+        w_by_nr_norm   = {}   # normalisiert → wohnung_id
+        for w in wohnungen:
+            nr = (w["ista_einheit_nr"] or "").strip()
+            if nr:
+                w_by_nr_exact[nr] = w["id"]
+                w_by_nr_norm[_normalisiere(nr)] = w["id"]
+
         zugeordnet = 0
+        via_nr = 0
+        via_name = 0
+        updates = []
+
         for pos in positionen:
-            ista_bez = (pos["ista_einheit_bezeichnung"] or "").lower().strip()
+            pos_nr  = (pos["ista_einheit_nr"] or "").strip()
+            pos_bez = (pos["ista_einheit_bezeichnung"] or "").lower().strip()
             best_id = None
-            best_score = 0
-            for w in wohnungen:
-                w_bez = w["bezeichnung"].lower().strip()
-                # Einfaches Substring-Matching
-                if ista_bez in w_bez or w_bez in ista_bez:
-                    score = max(len(ista_bez), len(w_bez))
-                    if score > best_score:
-                        best_score = score
-                        best_id = w["id"]
+
+            # Stufe 1: exakter Nr-Treffer
+            if pos_nr and pos_nr in w_by_nr_exact:
+                best_id = w_by_nr_exact[pos_nr]
+                via_nr += 1
+
+            # Stufe 2: normalisierter Nr-Treffer
+            if best_id is None and pos_nr:
+                norm = _normalisiere(pos_nr)
+                if norm in w_by_nr_norm:
+                    best_id = w_by_nr_norm[norm]
+                    via_nr += 1
+
+            # Stufe 3: Namens-Matching (Fallback)
+            if best_id is None and pos_bez:
+                best_score = 0
+                for w in wohnungen:
+                    w_bez = w["bezeichnung"].lower().strip()
+                    if pos_bez in w_bez or w_bez in pos_bez:
+                        score = max(len(pos_bez), len(w_bez))
+                        if score > best_score:
+                            best_score = score
+                            best_id = w["id"]
+                if best_id:
+                    via_name += 1
+
             if best_id:
-                conn2 = get_db()
-                try:
-                    conn2.execute("UPDATE ista_positionen SET wohnung_id=? WHERE id=?", (best_id, pos["id"]))
-                    conn2.commit()
-                finally:
-                    conn2.close()
+                updates.append((best_id, pos["id"]))
                 zugeordnet += 1
 
+        if updates:
+            conn2 = get_db()
+            try:
+                for wid, pid in updates:
+                    conn2.execute("UPDATE ista_positionen SET wohnung_id=? WHERE id=?", (wid, pid))
+                conn2.commit()
+            finally:
+                conn2.close()
+
         self._load_positionen()
-        messagebox.showinfo("Auto-Zuordnung",
-            f"{zugeordnet} von {len(positionen)} Einheiten automatisch zugeordnet.\n"
-            "Bitte restliche Zuordnungen manuell durchführen.", parent=self)
+        detail = []
+        if via_nr:   detail.append(f"{via_nr} via ista-Einheitennummer")
+        if via_name: detail.append(f"{via_name} via Bezeichnung")
+        detail_str = f"\n({', '.join(detail)})" if detail else ""
+        offen = len(positionen) - zugeordnet
+        messagebox.showinfo(
+            "Auto-Zuordnung",
+            f"{zugeordnet} von {len(positionen)} Einheiten automatisch zugeordnet.{detail_str}"
+            + (f"\n\n{offen} Einheit(en) bitte manuell zuordnen." if offen else "\n\nAlle Einheiten zugeordnet."),
+            parent=self)
 
     # ── Tab 3: Übernahme in Buchhaltung ───────────────────────────────────────
 
@@ -13002,7 +13956,12 @@ class IstaPage(tk.Frame):
                     # OCR via KI-Vision: PDF-Seiten als Bilder senden (#52)
                     ki_daten = self._ki_extrahieren_bild(pdf_pfad, cfg, _log)
                 elif pdf_text.strip():
-                    ki_daten = self._ki_extrahieren(pdf_text[:8000], cfg, _log)
+                    # Zeichenlimit je Anbieter: Claude-Kontext reicht für 40k,
+                    # kleine Ollama-Modelle haben typisch 8k–32k Kontextfenster
+                    aktiv_modell = cfg.get("ki_aktives_modell", "")
+                    ist_ollama = "  [Ollama]" in aktiv_modell or cfg.get("ki_anbieter") == "ollama"
+                    text_limit = 12000 if ist_ollama else 40000
+                    ki_daten = self._ki_extrahieren(pdf_text[:text_limit], cfg, _log)
 
                 if ki_daten:
                     self._parsed_daten = ki_daten
@@ -13154,44 +14113,110 @@ class IstaPage(tk.Frame):
                    dauer, str(ex))
             return None
 
-    def _ki_extrahieren(self, pdf_text: str, cfg: dict, _log) -> dict:
+    @staticmethod
+    def _parse_ki_json(antwort: str):
+        """Robustes JSON-Parsen für LLM-Antworten (Ollama/Claude).
+        Behandelt: Markdown-Codeblöcke, Trailing-Kommas, Kommentare, Single-Quotes."""
+        import json as _json, re
+        text = antwort.strip()
+        # 1. Markdown-Codeblöcke entfernen (```json ... ``` oder ``` ... ```)
+        text = re.sub(r'^```[a-zA-Z]*\n?', '', text)
+        text = re.sub(r'\n?```$', '', text.rstrip())
+        text = text.strip()
+        # 2. Direktversuch
+        try:
+            return _json.loads(text)
+        except Exception:
+            pass
+        # 3. JSON-Objekt aus Text extrahieren (alles vor/nach ignorieren)
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if not m:
+            return None
+        raw = m.group()
+        # 4. Trailing-Kommas vor } und ] entfernen (häufig bei Ollama)
+        raw = re.sub(r',\s*([}\]])', r'\1', raw)
+        # 5. Einzeilige Kommentare entfernen (// ...)
+        raw = re.sub(r'//[^\n]*', '', raw)
+        # 6. Zweiter Versuch
+        try:
+            return _json.loads(raw)
+        except Exception:
+            return None
+
+    def _ki_extrahieren(self, pdf_text: str, cfg: dict, _log) -> dict:  # noqa: C901
         """Versucht KI-basierte Extraktion der Ista-Daten."""
         import time as _time
         _t0 = _time.time()
         # KI-Training laden (#46)
         _feld_hinweise, _system_zusatz = _lade_ki_training("Ista-Extraktion")
         prompt = (
-            "Analysiere diese Ista-Heizkostenabrechnung und extrahiere die Daten als JSON.\n"
-            "Antworte NUR mit einem JSON-Objekt.\n\n"
-            "Felder:\n"
-            '  "abrechnungsjahr": Abrechnungsjahr (Integer, z.B. 2025)\n'
-            '  "abrechnungszeitraum_von": Startdatum YYYY-MM-DD\n'
-            '  "abrechnungszeitraum_bis": Enddatum YYYY-MM-DD\n'
-            '  "objekt_adresse": Objektadresse\n'
-            '  "ista_auftragsnummer": Liegenschaftsnummer falls vorhanden\n'
-            '  "gesamtkosten_heizung": Gesamte Heizkosten als Zahl\n'
-            '  "gesamtkosten_warmwasser": Gesamte Warmwasserkosten als Zahl\n'
-            '  "gesamtkosten_gesamt": Gesamtkosten als Zahl\n'
-            '  "positionen": Array mit einem Objekt pro Wohneinheit:\n'
-            '    [\n'
-            '      {\n'
-            '        "ista_einheit_nr": "WE01",\n'
-            '        "ista_einheit_bezeichnung": "EG links",\n'
-            '        "mieter_name": "Name des Mieters",\n'
-            '        "hke": Heizkosteneinheiten als Zahl,\n'
-            '        "hke_anteil_pct": prozentualer HKE-Anteil,\n'
-            '        "warmwasser_m3": Warmwasserverbrauch in m³,\n'
-            '        "warmwasser_anteil_pct": prozentualer WW-Anteil,\n'
-            '        "heizkosten_grundkosten": Grundkostenanteil Heizung,\n'
-            '        "heizkosten_verbrauchskosten": Verbrauchskostenanteil,\n'
-            '        "heizkosten_gesamt": Heizkosten gesamt,\n'
-            '        "warmwasserkosten_gesamt": Warmwasserkosten gesamt,\n'
-            '        "gesamtkosten": Gesamtkosten dieser Einheit,\n'
-            '        "vorauszahlung": Geleistete Vorauszahlungen,\n'
-            '        "nachzahlung_guthaben": Nachzahlung (positiv) oder Guthaben (negativ)\n'
-            '      }\n'
-            '    ]\n\n'
-            f"Ista-Abrechnungstext:\n{pdf_text}"
+            "Du bist Experte für Heizkostenabrechnungen der Firma ista SE (Deutschland).\n"
+            "Analysiere den folgenden ista-Abrechnungstext und extrahiere die Daten als JSON.\n"
+            "Antworte AUSSCHLIESSLICH mit einem einzigen JSON-Objekt, ohne Erklärungen.\n\n"
+
+            "LIEGENSCHAFTS-EBENE (einmalige Werte für das gesamte Objekt):\n"
+            "- abrechnungsjahr: Jahreszahl aus 'Abrechnungszeitraum'\n"
+            "- abrechnungszeitraum_von/bis: aus 'Abrechnungszeitraum' als ISO-Datum YYYY-MM-DD\n"
+            "- objekt_adresse: Wert direkt nach 'Liegenschaftsadresse' – EXAKT aus dem Text\n"
+            "- ista_auftragsnummer: Wert nach 'Liegenschaftsnummer'\n"
+            "- gesamtkosten_heizung: 'Anteil Heizkosten' aus Abschnitt Ermittlung (NICHT 'Heiz- und Warmwasserkosten')\n"
+            "- gesamtkosten_warmwasser: 'Anteil Warmwasserkosten'\n"
+            "- gesamtkosten_gesamt: 'Gesamtkosten der Liegenschaft'\n\n"
+
+            "NUTZER-EBENE – Quellen für jeden Nutzer EINZELN:\n"
+            "Es gibt ZWEI verschiedene Abschnitte mit Nutzer-Daten:\n\n"
+            "Abschnitt '2. Ihre Nutzeraufstellung' (Überblick):\n"
+            "  Spalten: Lauf.Nr. | Name | Interne Nr. Verwaltung | Gesamtbetrag | Vorauszahlung | Guthaben | Nachzahlung\n"
+            "  → ista_einheit_nr = Lauf.Nr. exakt (z.B. '0001/0', '0003/1')\n"
+            "  → ista_einheit_bezeichnung = Interne Nr. Verwaltung (null wenn '.' oder leer)\n"
+            "  → mieter_name = Name-Spalte exakt\n"
+            "  → gesamtkosten = Gesamtbetrag dieser Zeile (Brutto)\n"
+            "  → vorauszahlung = Vorauszahlung-Spalte (null wenn leer)\n"
+            "  → nachzahlung_guthaben = Nachzahlung positiv / Guthaben negativ (null wenn leer)\n"
+            "  → Die 'Saldo'-Zeile ganz unten ist KEIN Nutzer – ignorieren!\n\n"
+            "Abschnitt '6. Verteilung der Gesamtkosten' (Aufschlüsselung je Nutzer):\n"
+            "  Für jeden Nutzer gibt es einen Block mit Kostenzeilen:\n"
+            "  → heizkosten_grundkosten = 'Grundkosten Heizung' Kostenanteil dieser Einheit\n"
+            "  → heizkosten_verbrauchskosten = 'Verbrauchsk.Heizung' Kostenanteil dieser Einheit\n"
+            "  → heizkosten_gesamt = Summe der beiden obigen Werte\n"
+            "  → warmwasserkosten_gesamt = 'Grundk. Warmwasser' + 'Verbrauchsk. Warmw.' addiert\n"
+            "  WICHTIG: Diese Werte sind UNTERSCHIEDLICH je Nutzer – NICHT die Liegenschaftssummen verwenden!\n\n"
+            "Abschnitt '9. Ermittlung der Verbrauchswerte':\n"
+            "  → hke = 'Verbrauchseinheiten (mit UF-Faktor)' oder 'Summe Verbrauchseinheiten' für diese Einheit\n\n"
+
+            "ZAHLENFORMAT: Europäisch (1.234,56) → JSON-Dezimalzahl (1234.56), kein €-Zeichen\n\n"
+
+            "JSON-SCHEMA:\n"
+            '{\n'
+            '  "abrechnungsjahr": null,\n'
+            '  "abrechnungszeitraum_von": null,\n'
+            '  "abrechnungszeitraum_bis": null,\n'
+            '  "objekt_adresse": null,\n'
+            '  "ista_auftragsnummer": null,\n'
+            '  "gesamtkosten_heizung": null,\n'
+            '  "gesamtkosten_warmwasser": null,\n'
+            '  "gesamtkosten_gesamt": null,\n'
+            '  "positionen": [\n'
+            '    {\n'
+            '      "ista_einheit_nr": null,\n'
+            '      "ista_einheit_bezeichnung": null,\n'
+            '      "mieter_name": null,\n'
+            '      "hke": null,\n'
+            '      "hke_anteil_pct": null,\n'
+            '      "warmwasser_m3": null,\n'
+            '      "warmwasser_anteil_pct": null,\n'
+            '      "heizkosten_grundkosten": null,\n'
+            '      "heizkosten_verbrauchskosten": null,\n'
+            '      "heizkosten_gesamt": null,\n'
+            '      "warmwasserkosten_gesamt": null,\n'
+            '      "gesamtkosten": null,\n'
+            '      "vorauszahlung": null,\n'
+            '      "nachzahlung_guthaben": null\n'
+            '    }\n'
+            '  ]\n'
+            '}\n\n'
+            "Extrahiere ALLE Nutzer aus Abschnitt 2. Fehlende Werte als null.\n\n"
+            f"ISTA-ABRECHNUNGSTEXT:\n{pdf_text}"
         )
         # KI-Training-Hinweise anhängen (#46)
         if _feld_hinweise:
@@ -13199,34 +14224,35 @@ class IstaPage(tk.Frame):
         if _system_zusatz:
             prompt = _system_zusatz + "\n\n" + prompt
 
+        import urllib.request, json as _json, re
+
+        anbieter = modell = "?"
         try:
             aktiv = cfg.get("ki_aktives_modell", "")
             if aktiv:
                 anbieter, modell = KIAssistentPage._parse_modell_auswahl(aktiv)
             else:
                 anbieter = cfg.get("ki_anbieter", "anthropic")
-                modell = cfg.get("ki_modell", "claude-opus-4-6")
+                modell   = cfg.get("ki_modell",   "claude-opus-4-6")
 
             _log(f"   Anbieter: {anbieter}, Modell: {modell}")
 
-            import urllib.request, json as _json
             if anbieter == "anthropic":
                 key = cfg.get("anthropic_api_key", "").strip()
                 if not key:
                     _log("   ⚠ Kein Anthropic API-Key – KI-Analyse übersprungen")
                     return None
                 payload = _json.dumps({
-                    "model": modell,
-                    "max_tokens": 2048,
+                    "model": modell, "max_tokens": 4096,
+                    "system": "Du bist Experte für Heizkostenabrechnungen der Firma ista SE (Deutschland). Antworte ausschließlich mit validem JSON.",
                     "messages": [{"role": "user", "content": prompt}]
                 }).encode("utf-8")
                 req = urllib.request.Request(
                     "https://api.anthropic.com/v1/messages", data=payload,
                     headers={"x-api-key": key, "anthropic-version": "2023-06-01",
                              "content-type": "application/json"})
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    data = _json.loads(resp.read().decode())
-                antwort = data["content"][0]["text"]
+                with urllib.request.urlopen(req, timeout=90) as resp:
+                    antwort = _json.loads(resp.read().decode())["content"][0]["text"]
             else:
                 base_url = cfg.get("ollama_url", "http://localhost:11434").strip().rstrip("/")
                 payload = _json.dumps({
@@ -13237,21 +14263,11 @@ class IstaPage(tk.Frame):
                 req = urllib.request.Request(f"{base_url}/api/chat", data=payload,
                     headers={"content-type": "application/json"})
                 with urllib.request.urlopen(req, timeout=90) as resp:
-                    data = _json.loads(resp.read().decode())
-                antwort = data["message"]["content"]
+                    antwort = _json.loads(resp.read().decode())["message"]["content"]
 
-            # JSON parsen
-            import re
-            try:
-                ki_daten = _json.loads(antwort.strip())
-            except Exception:
-                m = re.search(r'\{.*\}', antwort, re.DOTALL)
-                if not m:
-                    return None
-                ki_daten = _json.loads(m.group())
+            ki_daten = self._parse_ki_json(antwort)
 
             ki_daten = {k.lower(): v for k, v in ki_daten.items()}
-            # KI-Protokoll (#45)
             ki_log("Ista-Extraktion", "Extraktion",
                    pdf_text[:200], str(ki_daten)[:400],
                    modell, anbieter, int((_time.time() - _t0) * 1000))
@@ -13268,6 +14284,27 @@ class IstaPage(tk.Frame):
         """Speichert die importierten Ista-Daten in die DB."""
         if not daten:
             return
+
+        def _f(v) -> float:
+            """Wandelt KI-Zahlenwerte robust in float um.
+            Akzeptiert: 1234.56, '1234.56', '1.234,56', '1234,56', None."""
+            if v is None:
+                return 0.0
+            if isinstance(v, (int, float)):
+                return float(v)
+            s = str(v).strip().replace(" ", "").replace(" ", "")
+            if not s:
+                return 0.0
+            # Europäisch: Punkt als Tausender, Komma als Dezimal → "1.234,56"
+            if "," in s and "." in s:
+                s = s.replace(".", "").replace(",", ".")
+            elif "," in s:
+                s = s.replace(",", ".")
+            try:
+                return float(s)
+            except ValueError:
+                return 0.0
+
         conn = get_db()
         try:
             conn.execute(
@@ -13280,9 +14317,9 @@ class IstaPage(tk.Frame):
                     daten.get("abrechnungszeitraum_von"),
                     daten.get("abrechnungszeitraum_bis"),
                     pdf_pfad,
-                    daten.get("gesamtkosten_heizung") or 0,
-                    daten.get("gesamtkosten_warmwasser") or 0,
-                    daten.get("gesamtkosten_gesamt") or 0,
+                    _f(daten.get("gesamtkosten_heizung")),
+                    _f(daten.get("gesamtkosten_warmwasser")),
+                    _f(daten.get("gesamtkosten_gesamt")),
                     daten.get("objekt_adresse") or "",
                     daten.get("ista_auftragsnummer") or "",
                 )
@@ -13303,17 +14340,17 @@ class IstaPage(tk.Frame):
                         str(pos.get("ista_einheit_nr") or ""),
                         str(pos.get("ista_einheit_bezeichnung") or ""),
                         str(pos.get("mieter_name") or ""),
-                        float(pos.get("hke") or 0),
-                        float(pos.get("hke_anteil_pct") or 0),
-                        float(pos.get("warmwasser_m3") or 0),
-                        float(pos.get("warmwasser_anteil_pct") or 0),
-                        float(pos.get("heizkosten_grundkosten") or 0),
-                        float(pos.get("heizkosten_verbrauchskosten") or 0),
-                        float(pos.get("heizkosten_gesamt") or 0),
-                        float(pos.get("warmwasserkosten_gesamt") or 0),
-                        float(pos.get("gesamtkosten") or 0),
-                        float(pos.get("vorauszahlung") or 0),
-                        float(pos.get("nachzahlung_guthaben") or 0),
+                        _f(pos.get("hke")),
+                        _f(pos.get("hke_anteil_pct")),
+                        _f(pos.get("warmwasser_m3")),
+                        _f(pos.get("warmwasser_anteil_pct")),
+                        _f(pos.get("heizkosten_grundkosten")),
+                        _f(pos.get("heizkosten_verbrauchskosten")),
+                        _f(pos.get("heizkosten_gesamt")),
+                        _f(pos.get("warmwasserkosten_gesamt")),
+                        _f(pos.get("gesamtkosten")),
+                        _f(pos.get("vorauszahlung")),
+                        _f(pos.get("nachzahlung_guthaben")),
                     )
                 )
             conn.commit()
