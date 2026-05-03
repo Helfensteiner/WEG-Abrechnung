@@ -7,6 +7,22 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.40.0] — 2026-05-03
+
+### Added
+- **Buchungsregeln: Gegenkonto-IBAN als Disambiguierungsfilter**:
+  - Neue DB-Spalte `gegenkonto_iban_muster` in `buchungsregeln` — optionaler IBAN-Filter
+  - `vorschlag_kategorie()` berücksichtigt jetzt `gegenkonto_iban` bei der Kategorie-Erkennung:
+    - Konfidenz **0.97** wenn IBAN-Muster **und** Verwendungszweck-Muster beide treffen
+    - Konfidenz **0.93** wenn nur IBAN-Muster trifft (eindeutige Zuordnung)
+    - Konfidenz **0.88** wenn mehrere IBAN-Treffer, bestes Vzweck-Match gewinnt
+  - `lerne_buchung()` erkennt wenn gleicher Auftraggeber-Name mit verschiedenen IBANs/Kategorien vorkommt und legt **IBAN-spezifische Regel** an; bestehende Regeln ohne IBAN-Filter werden nachträglich mit IBAN versehen wenn Mehrdeutigkeit erkannt wird
+  - `_edit_regel`-Dialog (Buchungsregeln-Tab): neues Feld „Gegenkonto-IBAN" mit Erklärungs-Label
+  - Buchungsregeln-Tabelle: neue Spalte „Gegenkonto IBAN" (gekürzt `···XXXXXXXX`)
+  - Alle Aufrufe von `vorschlag_kategorie()` und `lerne_buchung()` übergeben jetzt die `gegenkonto_iban` aus dem jeweiligen `kontoauszug`-Datensatz (CAMT-Import, Einzelübernahme, Batch-Übernahme, Direktbuchung, KI-Kategorisierung)
+
+---
+
 ## [0.39.9] — 2026-05-03
 
 ### Added

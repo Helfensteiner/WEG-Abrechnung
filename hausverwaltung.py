@@ -379,7 +379,14 @@ from pathlib import Path
 # 0.39.9    — Gegenkonto-IBAN (Zahlungsempfänger/Auftraggeber) in CAMT-Import
 #             gespeichert; in Kontoauszug- und Vorschläge-Tabelle als eigene Spalte
 #             "Gegenkonto IBAN" angezeigt; auch in Tooltip und Detail-Dialog sichtbar.
-APP_VERSION = "0.39.9"
+# 0.40.0    — Buchungsregeln: Gegenkonto-IBAN als optionaler Disambiguierungsfilter.
+#             gegenkonto_iban_muster-Spalte in buchungsregeln; vorschlag_kategorie()
+#             nutzt IBAN für höhere Konfidenz (0.97 IBAN+Vzweck, 0.93 IBAN allein);
+#             lerne_buchung() legt IBAN-spezifische Regel an wenn gleicher Name
+#             verschiedene IBANs/Kategorien hat; _edit_regel-Dialog mit Hinweisfeldern;
+#             alle Aufrufe von vorschlag_kategorie/lerne_buchung übergeben
+#             gegenkonto_iban aus dem kontoauszug-Datensatz.
+APP_VERSION = "0.40.0"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -1247,6 +1254,8 @@ CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
         "ALTER TABLE buchungsregeln ADD COLUMN vzweck_muster TEXT",
         # v0.39.9 – IBAN des Zahlungsempfängers / Auftraggebers (Gegenkonto)
         "ALTER TABLE kontoauszug ADD COLUMN gegenkonto_iban TEXT",
+        # v0.40.0 – Gegenkonto-IBAN als optionaler Disambiguierungsfilter in Buchungsregeln
+        "ALTER TABLE buchungsregeln ADD COLUMN gegenkonto_iban_muster TEXT",
         # v0.39.0 – Eigentümer-Zeiträume (Eigentümerwechsel pro Wohnung)
         """CREATE TABLE IF NOT EXISTS eigentuemer_zeitraeume (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1794,17 +1803,20 @@ def _extrahiere_vzweck_schluessel(vzweck: str, max_len: int = 40) -> str:
     schluessel = " ".join(words[:3])
     return schluessel[:max_len].strip()
 
-def vorschlag_kategorie(buchungstext: str, betrag: float = None) -> tuple:
+def vorschlag_kategorie(buchungstext: str, betrag: float = None,
+                        gegenkonto_iban: str = "") -> tuple:
     """Gibt (kategorie, typ, konto_typ, konfidenz) zurück basierend auf gelernten Regeln.
 
-    Konfidenz-Stufen:
-    - 0.95: Auftraggeber + vzweck_muster + Betrag passt
-    - 0.90: Auftraggeber + vzweck_muster passt (eindeutig)
-    - 0.85: Exakter Text-Treffer, nur eine Regel für diesen Auftraggeber
-    - 0.70: Auftraggeber-Treffer (bereinigt), keine Mehrdeutigkeit
+    Konfidenz-Stufen (absteigend):
+    - 0.97: Auftraggeber + IBAN + vzweck_muster (alle drei passen)
+    - 0.93: Auftraggeber + IBAN (eindeutig, kein vzweck nötig)
+    - 0.90: Auftraggeber + vzweck_muster (eindeutig)
+    - 0.85: Exakter Text-Treffer, nur eine Regel
+    - 0.80: Auftraggeber (bereinigt) + vzweck_muster
+    - 0.70: Auftraggeber (bereinigt), eindeutig
     - 0.65: Keyword-Treffer
     - 0.50: Verwendungszweck-Treffer
-    - 0.35: Auftraggeber passt, aber kein vzweck_muster-Treffer (mehrdeutig)
+    - 0.35: Auftraggeber passt, aber mehrdeutig
     - 0.00: Kein Treffer
     """
     if not buchungstext:
@@ -1828,6 +1840,15 @@ def vorschlag_kategorie(buchungstext: str, betrag: float = None) -> tuple:
         auftraggeber = ""
         vzweck = text_lower
 
+    gk_iban_clean = (gegenkonto_iban or "").replace(" ", "").upper()
+
+    def _iban_passt(regel) -> bool:
+        """True wenn die Regel kein IBAN-Filter hat ODER der Filter zur Gegenkonto-IBAN passt."""
+        iban_m = (regel.get("gegenkonto_iban_muster") or "").replace(" ", "").upper()
+        if not iban_m:
+            return True   # kein Filter → passt immer
+        return bool(gk_iban_clean) and (iban_m in gk_iban_clean or gk_iban_clean in iban_m)
+
     def _treffer(regel, basis_konfidenz):
         k = regel["kategorie"] or ""
         t = regel["typ"] or "Einnahme"
@@ -1843,61 +1864,97 @@ def vorschlag_kategorie(buchungstext: str, betrag: float = None) -> tuple:
         return k, t, kt, basis_konfidenz
 
     # ── Stufe 1: Alle Regeln sammeln die den Auftraggeber/Text treffen ──────────
-    direkt_treffer = []   # exakter muster-Match im Gesamttext
+    direkt_treffer = []
     for regel in regeln:
         muster = regel["muster"].lower() if regel["muster"] else ""
         if muster and muster in text_lower:
             direkt_treffer.append(regel)
 
     if direkt_treffer:
-        if len(direkt_treffer) == 1:
-            # Eindeutig → 0.85
+        if len(direkt_treffer) == 1 and _iban_passt(direkt_treffer[0]):
             return _treffer(direkt_treffer[0], 0.85)
-        # Mehrere Regeln für diesen Auftraggeber → vzweck_muster zur Disambiguierung
+
+        # ── Stufe 1a: IBAN + vzweck_muster (höchste Priorität) ─────────────────
+        if gk_iban_clean:
+            iban_vzweck_hits = [
+                r for r in direkt_treffer
+                if _iban_passt(r) and (r.get("gegenkonto_iban_muster") or "").replace(" ", "").upper()
+                and (r.get("vzweck_muster") or "").lower()
+                and (r.get("vzweck_muster") or "").lower() in vzweck
+            ]
+            if iban_vzweck_hits:
+                return _treffer(iban_vzweck_hits[0], 0.97)
+
+            # ── Stufe 1b: Nur IBAN (kein vzweck nötig) ─────────────────────────
+            iban_hits = [
+                r for r in direkt_treffer
+                if (r.get("gegenkonto_iban_muster") or "").replace(" ", "").upper()
+                and _iban_passt(r)
+            ]
+            if len(iban_hits) == 1:
+                return _treffer(iban_hits[0], 0.93)
+            if len(iban_hits) > 1:
+                # Mehrere IBAN-Treffer → vzweck zur Feinauflösung
+                vzweck_nach_iban = [
+                    r for r in iban_hits
+                    if (r.get("vzweck_muster") or "").lower() in vzweck
+                ]
+                if vzweck_nach_iban:
+                    return _treffer(vzweck_nach_iban[0], 0.97)
+                return _treffer(iban_hits[0], 0.88)
+
+        # ── Stufe 1c: Nur vzweck_muster ────────────────────────────────────────
         vzweck_hits = [r for r in direkt_treffer
                        if (r.get("vzweck_muster") or "").lower() and
-                          (r.get("vzweck_muster") or "").lower() in vzweck]
+                          (r.get("vzweck_muster") or "").lower() in vzweck
+                       and _iban_passt(r)]
         if len(vzweck_hits) == 1:
-            # Eindeutig via Verwendungszweck → 0.90
             return _treffer(vzweck_hits[0], 0.90)
         if len(vzweck_hits) > 1:
-            # Noch mehrdeutig, aber vzweck hilft → 0.75
             return _treffer(vzweck_hits[0], 0.75)
-        # Kein vzweck-Match → Fallback auf Regel ohne vzweck_muster (generische Regel)
-        fallback = [r for r in direkt_treffer if not r.get("vzweck_muster")]
+
+        # ── Fallback: generische Regel ohne vzweck/IBAN-Filter ─────────────────
+        fallback = [r for r in direkt_treffer
+                    if not r.get("vzweck_muster") and not r.get("gegenkonto_iban_muster")]
         if fallback:
             return _treffer(fallback[0], 0.70)
-        # Alle haben vzweck_muster aber keins passt → niedrige Konfidenz
+        # Alle haben Filter, aber keiner passt → niedrige Konfidenz
         return _treffer(direkt_treffer[0], 0.35)
 
-    # ── Stufe 1b: Keyword-Suche ─────────────────────────────────────────────────
+    # ── Stufe 2: Keyword-Suche ──────────────────────────────────────────────────
     for regel in regeln:
         kws = [k.strip().lower() for k in (regel.get("keywords") or "").split(",") if k.strip()]
         if any(kw and kw in text_lower for kw in kws):
             return _treffer(regel, 0.65)
 
-    # ── Stufe 2: Auftraggeber-Match (bereinigt) ─────────────────────────────────
+    # ── Stufe 3: Auftraggeber-Match (bereinigt) ─────────────────────────────────
     if auftraggeber:
         auftr_bereinigt = _bereinige_text(auftraggeber)
-        auftr_kandidaten = []
-        for regel in regeln:
-            muster = _bereinige_text(regel["muster"] if regel["muster"] else "")
-            if muster and muster in auftr_bereinigt:
-                auftr_kandidaten.append(regel)
+        auftr_kandidaten = [r for r in regeln
+                            if _bereinige_text(r["muster"] or "") and
+                               _bereinige_text(r["muster"] or "") in auftr_bereinigt]
         if auftr_kandidaten:
-            if len(auftr_kandidaten) == 1:
-                return _treffer(auftr_kandidaten[0], 0.70)
+            if gk_iban_clean:
+                iban_hits = [r for r in auftr_kandidaten
+                             if (r.get("gegenkonto_iban_muster") or "").replace(" ", "").upper()
+                             and _iban_passt(r)]
+                if len(iban_hits) == 1:
+                    return _treffer(iban_hits[0], 0.93)
             vzweck_hits = [r for r in auftr_kandidaten
                            if (r.get("vzweck_muster") or "").lower() and
-                              (r.get("vzweck_muster") or "").lower() in vzweck]
+                              (r.get("vzweck_muster") or "").lower() in vzweck
+                           and _iban_passt(r)]
             if len(vzweck_hits) == 1:
                 return _treffer(vzweck_hits[0], 0.80)
-            fallback = [r for r in auftr_kandidaten if not r.get("vzweck_muster")]
+            if len(auftr_kandidaten) == 1 and _iban_passt(auftr_kandidaten[0]):
+                return _treffer(auftr_kandidaten[0], 0.70)
+            fallback = [r for r in auftr_kandidaten
+                        if not r.get("vzweck_muster") and not r.get("gegenkonto_iban_muster")]
             if fallback:
                 return _treffer(fallback[0], 0.65)
             return _treffer(auftr_kandidaten[0], 0.35)
 
-    # ── Stufe 3: Verwendungszweck-Match ─────────────────────────────────────────
+    # ── Stufe 4: Verwendungszweck-Match ─────────────────────────────────────────
     vzweck_bereinigt = _bereinige_text(vzweck)
     for regel in regeln:
         muster = _bereinige_text(regel["muster"] if regel["muster"] else "")
@@ -1942,14 +1999,14 @@ def pro_rata_temporis(einzug, auszug, jahr: int) -> float:
     tage = (ende - start).days + 1
     return max(0.0, min(1.0, tage / jahrestage))
 
-def lerne_buchung(buchungstext: str, kategorie: str, typ: str, konto_typ: str, ist_korrektur: bool = False):
+def lerne_buchung(buchungstext: str, kategorie: str, typ: str, konto_typ: str,
+                  ist_korrektur: bool = False, gegenkonto_iban: str = ""):
     """Speichert oder aktualisiert eine Buchungsregel.
 
-    Mehrfach-Kategorien pro Auftraggeber:
-    - Gleicher Auftraggeber, gleiche Kategorie → treffer erhöhen
-    - Gleicher Auftraggeber, andere Kategorie → vzweck_muster zur Disambiguierung
-      einfügen; die neue Buchung bekommt ein vzweck_muster aus dem Verwendungszweck
-    - Neuer Auftraggeber → einfache Regel ohne vzweck_muster
+    Disambiguierung (Priorität):
+    1. Gegenkonto-IBAN: gleicher Name, andere IBAN → IBAN-spezifische Regel
+    2. Verwendungszweck-Muster: gleicher Name, anderer Vzweck → vzweck_muster
+    3. Neue generische Regel wenn Auftraggeber noch unbekannt
     """
     if not buchungstext or not kategorie:
         return
@@ -1965,6 +2022,7 @@ def lerne_buchung(buchungstext: str, kategorie: str, typ: str, konto_typ: str, i
         return
 
     korr_flag = 1 if ist_korrektur else 0
+    gk_iban = (gegenkonto_iban or "").replace(" ", "").upper() or None
     conn = get_db()
     try:
         # Alle bestehenden Regeln für diesen Auftraggeber
@@ -1974,48 +2032,83 @@ def lerne_buchung(buchungstext: str, kategorie: str, typ: str, konto_typ: str, i
         ).fetchall()]
 
         if not bestehende:
-            # Komplett neue Regel — kein vzweck_muster nötig
+            # Komplett neue Regel
             conn.execute(
-                "INSERT INTO buchungsregeln (muster, kategorie, typ, konto_typ, treffer, ist_korrektur)"
-                " VALUES (?,?,?,?,1,?)",
-                (muster, kategorie, typ, konto_typ, korr_flag)
+                "INSERT INTO buchungsregeln "
+                "(muster, gegenkonto_iban_muster, kategorie, typ, konto_typ, treffer, ist_korrektur)"
+                " VALUES (?,?,?,?,?,1,?)",
+                (muster, None, kategorie, typ, konto_typ, korr_flag)
             )
         else:
-            # Gibt es bereits eine Regel mit genau dieser Kategorie?
+            # ── Schritt 1: Gibt es eine Regel, die exakt diese IBAN + Kategorie hat? ──
+            if gk_iban:
+                gleiche_iban_kat = [
+                    r for r in bestehende
+                    if r["kategorie"] == kategorie
+                    and (r.get("gegenkonto_iban_muster") or "").replace(" ", "").upper() == gk_iban
+                ]
+                if gleiche_iban_kat:
+                    conn.execute(
+                        "UPDATE buchungsregeln SET treffer=treffer+1, ist_korrektur=MAX(ist_korrektur,?)"
+                        " WHERE id=?", (korr_flag, gleiche_iban_kat[0]["id"]))
+                    conn.commit(); return
+
+                # Gibt es eine Regel gleicher Kategorie ohne IBAN-Filter?
+                gleiche_kat_ohne_iban = [
+                    r for r in bestehende
+                    if r["kategorie"] == kategorie
+                    and not r.get("gegenkonto_iban_muster")
+                ]
+                if gleiche_kat_ohne_iban:
+                    # Upgraden: IBAN als Filter nachtragen (nur wenn andere Kategorie existiert)
+                    andere_kat = [r for r in bestehende if r["kategorie"] != kategorie]
+                    if andere_kat:
+                        # Mehrdeutigkeit vorhanden → IBAN in bestehende Regel eintragen
+                        conn.execute(
+                            "UPDATE buchungsregeln SET gegenkonto_iban_muster=?,"
+                            " treffer=treffer+1, ist_korrektur=MAX(ist_korrektur,?) WHERE id=?",
+                            (gk_iban, korr_flag, gleiche_kat_ohne_iban[0]["id"]))
+                    else:
+                        conn.execute(
+                            "UPDATE buchungsregeln SET treffer=treffer+1, ist_korrektur=MAX(ist_korrektur,?)"
+                            " WHERE id=?", (korr_flag, gleiche_kat_ohne_iban[0]["id"]))
+                    conn.commit(); return
+
+                # Neue IBAN-spezifische Regel für diese Kategorie
+                conn.execute(
+                    "INSERT INTO buchungsregeln "
+                    "(muster, gegenkonto_iban_muster, kategorie, typ, konto_typ, treffer, ist_korrektur)"
+                    " VALUES (?,?,?,?,?,1,?)",
+                    (muster, gk_iban, kategorie, typ, konto_typ, korr_flag))
+                conn.commit(); return
+
+            # ── Schritt 2 (ohne IBAN): gleiche Kategorie vorhanden? ────────────
             gleiche_kat = [r for r in bestehende if r["kategorie"] == kategorie]
             andere_kat  = [r for r in bestehende if r["kategorie"] != kategorie]
 
             if gleiche_kat:
-                # Bekannte Kategorie → treffer erhöhen, ggf. Korrekturflag setzen
-                r = gleiche_kat[0]
                 conn.execute(
                     "UPDATE buchungsregeln SET treffer=treffer+1, ist_korrektur=MAX(ist_korrektur,?)"
-                    " WHERE id=?",
-                    (korr_flag, r["id"])
-                )
+                    " WHERE id=?", (korr_flag, gleiche_kat[0]["id"]))
             elif andere_kat:
-                # Gleicher Auftraggeber, ANDERE Kategorie → vzweck_muster zur Unterscheidung
+                # Gleicher Auftraggeber, andere Kategorie → vzweck_muster zur Unterscheidung
                 vzweck_key = _extrahiere_vzweck_schluessel(vzweck)
-
-                # Prüfen ob es schon eine Regel mit diesem vzweck_muster gibt
-                existing_vzweck = [r for r in bestehende
-                                   if (r.get("vzweck_muster") or "").lower() == vzweck_key.lower()
-                                   and vzweck_key]
+                existing_vzweck = [
+                    r for r in bestehende
+                    if (r.get("vzweck_muster") or "").lower() == vzweck_key.lower()
+                    and vzweck_key
+                ]
                 if existing_vzweck:
-                    # Dieses vzweck_muster kennen wir schon → aktualisieren
                     conn.execute(
                         "UPDATE buchungsregeln SET kategorie=?, typ=?, konto_typ=?,"
                         " treffer=treffer+1, ist_korrektur=MAX(ist_korrektur,?) WHERE id=?",
-                        (kategorie, typ, konto_typ, korr_flag, existing_vzweck[0]["id"])
-                    )
+                        (kategorie, typ, konto_typ, korr_flag, existing_vzweck[0]["id"]))
                 else:
-                    # Neues vzweck_muster → neue Zeile einfügen
                     conn.execute(
                         "INSERT INTO buchungsregeln"
                         " (muster, vzweck_muster, kategorie, typ, konto_typ, treffer, ist_korrektur)"
                         " VALUES (?,?,?,?,?,1,?)",
-                        (muster, vzweck_key or None, kategorie, typ, konto_typ, korr_flag)
-                    )
+                        (muster, vzweck_key or None, kategorie, typ, konto_typ, korr_flag))
         conn.commit()
     finally:
         conn.close()
@@ -9777,7 +9870,7 @@ class KontoauszugPage(tk.Frame):
             gegenkonto = raw.split("||")[0] if "||" in raw else ""
             vzweck     = raw.split("||")[1] if "||" in raw else raw
             # Konfidenz immer frisch berechnen (Regeln können sich geändert haben)
-            kat_neu, _, _, konf = vorschlag_kategorie(raw, r.get("betrag"))
+            kat_neu, _, _, konf = vorschlag_kategorie(raw, r.get("betrag"), r.get("gegenkonto_iban", ""))
             vorschlag = r.get("kategorie_vorschlag") or kat_neu
             # Konfidenz-Tag für Farb-Ampel
             if not vorschlag:
@@ -9825,7 +9918,7 @@ class KontoauszugPage(tk.Frame):
         raw = row["buchungstext"] or ""
         gegenkonto = raw.split("||")[0].strip() if "||" in raw else ""
         vzweck     = raw.split("||")[1].strip() if "||" in raw else raw.strip()
-        kat_v, typ_v, kto_v, _ = vorschlag_kategorie(raw)
+        kat_v, typ_v, kto_v, _ = vorschlag_kategorie(raw, row.get("betrag"), row.get("gegenkonto_iban", ""))
         kat_v = row.get("kategorie_vorschlag") or kat_v
         kt = row.get("konto_typ") or kto_v or "Wohngeldkonto"
         # #101 – Belegnummer aus Verwendungszweck extrahieren
@@ -9873,7 +9966,8 @@ class KontoauszugPage(tk.Frame):
                 (v["kategorie"], zahlung_id, int(sel[0])))
             conn.commit()
             conn.close()
-            lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False)
+            lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False,
+                          gegenkonto_iban=row.get("gegenkonto_iban", ""))
             self._load_vorschlaege()
 
     def _direkt_buchen(self):
@@ -9913,7 +10007,7 @@ class KontoauszugPage(tk.Frame):
         beschr     = f"{gegenkonto} – {vzweck}".strip(" –") if gegenkonto else vzweck
 
         # Kategorie-Vorschlag + konto_typ aus Buchungsregel oder Kontoauszug-Feld
-        kat_v, typ_v, kto_v, _ = vorschlag_kategorie(raw)
+        kat_v, typ_v, kto_v, _ = vorschlag_kategorie(raw, row.get("betrag"), row.get("gegenkonto_iban", ""))
         kat_v = row.get("kategorie_vorschlag") or kat_v
         kt    = row.get("konto_typ") or kto_v or "Wohngeldkonto"
 
@@ -9958,7 +10052,8 @@ class KontoauszugPage(tk.Frame):
             conn.commit()
         finally:
             conn.close()
-        lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False)
+        lerne_buchung(raw, v["kategorie"], v["typ"], kt, ist_korrektur=False,
+                      gegenkonto_iban=row.get("gegenkonto_iban", ""))
         self._load()   # Haupttab neu laden
         messagebox.showinfo(
             "Direktbuchung gespeichert",
@@ -10006,7 +10101,7 @@ class KontoauszugPage(tk.Frame):
             row = dict(row_raw)
             raw = row["buchungstext"] or ""
             # Konfidenz berechnen — nur grüne (konf_hoch) Einträge übernehmen
-            kat_neu, _, _, konf = vorschlag_kategorie(raw, row.get("betrag"))
+            kat_neu, _, _, konf = vorschlag_kategorie(raw, row.get("betrag"), row.get("gegenkonto_iban", ""))
             kat = row.get("kategorie_vorschlag") or kat_neu
             if not use_selection and konf < schwelle:
                 skipped += 1
@@ -10029,12 +10124,12 @@ class KontoauszugPage(tk.Frame):
                 "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, "
                 "kategorie_vorschlag=?, zahlung_id=? WHERE id=?",
                 (kat, zahlung_id, row["id"]))
-            lern_queue.append((raw, kat, typ, kt))
+            lern_queue.append((raw, kat, typ, kt, row.get("gegenkonto_iban", "")))
             count += 1
         conn.commit()
         conn.close()
-        for _raw, _kat, _typ, _kt in lern_queue:
-            lerne_buchung(_raw, _kat, _typ, _kt)
+        for _raw, _kat, _typ, _kt, _gk in lern_queue:
+            lerne_buchung(_raw, _kat, _typ, _kt, gegenkonto_iban=_gk)
         if count:
             msg = f"{count} Buchung(en) aus {quelle} übernommen."
             if skipped:
@@ -10057,7 +10152,7 @@ class KontoauszugPage(tk.Frame):
         if not row_raw: return
         row = dict(row_raw)
         raw = row["buchungstext"] or ""
-        kat_v = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
+        kat_v = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw, row.get("betrag"), row.get("gegenkonto_iban", ""))[0]
         win = tk.Toplevel(self)
         win.title("Kategorie korrigieren")
         win.geometry("340x260")
@@ -10088,7 +10183,8 @@ class KontoauszugPage(tk.Frame):
                           (kat_var.get(), int(sel[0])))
             conn2.commit(); conn2.close()
             lerne_buchung(raw, kat_var.get(), typ_var.get(),
-                          row.get("konto_typ") or "Wohngeldkonto", ist_korrektur=True)
+                          row.get("konto_typ") or "Wohngeldkonto", ist_korrektur=True,
+                          gegenkonto_iban=row.get("gegenkonto_iban", ""))
             win.destroy()
         btn_row = tk.Frame(win, bg=BG_CARD)
         btn_row.pack(fill="x", padx=20, pady=(0,12))
@@ -10144,7 +10240,7 @@ class KontoauszugPage(tk.Frame):
         auftraggeber = raw.split("||")[0].strip() if "||" in raw else "–"
         vzweck       = raw.split("||")[1].strip() if "||" in raw else raw
 
-        kat_vorschlag, _, _, konf = vorschlag_kategorie(raw, r.get("betrag"))
+        kat_vorschlag, _, _, konf = vorschlag_kategorie(raw, r.get("betrag"), r.get("gegenkonto_iban", ""))
         kat_anzeige = r.get("kategorie_vorschlag") or kat_vorschlag or "–"
         konf_anzeige = f"{konf:.0%}" if konf > 0 else "–"
 
@@ -10232,7 +10328,7 @@ class KontoauszugPage(tk.Frame):
             _lbl(f"Gegenkonto IBAN:  {gk_iban}")
         _lbl(f"Zweck:  {vzweck[:200] or '–'}")
         _lbl(f"Betrag: {fmt_euro(r.get('betrag') or 0)}   Datum: {fmt_date(r.get('datum') or '')}")
-        kat_v = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0] or "–"
+        kat_v = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw, r.get("betrag"), r.get("gegenkonto_iban", ""))[0] or "–"
         _lbl(f"Vorschlag: {kat_v}")
         _lbl("Doppelklick für vollständige Details", bold=False)
 
@@ -10390,7 +10486,8 @@ class KontoauszugPage(tk.Frame):
                     if r_row:
                         lerne_buchung(r_row["buchungstext"] or "", kat, typ,
                                       r_row.get("konto_typ") or "Wohngeldkonto",
-                                      ist_korrektur=False)
+                                      ist_korrektur=False,
+                                      gegenkonto_iban=r_row.get("gegenkonto_iban", ""))
                     gespeichert += 1
                 ms = int((_time.time() - t0) * 1000)
                 ki_log("Kontoauszug", "KI-Kategorisierung",
@@ -10473,7 +10570,7 @@ class KontoauszugPage(tk.Frame):
                 auto_count = 0
                 dup_count = 0
                 imp_count = 0
-                datei_lern_queue = []  # (buchungstext, kat, typ, kt)
+                datei_lern_queue = []  # (buchungstext, kat, typ, kt, gk_iban)
                 for eintrag in buchungen:
                     # CAMT liefert 4-Tupel (datum, buchungstext, betrag, gegenkonto_iban)
                     if len(eintrag) == 4:
@@ -10490,7 +10587,7 @@ class KontoauszugPage(tk.Frame):
                         continue
 
                     # Kategorie-Vorschlag ermitteln
-                    kat, typ, kt, _ = vorschlag_kategorie(buchungstext)  # Konfidenz ignoriert
+                    kat, typ, kt, _ = vorschlag_kategorie(buchungstext, betrag, gk_iban or "")  # Konfidenz ignoriert
                     if not kt or kt in ("Girokonto", "Wohngeldkonto"):
                         kt = konto_typ
                     conn.execute(
@@ -10529,12 +10626,12 @@ class KontoauszugPage(tk.Frame):
                             conn.execute(
                                 "UPDATE kontoauszug SET als_buchung_uebernommen=1, zugeordnet=1, zahlung_id=? WHERE id=?",
                                 (zahlung_id, ka_id))
-                            datei_lern_queue.append((buchungstext, kat, typ, kt))
+                            datei_lern_queue.append((buchungstext, kat, typ, kt, gk_iban or ""))
                             auto_count += 1
                 conn.commit()
                 # lerne_buchung nach commit – verhindert "database is locked"
-                for _bt, _kat, _typ, _kt in datei_lern_queue:
-                    lerne_buchung(_bt, _kat, _typ, _kt)
+                for _bt, _kat, _typ, _kt, _gk in datei_lern_queue:
+                    lerne_buchung(_bt, _kat, _typ, _kt, gegenkonto_iban=_gk)
                 gesamt_buchungen += imp_count
                 gesamt_auto += auto_count
                 gesamt_duplikate += dup_count
@@ -13023,10 +13120,10 @@ class EinstellungenPage(tk.Frame):
         tk.Label(parent,
             text="Automatisch gelernte Zuordnungsregeln — können hier korrigiert oder gelöscht werden",
             bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", padx=20, pady=(6, 2))
-        cols_r = ("Auftraggeber / Empfänger", "Kategorie", "Typ", "Konto", "Treffer", "Korrektur")
+        cols_r = ("Auftraggeber / Empfänger", "Verwendungszweck-Muster", "Gegenkonto IBAN", "Kategorie", "Typ", "Konto", "Treffer", "Korr.")
         fr, self.tree_r = make_table(parent, cols_r, height=16)
         fr.pack(fill="both", expand=True, padx=20, pady=4)
-        for c, w in zip(cols_r, [220, 130, 90, 110, 70, 80]):
+        for c, w in zip(cols_r, [190, 150, 130, 120, 70, 100, 55, 45]):
             self.tree_r.heading(c, text=c); self.tree_r.column(c, width=w, anchor="w")
         _treeview_sort_setup(self.tree_r, cols_r)
         btn_r = tk.Frame(parent, bg=BG_CARD)
@@ -13042,9 +13139,15 @@ class EinstellungenPage(tk.Frame):
         conn = get_db()
         for r in conn.execute(
                 "SELECT * FROM buchungsregeln ORDER BY treffer DESC, muster"):
+            gk_iban = r["gegenkonto_iban_muster"] or ""
+            gk_kurz = f"···{gk_iban[-8:]}" if len(gk_iban) >= 8 else (gk_iban or "–")
             self.tree_r.insert("", "end", iid=r["id"], values=(
-                r["muster"], r["kategorie"] or "–",
-                r["typ"] or "–", r["konto_typ"] or "–",
+                r["muster"],
+                r["vzweck_muster"] or "–",
+                gk_kurz,
+                r["kategorie"] or "–",
+                r["typ"] or "–",
+                r["konto_typ"] or "–",
                 r["treffer"] or 0,
                 "✔" if r["ist_korrektur"] else ""))
         conn.close()
@@ -13056,39 +13159,73 @@ class EinstellungenPage(tk.Frame):
         row = conn.execute("SELECT * FROM buchungsregeln WHERE id=?", (int(sel[0]),)).fetchone()
         conn.close()
         if not row: return
+        r = dict(row)
         win = tk.Toplevel(self)
         win.title("Buchungsregel bearbeiten")
-        win.geometry("400x320")
+        win.geometry("460x500")
         win.configure(bg=BG_CARD)
         win.grab_set()
-        win.resizable(False, False)
+        win.resizable(True, True)
         hdr = tk.Frame(win, bg=BG_SIDEBAR, height=44)
         hdr.pack(fill="x"); hdr.pack_propagate(False)
         tk.Label(hdr, text="Buchungsregel bearbeiten", bg=BG_SIDEBAR, fg=TEXT_WHITE,
                  font=FONT_H3).pack(side="left", padx=14, pady=10)
         body = tk.Frame(win, bg=BG_CARD)
         body.pack(fill="both", expand=True, padx=20, pady=12)
-        tk.Label(body, text="Muster (Suchtext)", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w")
-        muster_var = tk.StringVar(value=row["muster"])
+
+        def _field(label, hint=""):
+            tk.Label(body, text=label, bg=BG_CARD, fg=TEXT_LIGHT,
+                     font=FONT_SMALL).pack(anchor="w", pady=(8, 0))
+            if hint:
+                tk.Label(body, text=hint, bg=BG_CARD, fg=TEXT_LIGHT,
+                         font=("Segoe UI", 8)).pack(anchor="w")
+
+        _field("Auftraggeber / Empfänger — Muster *",
+               "Wird im gesamten Buchungstext gesucht (Groß-/Kleinschreibung egal)")
+        muster_var = tk.StringVar(value=r["muster"])
         make_entry(body, textvariable=muster_var).pack(fill="x", ipady=6)
-        tk.Label(body, text="Kategorie", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        kat_var = tk.StringVar(value=row["kategorie"] or "")
+
+        _field("Verwendungszweck-Muster (optional)",
+               "Zusätzlicher Suchtext im Verwendungszweck — für Disambiguierung bei gleichem Auftraggeber")
+        vzweck_var = tk.StringVar(value=r.get("vzweck_muster") or "")
+        make_entry(body, textvariable=vzweck_var).pack(fill="x", ipady=6)
+
+        _field("Gegenkonto-IBAN (optional)",
+               "IBAN des Zahlungsempfängers / Auftraggebers — höchste Priorität bei Mehrfachtreffern")
+        iban_var = tk.StringVar(value=r.get("gegenkonto_iban_muster") or "")
+        make_entry(body, textvariable=iban_var).pack(fill="x", ipady=6)
+
+        _field("Kategorie")
+        kat_var = tk.StringVar(value=r["kategorie"] or "")
         ttk.Combobox(body, textvariable=kat_var, values=BuchhaltungPage.aktive_kategorien(),
                      state="readonly", font=FONT_BODY).pack(fill="x", ipady=4)
-        tk.Label(body, text="Typ", bg=BG_CARD, fg=TEXT_LIGHT, font=FONT_SMALL).pack(anchor="w", pady=(8,0))
-        typ_var = tk.StringVar(value=row["typ"] or "Einnahme")
-        ttk.Combobox(body, textvariable=typ_var, values=["Einnahme","Ausgabe"],
+
+        _field("Typ")
+        typ_var = tk.StringVar(value=r["typ"] or "Einnahme")
+        ttk.Combobox(body, textvariable=typ_var, values=["Einnahme", "Ausgabe"],
                      state="readonly", font=FONT_BODY).pack(fill="x", ipady=4)
+
         def _save():
+            muster = muster_var.get().strip()
+            if not muster:
+                messagebox.showwarning("Pflichtfeld", "Muster darf nicht leer sein.", parent=win)
+                return
+            iban_val = iban_var.get().strip().replace(" ", "") or None
+            vzweck_val = vzweck_var.get().strip() or None
             conn2 = get_db()
             conn2.execute(
-                "UPDATE buchungsregeln SET muster=?,kategorie=?,typ=?,ist_korrektur=1 WHERE id=?",
-                (muster_var.get(), kat_var.get(), typ_var.get(), int(sel[0])))
+                "UPDATE buchungsregeln "
+                "SET muster=?, vzweck_muster=?, gegenkonto_iban_muster=?, "
+                "    kategorie=?, typ=?, ist_korrektur=1 "
+                "WHERE id=?",
+                (muster, vzweck_val, iban_val,
+                 kat_var.get(), typ_var.get(), int(sel[0])))
             conn2.commit(); conn2.close()
             win.destroy(); self._load_regeln()
+
         btn_row = tk.Frame(win, bg=BG_CARD)
-        btn_row.pack(fill="x", padx=20, pady=(0,12))
-        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6,0))
+        btn_row.pack(fill="x", padx=20, pady=(0, 12))
+        make_btn(btn_row, "Abbrechen", win.destroy, color=BG_INPUT, fg=TEXT).pack(side="right", padx=(6, 0))
         make_btn(btn_row, "Speichern", _save, color=ACCENT2).pack(side="right")
 
     def _select_all_regeln(self):
