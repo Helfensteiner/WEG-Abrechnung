@@ -7,6 +7,15 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.39.6] — 2026-05-03
+
+### Added
+- **Umlageschlüssel „Nach Eigentümern"**: Gleichmäßige Verteilung auf jeden Eigentümer unabhängig von der Anzahl seiner Wohnungen. Besitzt ein Eigentümer mehrere Einheiten, wird sein Anteil (1/N) proportional auf seine Wohnungen aufgeteilt. Typisch für Schornsteinfeger, Versicherungspauschalen.
+- **Umlageschlüssel „Nach genutzten Wohneinheiten"**: Nur tatsächlich vermietete/genutzte Einheiten im Abrechnungszeitraum werden berücksichtigt — Leerstand zahlt keinen Anteil. Typisch für Müllabfuhr, Hausmeister.
+- **Tooltips** für alle Standard-Umlageschlüssel (erscheinen beim Hover im Kostenart-Dialog).
+
+---
+
 ## [0.39.5] — 2026-05-02
 
 ### Fixed

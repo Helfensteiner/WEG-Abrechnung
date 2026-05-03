@@ -369,7 +369,10 @@ from pathlib import Path
 #             gelbem Hinweis-Label; _on_typ_change für alle 3 Spezialtypen erweitert.
 # 0.39.5    — Bugfix _edit_kostenart: Umbenennung Built-in-Kategorie persistiert jetzt
 #             nach Neustart korrekt (deaktivierte_kategorien-Logik war vertauscht).
-APP_VERSION = "0.39.5"
+# 0.39.6    — Neue Umlageschlüssel: "Nach Eigentümern" (gleiche Anteile je Eigentümer,
+#             bei mehreren Wohnungen aufgeteilt) und "Nach genutzten Wohneinheiten"
+#             (Leerstand zahlt 0, Rest gleichmäßig); Tooltips für alle Basis-Schlüssel.
+APP_VERSION = "0.39.6"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -8205,7 +8208,8 @@ class NebenkostenPage(tk.Frame):
                                alle_wohnungen: list) -> float:
         """Berechnet den Umlageanteil (0.0–1.0) einer Wohnung nach dem angegebenen Schlüssel.
 
-        Unterstützte Schlüssel: Wohnflaeche, MEA, Kopfanzahl, Verbrauch, HeizKV
+        Unterstützte Schlüssel: Wohnflaeche, MEA, Kopfanzahl, Verbrauch, HeizKV,
+                                Nach Eigentuemern, Nach genutzten Wohneinheiten
         """
         conn = get_db()
         try:
@@ -8252,6 +8256,42 @@ class NebenkostenPage(tk.Frame):
                 v_anteil = self._berechne_umlageanteil(wohnung_id, "Verbrauch", jahr, alle_wohnungen)
                 f_anteil = self._berechne_umlageanteil(wohnung_id, "Wohnflaeche", jahr, alle_wohnungen)
                 return 0.70 * v_anteil + 0.30 * f_anteil
+
+            elif schluessel == "Nach Eigentümern":
+                # Gleichmäßige Verteilung auf jeden Eigentümer (unabhängig von Wohnungsanzahl).
+                # Hat ein Eigentümer K Wohnungen, trägt jede Wohnung den Bruchteil (1/N)/K bei.
+                e_id = w["eigentuemer_id"]
+                if not e_id:
+                    # Wohnung ohne Eigentümer: gleichmäßig auf alle Wohnungen
+                    n = len(alle_wohnungen) or 1
+                    return 1.0 / n
+                e_ids_gesamt = [wh.get("eigentuemer_id") for wh in alle_wohnungen
+                                if wh.get("eigentuemer_id")]
+                n_eigentuemer = len(set(e_ids_gesamt)) or 1
+                k_wohnungen = sum(1 for wh in alle_wohnungen
+                                  if wh.get("eigentuemer_id") == e_id) or 1
+                return (1.0 / n_eigentuemer) / k_wohnungen
+
+            elif schluessel == "Nach genutzten Wohneinheiten":
+                # Nur tatsächlich vermietete/genutzte Wohneinheiten im Abrechnungszeitraum.
+                # Eine Einheit gilt als genutzt, wenn ein Mieter mit einzug <= 31.12.jahr
+                # und auszug IS NULL oder auszug >= 01.01.jahr vorhanden ist.
+                wh_ids = [wh["id"] for wh in alle_wohnungen if wh.get("id")]
+                if not wh_ids:
+                    return 0.0
+                ph = ",".join("?" * len(wh_ids))
+                belegte = conn.execute(
+                    f"SELECT DISTINCT wohnung_id FROM mieter "
+                    f"WHERE wohnung_id IN ({ph}) "
+                    f"AND (einzug IS NULL OR einzug <= ?) "
+                    f"AND (auszug IS NULL OR auszug >= ?)",
+                    wh_ids + [f"{jahr}-12-31", f"{jahr}-01-01"]
+                ).fetchall()
+                belegte_ids = {r["wohnung_id"] for r in belegte}
+                if w["id"] not in belegte_ids:
+                    return 0.0   # Leerstand zahlt keinen Anteil
+                n = len(belegte_ids) or 1
+                return 1.0 / n
 
             else:
                 # Fallback: Wohnfläche
@@ -13101,7 +13141,9 @@ class EinstellungenPage(tk.Frame):
     def _umlageschluessel_aus_aufteilungen() -> tuple:
         """Lädt Umlageschlüssel aus aufteilungen-Tabelle (#GH79)."""
         basis_typen = ["MEA", "Wohnfläche", "Verbrauch", "Verbrauch/Wohnfläche",
-                       "HeizKV", "Kopfanzahl", "Wasserkosten nach Punkten", "–"]
+                       "HeizKV", "Kopfanzahl", "Nach Eigentümern",
+                       "Nach genutzten Wohneinheiten",
+                       "Wasserkosten nach Punkten", "–"]
         try:
             conn = get_db()
             try:
@@ -13126,11 +13168,27 @@ class EinstellungenPage(tk.Frame):
                 tooltips[name] = tip
                 if name not in namen:
                     namen.append(name)
+            _basis_tooltips = {
+                "MEA":                          "Miteigentumsanteil (Tausendstel, §16 WEG)",
+                "Wohnfläche":                   "Anteil nach Wohnfläche in m²",
+                "Verbrauch":                    "Anteil nach Zählerverbrauch (Zählerstand Ende – Anfang)",
+                "Verbrauch/Wohnfläche":         "Kombination aus Verbrauch und Wohnfläche",
+                "HeizKV":                       "§7 HeizKV: 70 % Verbrauch + 30 % Wohnfläche",
+                "Kopfanzahl":                   "Anteil nach Personenanzahl (Bewohner)",
+                "Nach Eigentümern":             "Gleiche Anteile je Eigentümer — unabhängig von\n"
+                                                "der Anzahl der Wohneinheiten (z. B. Schornsteinfeger,\n"
+                                                "Versicherungspauschalen)",
+                "Nach genutzten Wohneinheiten": "Nur tatsächlich vermietete/genutzte Einheiten\n"
+                                                "im Abrechnungszeitraum — Leerstand zahlt keinen\n"
+                                                "Anteil (z. B. Müllabfuhr, Hausmeister)",
+                "Wasserkosten nach Punkten":    "Berechnung über Wasserpunktetabelle (Ista-Auswertung)",
+                "–":                       "Kein Umlageschlüssel / manuell festgelegt",
+            }
             for t in basis_typen:
                 if t not in typ_zu_name:
                     name_zu_typ[t] = t
                     typ_zu_name[t] = t
-                    tooltips[t] = f"Standard-Schlüssel: {t}"
+                    tooltips[t] = _basis_tooltips.get(t, f"Standard-Schlüssel: {t}")
                     if t not in namen:
                         namen.append(t)
             return namen or basis_typen, name_zu_typ, typ_zu_name, tooltips
