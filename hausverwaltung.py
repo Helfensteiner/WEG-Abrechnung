@@ -386,7 +386,11 @@ from pathlib import Path
 #             verschiedene IBANs/Kategorien hat; _edit_regel-Dialog mit Hinweisfeldern;
 #             alle Aufrufe von vorschlag_kategorie/lerne_buchung übergeben
 #             gegenkonto_iban aus dem kontoauszug-Datensatz.
-APP_VERSION = "0.40.0"
+# 0.40.1    — Bugfix Wasserkosten „Aus Stammdaten": Eigentuemer zeigt jetzt Vor- und
+#             Nachname (statt nur Nachname); Existing-Check für von_datum robuster
+#             (NULL-Zeilen werden korrekt gefunden+aktualisiert statt Duplikat-INSERT);
+#             von_datum wird beim UPDATE mitgeschrieben.
+APP_VERSION = "0.40.1"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -11342,7 +11346,8 @@ class WasserkostenPage(tk.Frame):
         conn = get_db()
         try:
             wohnungen_db = conn.execute(
-                "SELECT w.id, w.bezeichnung, COALESCE(e.name,'') AS eig "
+                "SELECT w.id, w.bezeichnung, "
+                "  TRIM(COALESCE(e.vorname,'') || ' ' || COALESCE(e.name,'')) AS eig "
                 "FROM wohnungen w "
                 "LEFT JOIN eigentuemer e ON w.eigentuemer_id=e.id "
                 "WHERE w.aktiv=1 ORDER BY w.bezeichnung"
@@ -11386,9 +11391,11 @@ class WasserkostenPage(tk.Frame):
                         except (ValueError, TypeError):
                             bis_d = j_bis
                         # Eindeutigkeitsschlüssel: (jahr, bez, von_datum)
+                        # Auch NULL-von_datum-Zeilen abgleichen (robuster gegen alte Daten)
                         existing = conn.execute(
                             "SELECT id FROM wasserkosten_wohnungsdaten "
-                            "WHERE jahr=? AND wohnung_bezeichnung=? AND von_datum=?",
+                            "WHERE jahr=? AND wohnung_bezeichnung=? "
+                            "AND (von_datum=? OR (von_datum IS NULL AND bis_datum IS NULL))",
                             (jahr, w["bezeichnung"], von_d.isoformat())
                         ).fetchone()
                         if existing:
@@ -11396,9 +11403,10 @@ class WasserkostenPage(tk.Frame):
                                 "UPDATE wasserkosten_wohnungsdaten SET "
                                 "eigentuemer=?, personen=?, spuelmaschinen=?, "
                                 "waschmaschinen=?, trockner_wasserkuehlung=?, "
-                                "bis_datum=?, monate=?, bemerkung=? WHERE id=?",
+                                "von_datum=?, bis_datum=?, monate=?, bemerkung=? WHERE id=?",
                                 (w["eig"], m["personen"], m["spuel"], m["wasch"], m["trockner"],
-                                 bis_d.isoformat(), monate, mname, existing["id"]))
+                                 von_d.isoformat(), bis_d.isoformat(), monate, mname,
+                                 existing["id"]))
                             updated += 1
                         else:
                             conn.execute(

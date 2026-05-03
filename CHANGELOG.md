@@ -7,6 +7,14 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.40.1] — 2026-05-03
+
+### Fixed
+- **Wasserkosten „Aus Stammdaten" — Eigentuemer-Anzeige**: Der Eigentuemer-Name zeigte bisher nur den Nachnamen (z. B. „Rapp"). Jetzt wird Vor- und Nachname angezeigt (z. B. „Diana Rapp").
+- **Wasserkosten „Aus Stammdaten" — Robusterer Update-Pfad**: Der Eindeutigkeitscheck für existierende Zeilen berücksichtigt jetzt auch Zeilen mit `von_datum IS NULL` (alte Datensätze ohne Datumsfeld). Diese werden korrekt aktualisiert statt eine zusätzliche Duplikat-Zeile einzufügen. Das `von_datum` wird beim Update ebenfalls korrekt gesetzt.
+
+---
+
 ## [0.40.0] — 2026-05-03
 
 ### Added
