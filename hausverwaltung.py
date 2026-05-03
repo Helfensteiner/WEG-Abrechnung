@@ -374,7 +374,9 @@ from pathlib import Path
 #             (Leerstand zahlt 0, Rest gleichmäßig); Tooltips für alle Basis-Schlüssel.
 # 0.39.7    — Bugfix BuchhaltungPage Kategorie-Filter: zeigt jetzt alle aktiven
 #             Kategorien aus Einstellungen, nicht nur Kategorien mit Buchungen.
-APP_VERSION = "0.39.7"
+# 0.39.8    — Bugfix "Alle grünen übernehmen": filtert jetzt korrekt nach
+#             Konfidenz >= matching_schwelle_auto (statt alle Einträge zu nehmen).
+APP_VERSION = "0.39.8"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -9954,10 +9956,14 @@ class KontoauszugPage(tk.Frame):
             parent=self)
 
     def _batch_uebernehmen(self):
-        """Grün markierte Vorschläge automatisch übernehmen."""
+        """Grün markierte Vorschläge (Konfidenz ≥ Schwellwert) automatisch übernehmen."""
         if not hat_recht("Buchhaltung", "schreiben"):
             messagebox.showwarning("Berechtigung", "Keine Schreibberechtigung.", parent=self)
             return
+        # Schwellwert aus Einstellungen (als Dezimalzahl, z. B. 80 → 0.80)
+        cfg = load_config()
+        schwelle = float(cfg.get("matching_schwelle_auto", 80)) / 100.0
+
         selected_ids = [int(iid) for iid in self.tree_v.selection()]
         use_selection = bool(selected_ids)
         selected_iban = self._vs_iban_map.get(self._vs_konto_var.get())
@@ -9981,14 +9987,19 @@ class KontoauszugPage(tk.Frame):
                 params.append(selected_iban)
             q += "ORDER BY datum"
             rows = conn.execute(q, params).fetchall()
-            quelle = "alle grünen Einträge"
+            quelle = f"grüne Einträge (Konfidenz ≥ {schwelle:.0%})"
         count = 0
         skipped = 0
         lern_queue = []
         for row_raw in rows:
             row = dict(row_raw)
             raw = row["buchungstext"] or ""
-            kat = row.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0]
+            # Konfidenz berechnen — nur grüne (konf_hoch) Einträge übernehmen
+            kat_neu, _, _, konf = vorschlag_kategorie(raw, row.get("betrag"))
+            kat = row.get("kategorie_vorschlag") or kat_neu
+            if not use_selection and konf < schwelle:
+                skipped += 1
+                continue
             if not kat:
                 skipped += 1
                 continue

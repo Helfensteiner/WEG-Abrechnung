@@ -7,6 +7,13 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.39.8] — 2026-05-03
+
+### Fixed
+- **„Alle grünen übernehmen"**: Der Button hat bisher alle nicht-übernommenen Einträge genommen, unabhängig von der Konfidenz. Jetzt wird für jeden Eintrag die Konfidenz neu berechnet und nur Einträge mit `konfidenz ≥ matching_schwelle_auto` (Standard: 80 %) übernommen — identisch mit der grünen Ampelfarbe im Tree.
+
+---
+
 ## [0.39.7] — 2026-05-03
 
 ### Fixed
