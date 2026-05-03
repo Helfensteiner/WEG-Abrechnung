@@ -372,7 +372,9 @@ from pathlib import Path
 # 0.39.6    — Neue Umlageschlüssel: "Nach Eigentümern" (gleiche Anteile je Eigentümer,
 #             bei mehreren Wohnungen aufgeteilt) und "Nach genutzten Wohneinheiten"
 #             (Leerstand zahlt 0, Rest gleichmäßig); Tooltips für alle Basis-Schlüssel.
-APP_VERSION = "0.39.6"
+# 0.39.7    — Bugfix BuchhaltungPage Kategorie-Filter: zeigt jetzt alle aktiven
+#             Kategorien aus Einstellungen, nicht nur Kategorien mit Buchungen.
+APP_VERSION = "0.39.7"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -3746,9 +3748,13 @@ class BuchhaltungPage(tk.Frame):
     # ── Buchungen ──────────────────────────────────────────────────────────────
 
     def _refresh_filter_combos(self):
-        """Kategorie- und Jahr-Dropdowns mit aktuellen DB-Werten befüllen."""
+        """Kategorie- und Jahr-Dropdowns befüllen.
+
+        Kategorien: alle aktiven Einträge aus KATEGORIEN (Einstellungen) PLUS
+        eventuelle DB-Kategorien die nicht in der Liste stehen (Altdaten).
+        """
         conn = get_db()
-        kat_rows  = conn.execute(
+        db_kat_rows = conn.execute(
             "SELECT DISTINCT kategorie FROM zahlungen "
             "WHERE kategorie IS NOT NULL AND kategorie != '' ORDER BY kategorie"
         ).fetchall()
@@ -3757,7 +3763,15 @@ class BuchhaltungPage(tk.Frame):
             "WHERE datum IS NOT NULL ORDER BY j DESC"
         ).fetchall()
         conn.close()
-        kats  = ["Alle"] + [r["kategorie"] for r in kat_rows]
+        # Alle aktiven Kategorien aus den Einstellungen
+        deaktiviert = BuchhaltungPage._deaktivierte_kategorien()
+        aktive_kats = [k for k in BuchhaltungPage.KATEGORIEN if k not in deaktiviert]
+        # DB-Kategorien hinzufügen, die nicht in der konfigurierten Liste stehen
+        for r in db_kat_rows:
+            k = r["kategorie"]
+            if k and k not in aktive_kats:
+                aktive_kats.append(k)
+        kats  = ["Alle"] + sorted(aktive_kats)
         jahre = ["Alle"] + [r["j"] for r in jahr_rows]
         cur_kat  = self._kat_filter_var.get()
         cur_jahr = self._jahr_filter_var.get()

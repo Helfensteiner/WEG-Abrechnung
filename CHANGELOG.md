@@ -7,6 +7,13 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.39.7] — 2026-05-03
+
+### Fixed
+- **Buchhaltung Kategorie-Filter**: Das Dropdown zeigte bisher nur Kategorien mit vorhandenen Buchungen (`DISTINCT kategorie FROM zahlungen`). Jetzt werden alle aktiven Kategorien aus den Einstellungen angezeigt, ergänzt um eventuelle DB-Kategorien die nicht in der konfigurierten Liste stehen (Altdaten).
+
+---
+
 ## [0.39.6] — 2026-05-03
 
 ### Added
