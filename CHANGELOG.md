@@ -7,6 +7,18 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/) — Major
 
 ---
 
+## [0.39.9] — 2026-05-03
+
+### Added
+- **Gegenkonto-IBAN** (IBAN des Zahlungsempfängers bei Ausgaben / des Auftraggebers bei Einnahmen):
+  - CAMT.052 XML-Import liest jetzt `DbtrAcct/Id/IBAN` (Gutschrift) bzw. `CdtrAcct/Id/IBAN` (Lastschrift) und speichert sie in der neuen DB-Spalte `gegenkonto_iban`
+  - Spalte „Gegenkonto IBAN" in der **Kontoauszug**-Tabelle (gekürzt `···XXXXXXXX`)
+  - Spalte „Gegenkonto IBAN" in der **Vorschläge**-Tabelle
+  - Tooltip (MouseOver im Vorschläge-Tab): zeigt volle Gegenkonto-IBAN
+  - Detail-Dialog (Doppelklick): zeigt volle Gegenkonto-IBAN; eigenes Konto umbenannt zu „Eigenes Konto IBAN"
+
+---
+
 ## [0.39.8] — 2026-05-03
 
 ### Fixed

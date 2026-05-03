@@ -376,7 +376,10 @@ from pathlib import Path
 #             Kategorien aus Einstellungen, nicht nur Kategorien mit Buchungen.
 # 0.39.8    — Bugfix "Alle grünen übernehmen": filtert jetzt korrekt nach
 #             Konfidenz >= matching_schwelle_auto (statt alle Einträge zu nehmen).
-APP_VERSION = "0.39.8"
+# 0.39.9    — Gegenkonto-IBAN (Zahlungsempfänger/Auftraggeber) in CAMT-Import
+#             gespeichert; in Kontoauszug- und Vorschläge-Tabelle als eigene Spalte
+#             "Gegenkonto IBAN" angezeigt; auch in Tooltip und Detail-Dialog sichtbar.
+APP_VERSION = "0.39.9"
 APP_NAME    = "Hausverwaltung"
 APP_AUTHOR  = "WEG Welte Rapp Bilgery"
 #   0.22.0 — Issues #58–#63:
@@ -1242,6 +1245,8 @@ CREATE TABLE IF NOT EXISTS nk_vorauszahlung_zeitraeume (
         "ALTER TABLE wohnungen ADD COLUMN hausgeld_monatlich REAL DEFAULT 0",
         # v0.39.2 – Mehrfach-Kategorien pro Auftraggeber: Verwendungszweck-Muster zur Disambiguierung
         "ALTER TABLE buchungsregeln ADD COLUMN vzweck_muster TEXT",
+        # v0.39.9 – IBAN des Zahlungsempfängers / Auftraggebers (Gegenkonto)
+        "ALTER TABLE kontoauszug ADD COLUMN gegenkonto_iban TEXT",
         # v0.39.0 – Eigentümer-Zeiträume (Eigentümerwechsel pro Wohnung)
         """CREATE TABLE IF NOT EXISTS eigentuemer_zeitraeume (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -9464,10 +9469,10 @@ class KontoauszugPage(tk.Frame):
         self._saldo_frame.pack(fill="x", padx=20, pady=(4, 0))
 
         # Buchungstabelle
-        cols = ("Datum", "Auftraggeber / Empfänger", "Verwendungszweck", "Betrag", "✔")
+        cols = ("Datum", "Auftraggeber / Empfänger", "Verwendungszweck", "Betrag", "Gegenkonto IBAN", "✔")
         f, self.tree = make_table(self._view_kontoauszug, cols, height=12)
         f.pack(fill="both", expand=True, padx=20, pady=6)
-        for col, w in zip(cols, [90, 200, 310, 110, 36]):
+        for col, w in zip(cols, [90, 190, 270, 100, 160, 36]):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w,
                              anchor="e" if col == "Betrag" else "w")
@@ -9508,10 +9513,10 @@ class KontoauszugPage(tk.Frame):
         self._vs_konto_combo.pack(side="left", padx=(4, 0))
         self._vs_konto_combo.bind("<<ComboboxSelected>>", lambda e: self._load_vorschlaege())
 
-        cols_v = ("Datum", "Auftraggeber", "Verwendungszweck", "Betrag", "Konto", "Vorschlag Kat.", "Konfidenz")
+        cols_v = ("Datum", "Auftraggeber", "Verwendungszweck", "Betrag", "Konto", "Gegenkonto IBAN", "Vorschlag Kat.", "Konfidenz")
         fv, self.tree_v = make_table(self._view_vorschlaege, cols_v, height=12)
         fv.pack(fill="both", expand=True, padx=20, pady=4)
-        for c, w in zip(cols_v, [88, 180, 230, 100, 90, 130, 80]):
+        for c, w in zip(cols_v, [88, 160, 200, 90, 90, 140, 120, 80]):
             self.tree_v.heading(c, text=c); self.tree_v.column(c, width=w, anchor="w")
         _treeview_sort_setup(self.tree_v, cols_v)
         self.tree_v.tag_configure("konf_hoch",   foreground=SUCCESS)
@@ -9596,11 +9601,14 @@ class KontoauszugPage(tk.Frame):
                 gegenkonto, vzweck = raw.split("||", 1)
             else:
                 gegenkonto, vzweck = "", raw
+            gk_iban = rd.get("gegenkonto_iban") or ""
+            gk_iban_kurz = f"···{gk_iban[-8:]}" if len(gk_iban) >= 8 else gk_iban
             self.tree.insert("", "end", iid=rd["id"], values=(
                 fmt_date(rd["datum"]),
                 gegenkonto or "–",
                 vzweck or "–",
                 fmt_euro(betrag),
+                gk_iban_kurz or "–",
                 "✔" if rd["zugeordnet"] else ""),
                 tags=tuple(tags_list))
         tree_empty_hint(self.tree)
@@ -9785,12 +9793,15 @@ class KontoauszugPage(tk.Frame):
                 konf_tag = "konf_niedrig"
                 konf_txt = f"▼ {konf:.0%}" if konf > 0 else "? unklar"
             iban_kurz = f"···{r['iban'][-8:]}" if r.get("iban") else r.get("konto_typ") or "–"
+            gk_iban = r.get("gegenkonto_iban") or ""
+            gk_iban_kurz = f"···{gk_iban[-8:]}" if len(gk_iban) >= 8 else (gk_iban or "–")
             self.tree_v.insert("", "end", iid=r["id"], values=(
                 fmt_date(r["datum"]),
                 gegenkonto or "–",
                 vzweck or "–",
                 fmt_euro(r["betrag"] or 0),
                 iban_kurz,
+                gk_iban_kurz,
                 vorschlag or "–",
                 konf_txt),
                 tags=(konf_tag,))
@@ -10140,10 +10151,11 @@ class KontoauszugPage(tk.Frame):
         felder = [
             ("Datum",               fmt_date(r.get("datum") or "")),
             ("Auftraggeber",        auftraggeber),
+            ("Gegenkonto IBAN",     r.get("gegenkonto_iban") or "–"),
             ("Verwendungszweck",    vzweck),
             ("Betrag",              fmt_euro(r.get("betrag") or 0)),
             ("Kontoauszug-Saldo",   fmt_euro(r.get("saldo") or 0) if r.get("saldo") else "–"),
-            ("Konto / IBAN",        r.get("iban") or r.get("konto_typ") or "–"),
+            ("Eigenes Konto IBAN",  r.get("iban") or r.get("konto_typ") or "–"),
             ("Kategorie-Vorschlag", kat_anzeige),
             ("Konfidenz",           konf_anzeige),
             ("Status Übernahme",    "✔ übernommen" if r.get("als_buchung_uebernommen") else "○ offen"),
@@ -10215,6 +10227,9 @@ class KontoauszugPage(tk.Frame):
                      font=f, justify="left", anchor="w", wraplength=380).pack(anchor="w")
 
         _lbl(f"Auftraggeber:  {auftr or '–'}", bold=True)
+        gk_iban = r.get("gegenkonto_iban") or ""
+        if gk_iban:
+            _lbl(f"Gegenkonto IBAN:  {gk_iban}")
         _lbl(f"Zweck:  {vzweck[:200] or '–'}")
         _lbl(f"Betrag: {fmt_euro(r.get('betrag') or 0)}   Datum: {fmt_date(r.get('datum') or '')}")
         kat_v = r.get("kategorie_vorschlag") or vorschlag_kategorie(raw)[0] or "–"
@@ -10459,7 +10474,13 @@ class KontoauszugPage(tk.Frame):
                 dup_count = 0
                 imp_count = 0
                 datei_lern_queue = []  # (buchungstext, kat, typ, kt)
-                for datum, buchungstext, betrag in buchungen:
+                for eintrag in buchungen:
+                    # CAMT liefert 4-Tupel (datum, buchungstext, betrag, gegenkonto_iban)
+                    if len(eintrag) == 4:
+                        datum, buchungstext, betrag, gk_iban = eintrag
+                    else:
+                        datum, buchungstext, betrag = eintrag
+                        gk_iban = None
                     # Dublettenprüfung: gleiche Buchung bereits vorhanden?
                     existing = conn.execute(
                         "SELECT COUNT(*) FROM kontoauszug WHERE datum=? AND buchungstext=? AND betrag=? AND iban=?",
@@ -10473,9 +10494,9 @@ class KontoauszugPage(tk.Frame):
                     if not kt or kt in ("Girokonto", "Wohngeldkonto"):
                         kt = konto_typ
                     conn.execute(
-                        "INSERT INTO kontoauszug (datum, buchungstext, betrag, iban, konto_typ, kategorie_vorschlag) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (datum, buchungstext, betrag, iban, konto_typ, kat or None))
+                        "INSERT INTO kontoauszug (datum, buchungstext, betrag, iban, konto_typ, kategorie_vorschlag, gegenkonto_iban) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (datum, buchungstext, betrag, iban, konto_typ, kat or None, gk_iban))
                     ka_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     imp_count += 1
                     # Auto-Transfer: wenn Kategorie erkannt, direkt als Buchung übernehmen
@@ -10598,16 +10619,21 @@ class KontoauszugPage(tk.Frame):
 
             # Transaktionsdetails (Name der Gegenseite + Verwendungszweck)
             tx = ntry.find("ns:NtryDtls/ns:TxDtls", NS)
-            gegenkonto     = ""
+            gegenkonto       = ""
+            gegenkonto_iban  = ""
             verwendungszweck = ""
             if tx is not None:
                 # Gutschrift → Auftraggeber ist Debtor; Lastschrift → Empfänger ist Creditor
                 if cdi == "CRDT":
                     gegenkonto = tx.findtext(
                         "ns:RltdPties/ns:Dbtr/ns:Pty/ns:Nm", "", NS)
+                    gegenkonto_iban = tx.findtext(
+                        "ns:RltdPties/ns:DbtrAcct/ns:Id/ns:IBAN", "", NS)
                 else:
                     gegenkonto = tx.findtext(
                         "ns:RltdPties/ns:Cdtr/ns:Pty/ns:Nm", "", NS)
+                    gegenkonto_iban = tx.findtext(
+                        "ns:RltdPties/ns:CdtrAcct/ns:Id/ns:IBAN", "", NS)
                 verwendungszweck = tx.findtext("ns:RmtInf/ns:Ustrd", "", NS)
 
             # Buchungsart (z. B. "GUTSCHRIFT ÜBERWEISUNG DAUERAUFTRAG")
@@ -10618,7 +10644,7 @@ class KontoauszugPage(tk.Frame):
 
             # Speicherformat: "Gegenkonto||Verwendungszweck"
             buchungstext = f"{gegenkonto}||{vzweck_voll}"
-            buchungen.append((datum, buchungstext, betrag))
+            buchungen.append((datum, buchungstext, betrag, gegenkonto_iban or None))
 
         return buchungen, iban, bank, saldo_schluss, saldo_datum
 
